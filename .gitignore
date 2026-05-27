@@ -1,0 +1,48 @@
+# Runtime files
+meetings/
+*.flac
+*.wav
+*.txt
+!docs/*.md
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.app-venv/
+*.egg-info/
+dist/
+build/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Logs
+*.log
+.daemon.log
+.daemon.err
+.transcribe.log
+
+# State files
+.daemon_state.json
+.daemon.pid
+.transcribe_queue.json
+.meetcapture.json
+
+# Whisper models (large, download separately)
+*.bin
+*.pt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Venv (users create their own)
+.venv/
+venv/
