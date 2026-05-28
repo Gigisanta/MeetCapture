@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.maatwork.meetcapture.daemon</string>
+
+    <!-- Path relative to app bundle root -->
+    <key>BundleProgram</key>
+    <string>Contents/Resources/meet-daemon</string>
+
+    <!-- Run at login -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart on crash, not on clean exit -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <!-- Prevent crash-loop restarts -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <!-- Background priority — don't starve UI apps -->
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>LowPriorityIO</key>
+    <true/>
+    <key>Nice</key>
+    <integer>10</integer>
+
+    <!-- Environment -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>LANG</key>
+        <string>en_US.UTF-8</string>
+    </dict>
+
+    <!-- Logging -->
+    <key>StandardOutPath</key>
+    <string>/tmp/meetcapture-daemon.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/meetcapture-daemon-err.log</string>
+</dict>
+</plist>

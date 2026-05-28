@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- App identity -->
+    <key>CFBundleIdentifier</key>
+    <string>com.maatwork.meetcapture</string>
+    <key>CFBundleName</key>
+    <string>MeetCapture</string>
+    <key>CFBundleDisplayName</key>
+    <string>MeetCapture</string>
+    <key>CFBundleVersion</key>
+    <string>4.0.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>4.0.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleExecutable</key>
+    <string>MeetCapture</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.productivity</string>
+
+    <!-- Menu bar only app — no Dock icon -->
+    <key>LSUIElement</key>
+    <true/>
+
+    <!-- Background modes -->
+    <key>NSSupportsAutomaticTermination</key>
+    <false/>
+    <key>NSSupportsSuddenTermination</key>
+    <false/>
+
+    <!-- Privacy descriptions — REQUIRED for TCC prompts -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>MeetCapture captures system audio from Google Meet calls for transcription.</string>
+
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>MeetCapture captures system audio to include in meeting transcripts.</string>
+
+    <key>NSCalendarsUsageDescription</key>
+    <string>MeetCapture reads your calendar to detect Google Meet meetings.</string>
+
+    <key>NSCalendarsFullAccessUsageDescription</key>
+    <string>MeetCapture needs calendar access to detect upcoming meetings with external attendees.</string>
+
+    <!-- Sparkle update feed (when enabled) -->
+    <!--
+    <key>SUPublicEDKey</key>
+    <string>YOUR_EDDSA_PUBLIC_KEY_HERE</string>
+    <key>SUFeedURL</key>
+    <string>https://Gigisanta.github.io/MeetCapture/appcast.xml</string>
+    <key>SUScheduledCheckInterval</key>
+    <integer>86400</integer>
+    -->
+
+    <!-- High resolution support -->
+    <key>NSHighResolutionCapable</key>
+    <true/>
+</dict>
+</plist>
