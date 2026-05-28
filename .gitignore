@@ -1,48 +1,46 @@
-# Runtime files
-meetings/
-*.flac
-*.wav
-*.txt
-!docs/*.md
+# Build artifacts
+build/
+.build/
+DerivedData/
+*.o
+*.dylib
+
+# Xcode
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/
+*.xcworkspace/xcuserdata/
+xcuserdata/
+
+# macOS
+.DS_Store
+*.swp
+*~
 
 # Python
 __pycache__/
 *.pyc
 *.pyo
-.app-venv/
-*.egg-info/
-dist/
-build/
-
-# macOS
-.DS_Store
-.AppleDouble
-.LSOverride
-._*
-
-# Logs
-*.log
-.daemon.log
-.daemon.err
-.transcribe.log
-
-# State files
-.daemon_state.json
-.daemon.pid
-.transcribe_queue.json
-.meetcapture.json
-
-# Whisper models (large, download separately)
-*.bin
-*.pt
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# Venv (users create their own)
 .venv/
 venv/
+
+# Whisper models (too large for git)
+*.bin
+!*.bin.sha256
+
+# Runtime state
+.daemon.pid
+.daemon_state.json
+*.pcm
+*.flac
+*.wav
+
+# IDE
+.cursor/
+.vscode/
+.idea/
+
+# Credentials
+.env
+*.p12
+*.cer
+*.mobileprovision
