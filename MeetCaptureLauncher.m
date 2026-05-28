@@ -1,124 +1,80 @@
-// MeetCaptureLauncher.m — Professional native macOS menu bar app
-// Draws a proper microphone icon, clean menu, reliable daemon management
+// MeetCaptureLauncher.m — Native macOS menu bar app with SF Symbols
 #import <Cocoa/Cocoa.h>
 #import <Foundation/Foundation.h>
 
 // ── Paths ───────────────────────────────────────────────────────────────────
-
 NSString *homeDir(void) { return NSHomeDirectory(); }
 NSString *meetingsDir(void) { return [homeDir() stringByAppendingPathComponent:@"meetings"]; }
 NSString *stateFile(void) { return [meetingsDir() stringByAppendingPathComponent:@".daemon_state.json"]; }
 NSString *pidFile(void) { return [meetingsDir() stringByAppendingPathComponent:@".daemon.pid"]; }
 NSString *configFile(void) { return [homeDir() stringByAppendingPathComponent:@".meetcapture.json"]; }
-
 NSString *daemonScript(void) {
     NSString *inBundle = [[[NSBundle mainBundle] resourcePath] stringByAppendingPathComponent:@"meet-daemon.py"];
     if ([[NSFileManager defaultManager] fileExistsAtPath:inBundle]) return inBundle;
     return [meetingsDir() stringByAppendingPathComponent:@"meet-daemon.py"];
 }
-
 NSString *findPython(void) {
     NSString *venv = [meetingsDir() stringByAppendingPathComponent:@".app-venv/bin/python3"];
     if ([[NSFileManager defaultManager] isExecutableFileAtPath:venv]) return venv;
     if ([[NSFileManager defaultManager] isExecutableFileAtPath:@"/opt/homebrew/bin/python3"]) return @"/opt/homebrew/bin/python3";
     return @"/usr/bin/python3";
 }
-
 NSDictionary *loadState(void) {
     NSData *d = [NSData dataWithContentsOfFile:stateFile()];
     if (!d) return @{};
     NSError *e = nil;
-    NSDictionary *dict = [NSJSONSerialization JSONObjectWithData:d options:0 error:&e];
-    return dict ?: @{};
+    return [NSJSONSerialization JSONObjectWithData:d options:0 error:&e] ?: @{};
 }
-
 NSDictionary *loadConfig(void) {
     NSData *d = [NSData dataWithContentsOfFile:configFile()];
     if (!d) return @{};
     NSError *e = nil;
-    NSDictionary *dict = [NSJSONSerialization JSONObjectWithData:d options:0 error:&e];
-    return dict ?: @{};
+    return [NSJSONSerialization JSONObjectWithData:d options:0 error:&e] ?: @{};
 }
-
 void saveConfig(NSDictionary *cfg) {
     NSError *e = nil;
     NSData *d = [NSJSONSerialization dataWithJSONObject:cfg options:NSJSONWritingPrettyPrinted error:&e];
     if (d) [d writeToFile:configFile() atomically:YES];
 }
-
 NSInteger readPid(void) {
     NSString *s = [NSString stringWithContentsOfFile:pidFile() encoding:NSUTF8StringEncoding error:nil];
     return s ? [s integerValue] : 0;
 }
+BOOL isAlive(NSInteger pid) { return pid > 0 && kill((int)pid, 0) == 0; }
 
-BOOL isAlive(NSInteger pid) {
-    return pid > 0 && kill((int)pid, 0) == 0;
-}
+// ── SF Symbol Icon Helper ───────────────────────────────────────────────────
 
-// ── Icon Drawing ────────────────────────────────────────────────────────────
-
-NSImage *micIcon(NSColor *color, BOOL recording) {
-    CGFloat size = 16;
-    NSImage *img = [[NSImage alloc] initWithSize:NSMakeSize(size, size)];
-    [img lockFocus];
-    
-    CGContextRef ctx = [[NSGraphicsContext currentContext] CGContext];
-    CGContextSetAllowsAntialiasing(ctx, YES);
-    CGContextSetShouldAntialias(ctx, YES);
-    
-    [color setStroke];
-    [color setFill];
-    
-    CGFloat w = size;
-    CGFloat h = size;
-    CGFloat cx = w / 2;
-    
-    // Mic body (rounded rect)
-    CGFloat micW = w * 0.28;
-    CGFloat micH = h * 0.4;
-    CGFloat micX = cx - micW / 2;
-    CGFloat micY = h * 0.15;
-    CGFloat radius = micW / 2;
-    
-    NSBezierPath *mic = [NSBezierPath bezierPathWithRoundedRect:NSMakeRect(micX, micY, micW, micH)
-                                                         xRadius:radius yRadius:radius];
-    [mic setLineWidth:1.2];
-    [mic stroke];
-    
-    // Mic arc
-    CGFloat arcR = w * 0.22;
-    NSBezierPath *arc = [NSBezierPath bezierPath];
-    [arc appendBezierPathWithArcWithCenter:NSMakePoint(cx, micY + micH * 0.3)
-                                     radius:arcR
-                                 startAngle:180 endAngle:0];
-    [arc setLineWidth:1.2];
-    [arc stroke];
-    
-    // Mic stand (vertical line)
-    NSBezierPath *stand = [NSBezierPath bezierPath];
-    [stand moveToPoint:NSMakePoint(cx, micY + micH + arcR * 0.5)];
-    [stand lineToPoint:NSMakePoint(cx, h * 0.85)];
-    [stand setLineWidth:1.2];
-    [stand stroke];
-    
-    // Mic base (horizontal line)
-    NSBezierPath *base = [NSBezierPath bezierPath];
-    CGFloat baseW = w * 0.3;
-    [base moveToPoint:NSMakePoint(cx - baseW / 2, h * 0.85)];
-    [base lineToPoint:NSMakePoint(cx + baseW / 2, h * 0.85)];
-    [base setLineWidth:1.5];
-    [base stroke];
-    
-    // Recording indicator (red dot)
-    if (recording) {
-        [[NSColor systemRedColor] setFill];
-        NSBezierPath *dot = [NSBezierPath bezierPathWithOvalInRect:NSMakeRect(w * 0.65, h * 0.6, w * 0.25, h * 0.25)];
-        [dot fill];
+NSImage *sfIcon(NSString *symbolName, NSColor *tintColor) {
+    // Use SF Symbols (available macOS 11+)
+    NSImage *img = [NSImage imageWithSystemSymbolName:symbolName
+                            accessibilityDescription:@"MeetCapture"];
+    if (img) {
+        // Configure for template rendering
+        [img setTemplate:YES];
+        
+        // Create a colored version using NSTextAttachment
+        if (tintColor) {
+            NSSize size = NSMakeSize(18, 18);
+            NSImage *colored = [[NSImage alloc] initWithSize:size];
+            [colored lockFocus];
+            
+            // Draw the symbol
+            NSRect rect = NSMakeRect(0, 0, size.width, size.height);
+            [img drawInRect:rect fromRect:NSZeroRect operation:NSCompositingOperationSourceOver fraction:1.0];
+            
+            // Apply tint
+            [tintColor set];
+            NSRectFillUsingOperation(rect, NSCompositingOperationSourceAtop);
+            
+            [colored unlockFocus];
+            [colored setTemplate:NO];
+            return colored;
+        }
+        return img;
     }
     
-    [img unlockFocus];
-    [img setTemplate:NO];
-    return img;
+    // Fallback: simple text
+    return nil;
 }
 
 // ── App Delegate ────────────────────────────────────────────────────────────
@@ -128,8 +84,8 @@ NSImage *micIcon(NSColor *color, BOOL recording) {
 @property (strong) NSMenu *menu;
 @property (strong) NSTimer *pollTimer;
 @property (strong) NSTask *daemonTask;
-@property (strong) NSMenuItem *statusItem1;
-@property (strong) NSMenuItem *statusItem2;
+@property (strong) NSMenuItem *statusLine;
+@property (strong) NSMenuItem *meetingLine;
 @property (strong) NSMenuItem *stopItem;
 @property (assign) BOOL isRecording;
 @property (assign) BOOL isRunning;
@@ -139,50 +95,31 @@ NSImage *micIcon(NSColor *color, BOOL recording) {
 @implementation AppDelegate
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
-    // Status bar item with fixed width
+    // Status bar item
     self.statusItem = [[NSStatusBar systemStatusBar] statusItemWithLength:NSSquareStatusItemLength];
-    [[self.statusItem button] setImage:micIcon([NSColor labelColor], NO)];
+    [self updateIcon:NO recording:NO];
     
     // Menu
     self.menu = [[NSMenu alloc] init];
     [self.menu setAutoenablesItems:NO];
     
-    // Status line
-    self.statusItem1 = [[NSMenuItem alloc] initWithTitle:@"Starting..." action:nil keyEquivalent:@""];
-    [self.statusItem1 setEnabled:NO];
-    [self.menu addItem:self.statusItem1];
-    
-    // Meeting line
-    self.statusItem2 = [[NSMenuItem alloc] initWithTitle:@"" action:nil keyEquivalent:@""];
-    [self.statusItem2 setEnabled:NO];
-    [self.menu addItem:self.statusItem2];
-    
+    // Status
+    self.statusLine = [self menuItem:@"Starting..." enabled:NO];
+    self.meetingLine = [self menuItem:@"" enabled:NO];
+    [self.menu addItem:self.statusLine];
+    [self.menu addItem:self.meetingLine];
     [self.menu addItem:[NSMenuItem separatorItem]];
     
-    // Stop Recording
-    self.stopItem = [[NSMenuItem alloc] initWithTitle:@"Stop Recording" action:@selector(stopRecording) keyEquivalent:@""];
-    [self.stopItem setEnabled:NO];
+    // Actions
+    self.stopItem = [self menuItem:@"Stop Recording" action:@selector(stopRecording) key:@"" enabled:NO];
     [self.menu addItem:self.stopItem];
-    
     [self.menu addItem:[NSMenuItem separatorItem]];
     
-    // Open Transcripts
-    NSMenuItem *openItem = [[NSMenuItem alloc] initWithTitle:@"Open Transcripts Folder" action:@selector(openTranscripts) keyEquivalent:@""];
-    [self.menu addItem:openItem];
-    
-    // View Log
-    NSMenuItem *logItem = [[NSMenuItem alloc] initWithTitle:@"View Log" action:@selector(viewLog) keyEquivalent:@""];
-    [self.menu addItem:logItem];
-    
-    // Settings
-    NSMenuItem *settingsItem = [[NSMenuItem alloc] initWithTitle:@"Settings..." action:@selector(showSettings) keyEquivalent:@","];
-    [self.menu addItem:settingsItem];
-    
+    [self.menu addItem:[self menuItem:@"Open Transcripts Folder" action:@selector(openTranscripts) key:@"" enabled:YES]];
+    [self.menu addItem:[self menuItem:@"View Log" action:@selector(viewLog) key:@"" enabled:YES]];
+    [self.menu addItem:[self menuItem:@"Settings..." action:@selector(showSettings) key:@"," enabled:YES]];
     [self.menu addItem:[NSMenuItem separatorItem]];
-    
-    // Quit
-    NSMenuItem *quitItem = [[NSMenuItem alloc] initWithTitle:@"Quit MeetCapture" action:@selector(quitApp) keyEquivalent:@"q"];
-    [self.menu addItem:quitItem];
+    [self.menu addItem:[self menuItem:@"Quit MeetCapture" action:@selector(quitApp) key:@"q" enabled:YES]];
     
     [self.statusItem setMenu:self.menu];
     
@@ -196,6 +133,40 @@ NSImage *micIcon(NSColor *color, BOOL recording) {
     self.pollTimer = [NSTimer scheduledTimerWithTimeInterval:3.0 target:self selector:@selector(poll) userInfo:nil repeats:YES];
 }
 
+- (NSMenuItem *)menuItem:(NSString *)title enabled:(BOOL)enabled {
+    NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:title action:nil keyEquivalent:@""];
+    [item setEnabled:enabled];
+    return item;
+}
+
+- (NSMenuItem *)menuItem:(NSString *)title action:(SEL)action key:(NSString *)key enabled:(BOOL)enabled {
+    NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:title action:action keyEquivalent:key];
+    [item setEnabled:enabled];
+    return item;
+}
+
+- (void)updateIcon:(BOOL)running recording:(BOOL)recording {
+    NSImage *img = nil;
+    
+    if (recording) {
+        // Red mic.fill when recording
+        img = sfIcon(@"mic.fill", [NSColor systemRedColor]);
+    } else if (running) {
+        // Default mic when idle
+        img = sfIcon(@"mic", [NSColor labelColor]);
+    } else {
+        // Orange mic.slash when stopped
+        img = sfIcon(@"mic.slash", [NSColor systemOrangeColor]);
+    }
+    
+    if (img) {
+        [[self.statusItem button] setImage:img];
+    } else {
+        // Fallback to text if SF Symbols not available
+        [[self.statusItem button] setTitle:recording ? @"◉" : (running ? @"●" : @"⚠")];
+    }
+}
+
 - (void)poll {
     NSDictionary *state = loadState();
     NSInteger pid = readPid();
@@ -205,20 +176,19 @@ NSImage *micIcon(NSColor *color, BOOL recording) {
     self.meetingTitle = [state objectForKey:@"title"] ?: @"";
     self.isRunning = alive;
     
+    [self updateIcon:alive recording:self.isRecording];
+    
     if (self.isRecording) {
-        [[self.statusItem button] setImage:micIcon([NSColor systemRedColor], YES)];
-        [self.statusItem1 setTitle:@"Recording"];
-        [self.statusItem2 setTitle:self.meetingTitle];
+        [self.statusLine setTitle:@"Recording"];
+        [self.meetingLine setTitle:self.meetingTitle];
         [self.stopItem setEnabled:YES];
     } else if (alive) {
-        [[self.statusItem button] setImage:micIcon([NSColor labelColor], NO)];
-        [self.statusItem1 setTitle:@"Waiting for meeting"];
-        [self.statusItem2 setTitle:@""];
+        [self.statusLine setTitle:@"Waiting for meeting"];
+        [self.meetingLine setTitle:@""];
         [self.stopItem setEnabled:NO];
     } else {
-        [[self.statusItem button] setImage:micIcon([NSColor systemOrangeColor], NO)];
-        [self.statusItem1 setTitle:@"Daemon stopped"];
-        [self.statusItem2 setTitle:@""];
+        [self.statusLine setTitle:@"Daemon stopped"];
+        [self.meetingLine setTitle:@""];
         [self.stopItem setEnabled:NO];
     }
 }
@@ -227,12 +197,9 @@ NSImage *micIcon(NSColor *color, BOOL recording) {
     NSInteger pid = readPid();
     if (pid > 0 && isAlive(pid)) return;
     
-    NSString *python = findPython();
-    NSString *script = daemonScript();
-    
     self.daemonTask = [[NSTask alloc] init];
-    [self.daemonTask setLaunchPath:python];
-    [self.daemonTask setArguments:@[script, @"--daemon"]];
+    [self.daemonTask setLaunchPath:findPython()];
+    [self.daemonTask setArguments:@[daemonScript(), @"--daemon"]];
     
     NSMutableDictionary *env = [NSMutableDictionary dictionaryWithDictionary:[[NSProcessInfo processInfo] environment]];
     [env setObject:@"/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" forKey:@"PATH"];
@@ -246,17 +213,13 @@ NSImage *micIcon(NSColor *color, BOOL recording) {
     [self.daemonTask setStandardOutput:logH];
     [self.daemonTask setStandardError:logH];
     
-    @try {
-        [self.daemonTask launch];
-    } @catch (NSException *e) {
-        NSLog(@"Daemon start failed: %@", e.reason);
-    }
+    @try { [self.daemonTask launch]; }
+    @catch (NSException *e) { NSLog(@"Daemon failed: %@", e.reason); }
 }
 
 - (void)stopRecording {
-    NSString *python = findPython();
     NSTask *task = [[NSTask alloc] init];
-    [task setLaunchPath:python];
+    [task setLaunchPath:findPython()];
     [task setArguments:@[daemonScript(), @"--stop"]];
     [task launch];
     [task waitUntilExit];
@@ -270,17 +233,16 @@ NSImage *micIcon(NSColor *color, BOOL recording) {
 }
 
 - (void)viewLog {
-    NSString *log = [meetingsDir() stringByAppendingPathComponent:@".daemon.log"];
-    [[NSWorkspace sharedWorkspace] openURL:[NSURL fileURLWithPath:log]];
+    [[NSWorkspace sharedWorkspace] openURL:[NSURL fileURLWithPath:[meetingsDir() stringByAppendingPathComponent:@".daemon.log"]]];
 }
 
 - (void)showSettings {
     NSDictionary *cfg = loadConfig();
-    NSString *dir = [cfg objectForKey:@"transcript_dir"] ?: @"Default";
+    NSString *dir = [cfg objectForKey:@"transcript_dir"] ?: @"Default location";
     
     NSAlert *alert = [[NSAlert alloc] init];
     [alert setMessageText:@"MeetCapture Settings"];
-    [alert setInformativeText:[NSString stringWithFormat:@"Transcript directory:\n%@\n\nClick 'Change' to select a different folder.", dir]];
+    [alert setInformativeText:[NSString stringWithFormat:@"Transcript folder:\n%@\n\nClick 'Change' to pick a different folder.", dir]];
     [alert addButtonWithTitle:@"Change Folder"];
     [alert addButtonWithTitle:@"Close"];
     
@@ -298,31 +260,26 @@ NSImage *micIcon(NSColor *color, BOOL recording) {
             
             NSAlert *ok = [[NSAlert alloc] init];
             [ok setMessageText:@"Saved"];
-            [ok setInformativeText:[NSString stringWithFormat:@"Transcripts will be saved to:\n%@", newDir]];
+            [ok setInformativeText:[NSString stringWithFormat:@"Transcripts → %@", newDir]];
             [ok runModal];
         }
     }
 }
 
 - (void)quitApp {
-    if (self.daemonTask && [self.daemonTask isRunning]) {
-        [self.daemonTask terminate];
-    }
+    if (self.daemonTask && [self.daemonTask isRunning]) [self.daemonTask terminate];
     [NSApp terminate:nil];
 }
 
 @end
 
 // ── Main ────────────────────────────────────────────────────────────────────
-
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         NSApplication *app = [NSApplication sharedApplication];
         [app setActivationPolicy:NSApplicationActivationPolicyAccessory];
-        
         AppDelegate *delegate = [[AppDelegate alloc] init];
         [app setDelegate:delegate];
-        
         [app run];
     }
     return 0;
