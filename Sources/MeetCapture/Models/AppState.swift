@@ -115,12 +115,8 @@ final class AppState: ObservableObject {
     
     private func requestPermissions() async {
         // Calendar
-        do {
-            try await calendarService.requestAccess()
-            hasCalendarAccess = true
-        } catch {
-            errorMessage = "Calendar access denied: \(error.localizedDescription)"
-        }
+        await calendarService.requestAccess()
+        hasCalendarAccess = calendarService.isAuthorized
         
         // Audio (Screen Recording)
         hasAudioPermission = audioCapture.checkPermission()
@@ -185,6 +181,14 @@ final class AppState: ObservableObject {
         Task {
             do {
                 try await audioCapture.startCapture(outputPath: outputPath)
+                
+                // Load whisper model for transcription
+                do {
+                    try whisperManager.startRecording()
+                } catch {
+                    // Non-fatal: transcription will fall back to daemon
+                }
+                
                 phase = .recording
                 recordingStartDate = Date()
                 startRecordingTimer()
@@ -227,6 +231,9 @@ final class AppState: ObservableObject {
             
             // End energy assertion
             energyManager.endRecordingActivity()
+            
+            // Unload whisper model to free memory
+            whisperManager.stopRecording()
         }
     }
     
