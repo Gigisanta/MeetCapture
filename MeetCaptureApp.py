@@ -1,10 +1,22 @@
 #!/usr/bin/env python3
 """
-MeetCapture — macOS menu bar app for Google Meet transcription.
-Manages the meet-daemon, shows status, provides settings UI.
+MeetCapture — macOS menu bar app using native AppKit (PyObjC).
+Works with macOS 26+ (Tahoe) scene-based architecture.
 """
 
-import rumps
+import objc
+from AppKit import (
+    NSApplication, NSStatusBar, NSMenu, NSMenuItem,
+    NSImage, NSVariableStatusItemLength, NSOnState,
+    NSOffState, NSObject, NSApp, NSRunLoop, NSDate,
+    NSWorkspace, NSAlert, NSAlertFirstButtonReturn,
+    NSTextField, NSMakeRect, NSBezelStyleRounded,
+    NSWindowStyleMaskTitled, NSWindowStyleMaskClosable,
+    NSApplicationActivationPolicyAccessory,
+    NSAlertStyleInformational, NSAlertStyleWarning,
+    NSOpenPanel, NSColor,
+)
+from Foundation import NSTimer, NSBundle, NSString
 import subprocess
 import os
 import sys
@@ -20,21 +32,19 @@ MEETINGS_DIR = HOME / "meetings"
 CONFIG_FILE = HOME / ".meetcapture.json"
 STATE_FILE = MEETINGS_DIR / ".daemon_state.json"
 DAEMON_PID_FILE = MEETINGS_DIR / ".daemon.pid"
-DAEMON_SCRIPT = None  # resolved in _resolve_daemon
+DAEMON_SCRIPT = None
 
 
 def _resolve_daemon():
-    """Find meet-daemon.py: try Resources/ first, then ~/meetings/."""
     global DAEMON_SCRIPT
     candidates = [
-        Path(__file__).parent / "meet-daemon.py",           # same dir (bundled)
-        MEETINGS_DIR / "meet-daemon.py",                     # ~/meetings/
+        Path(__file__).parent / "meet-daemon.py",
+        MEETINGS_DIR / "meet-daemon.py",
     ]
     for c in candidates:
         if c.exists():
             DAEMON_SCRIPT = c
             return
-    # Default
     DAEMON_SCRIPT = MEETINGS_DIR / "meet-daemon.py"
 
 
@@ -69,7 +79,6 @@ def load_state() -> dict:
 
 
 def find_python() -> str:
-    """Find Python with rumps installed."""
     candidates = [
         str(HOME / "meetings" / ".app-venv" / "bin" / "python3"),
         "/opt/homebrew/bin/python3",
@@ -82,58 +91,176 @@ def find_python() -> str:
     return "python3"
 
 
-# ── App ──────────────────────────────────────────────────────────────────────
+def read_pid() -> int:
+    try:
+        return int(DAEMON_PID_FILE.read_text().strip())
+    except Exception:
+        return 0
 
-class MeetCaptureApp(rumps.App):
-    def __init__(self):
-        super().__init__(name="MeetCapture", title="●", quit_button=None)
+
+def pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+
+
+# ── App Delegate ─────────────────────────────────────────────────────────────
+
+class MeetCaptureDelegate(NSObject):
+    status_bar = None
+    status_item = None
+    menu = None
+    daemon_proc = None
+    cfg = None
+    title_item = None
+    meeting_item = None
+    start_item = None
+    stop_item = None
+
+    def applicationDidFinishLaunching_(self, notification):
+        self.cfg = load_config()
         _resolve_daemon()
 
-        self._cfg = load_config()
-        self._daemon_proc = None
-        self._recording = False
-        self._meeting_title = ""
+        # Set as accessory app (no dock icon)
+        NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
 
-        # Menu items
-        self._status = rumps.MenuItem("Initializing...")
-        self._meeting = rumps.MenuItem("")
-        self._start_btn = rumps.MenuItem("Start Daemon", callback=self._on_start)
-        self._stop_btn = rumps.MenuItem("Stop Recording", callback=self._on_stop)
+        # Create status bar item
+        self.status_bar = NSStatusBar.systemStatusBar()
+        self.status_item = self.status_bar.statusItemWithLength_(NSVariableStatusItemLength)
 
-        self.menu = [
-            self._status,
-            self._meeting,
-            None,
-            self._start_btn,
-            self._stop_btn,
-            None,
-            rumps.MenuItem("Open Transcripts", callback=self._on_open),
-            rumps.MenuItem("View Log", callback=self._on_log),
-            rumps.MenuItem("Settings...", callback=self._on_settings),
-            None,
-            rumps.MenuItem("Quit", callback=self._on_quit),
-        ]
+        # Set icon
+        self._update_icon("idle")
+
+        # Create menu
+        self._build_menu()
 
         # Auto-start daemon
-        if self._cfg.get("auto_start", True):
+        if self.cfg.get("auto_start", True):
             self._start_daemon()
 
-        # Poll state
-        self._timer = rumps.Timer(self._update, 3)
-        self._timer.start()
+        # Start polling timer
+        self.timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            3.0, self, "updateState:", None, True
+        )
+
+    def _build_menu(self):
+        self.menu = NSMenu.alloc().init()
+
+        # Status item (non-clickable, just info)
+        self.title_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Initializing...", "", ""
+        )
+        self.title_item.setEnabled_(False)
+        self.menu.addItem_(self.title_item)
+
+        # Meeting item
+        self.meeting_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "", "", ""
+        )
+        self.meeting_item.setEnabled_(False)
+        self.menu.addItem_(self.meeting_item)
+
+        self.menu.addItem_(NSMenuItem.separatorItem())
+
+        # Start daemon
+        self.start_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Start Daemon", "startDaemon:", ""
+        )
+        self.menu.addItem_(self.start_item)
+
+        # Stop recording
+        self.stop_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Stop Recording", "stopRecording:", ""
+        )
+        self.stop_item.setEnabled_(False)
+        self.menu.addItem_(self.stop_item)
+
+        self.menu.addItem_(NSMenuItem.separatorItem())
+
+        # Open transcripts
+        open_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Open Transcripts", "openTranscripts:", ""
+        )
+        self.menu.addItem_(open_item)
+
+        # View log
+        log_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "View Log", "viewLog:", ""
+        )
+        self.menu.addItem_(log_item)
+
+        # Settings
+        settings_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Settings...", "showSettings:", ""
+        )
+        self.menu.addItem_(settings_item)
+
+        self.menu.addItem_(NSMenuItem.separatorItem())
+
+        # Quit
+        quit_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Quit", "quitApp:", "q"
+        )
+        self.menu.addItem_(quit_item)
+
+        self.status_item.setMenu_(self.menu)
+
+    def _update_icon(self, state):
+        """Update menu bar icon based on state."""
+        # Use SF Symbols via text (works on macOS 11+)
+        if state == "recording":
+            # Red circle with dot
+            self.status_item.setTitle_("◉")
+            # Try to set red color
+            try:
+                attrs = {str("NSColor"): NSColor.systemRedColor()}
+                self.status_item.button().setAttributedTitle_(
+                    NSString.alloc().initWithString_("◉").size()
+                )
+            except Exception:
+                pass
+        elif state == "error":
+            self.status_item.setTitle_("⚠")
+        else:
+            self.status_item.setTitle_("●")
+
+    def updateState_(self, timer):
+        """Poll daemon state every 3 seconds."""
+        state = load_state()
+        pid = read_pid()
+        alive = (pid and pid_alive(pid)) or (self.daemon_proc and self.daemon_proc.poll() is None)
+
+        recording = state.get("recording", False)
+        meeting_title = state.get("title", "")
+
+        if recording:
+            self._update_icon("recording")
+            self.title_item.setTitle_(f"● Recording")
+            self.meeting_item.setTitle_(meeting_title or "Unknown meeting")
+            self.stop_item.setEnabled_(True)
+        elif alive:
+            self._update_icon("idle")
+            self.title_item.setTitle_("● Waiting for meeting")
+            self.meeting_item.setTitle_("")
+            self.stop_item.setEnabled_(False)
+        else:
+            self._update_icon("error")
+            self.title_item.setTitle_("⚠ Daemon stopped")
+            self.meeting_item.setTitle_("")
+            self.stop_item.setEnabled_(False)
 
     def _start_daemon(self):
-        """Start the daemon as a subprocess."""
-        # Check if already running
-        pid = self._read_pid()
-        if pid and self._pid_alive(pid):
+        pid = read_pid()
+        if pid and pid_alive(pid):
             return
 
         python = find_python()
         cmd = [python, str(DAEMON_SCRIPT), "--daemon"]
 
         try:
-            self._daemon_proc = subprocess.Popen(
+            self.daemon_proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -141,94 +268,99 @@ class MeetCaptureApp(rumps.App):
                      "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"},
             )
             time.sleep(2)
-        except Exception as e:
-            rumps.notification("MeetCapture", "Error", str(e))
-
-    def _read_pid(self) -> int:
-        try:
-            return int(DAEMON_PID_FILE.read_text().strip())
         except Exception:
-            return 0
+            pass
 
-    def _pid_alive(self, pid: int) -> bool:
-        try:
-            os.kill(pid, 0)
-            return True
-        except ProcessLookupError:
-            return False
-
-    def _update(self, _=None):
-        """Poll daemon state."""
-        state = load_state()
-        pid = self._read_pid()
-        alive = (pid and self._pid_alive(pid)) or (self._daemon_proc and self._daemon_proc.poll() is None)
-
-        self._recording = state.get("recording", False)
-        self._meeting_title = state.get("title", "")
-
-        if self._recording:
-            self.title = "◉"
-            self._status.title = "● Recording"
-            self._meeting.title = self._meeting_title
-        elif alive:
-            self.title = "●"
-            self._status.title = "● Waiting for meeting"
-            self._meeting.title = ""
-        else:
-            self.title = "⚠"
-            self._status.title = "⚠ Daemon stopped"
-            self._meeting.title = ""
-
-    def _on_start(self, _):
+    def startDaemon_(self, sender):
         self._start_daemon()
-        rumps.notification("MeetCapture", "", "Daemon started")
 
-    def _on_stop(self, _):
+    def stopRecording_(self, sender):
         python = find_python()
         try:
             subprocess.run([python, str(DAEMON_SCRIPT), "--stop"], timeout=10)
-            rumps.notification("MeetCapture", "", "Stopped. Transcribing...")
-        except Exception as e:
-            rumps.notification("MeetCapture", "Error", str(e))
+        except Exception:
+            pass
 
-    def _on_open(self, _):
-        d = Path(self._cfg["transcript_dir"])
-        d.mkdir(parents=True, exist_ok=True)
-        subprocess.run(["open", str(d)])
+    def openTranscripts_(self, sender):
+        d = Path(self.cfg.get("transcript_dir", ""))
+        if d.exists():
+            subprocess.run(["open", str(d)])
+        else:
+            subprocess.run(["open", str(MEETINGS_DIR)])
 
-    def _on_log(self, _):
+    def viewLog_(self, sender):
         log_file = MEETINGS_DIR / ".daemon.log"
         if log_file.exists():
             subprocess.run(["open", "-a", "Console", str(log_file)])
 
-    def _on_settings(self, _):
-        cfg = self._cfg
-        resp = rumps.Window(
-            message="Transcript directory:",
-            title="MeetCapture Settings",
-            default_text=cfg.get("transcript_dir", ""),
-            ok="Save",
-            cancel="Cancel",
-            dimensions=(400, 24),
-        ).run()
+    def showSettings_(self, sender):
+        cfg = self.cfg
 
-        if resp.clicked and resp.text.strip():
-            new_dir = resp.text.strip()
-            Path(new_dir).mkdir(parents=True, exist_ok=True)
-            cfg["transcript_dir"] = new_dir
+        # Create alert dialog
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_("MeetCapture Settings")
+        alert.setInformativeText_(
+            f"Transcript directory:\n{cfg.get('transcript_dir', 'Not set')}\n\n"
+            f"Auto-start: {'YES' if cfg.get('auto_start', True) else 'NO'}\n\n"
+            f"Click 'Change Dir' to select a new transcript directory."
+        )
+        alert.addButtonWithTitle_("Change Dir")
+        alert.addButtonWithTitle_("Toggle Auto-Start")
+        alert.addButtonWithTitle_("Close")
+        alert.setAlertStyle_(NSAlertStyleInformational)
+
+        response = alert.runModal()
+
+        if response == 1000:  # Change Dir
+            panel = NSOpenPanel.alloc().init()
+            panel.setCanChooseDirectories_(True)
+            panel.setCanChooseFiles_(False)
+            panel.setAllowsMultipleSelection_(False)
+            panel.setMessage_("Select transcript directory")
+
+            if panel.runModal() == 1:  # OK
+                url = panel.URLs()[0]
+                new_dir = url.path()
+                cfg["transcript_dir"] = new_dir
+                save_config(cfg)
+                self.cfg = cfg
+
+                # Show confirmation
+                confirm = NSAlert.alloc().init()
+                confirm.setMessageText_("Settings Saved")
+                confirm.setInformativeText_(f"Transcripts → {new_dir}")
+                confirm.runModal()
+
+        elif response == 1001:  # Toggle Auto-Start
+            cfg["auto_start"] = not cfg.get("auto_start", True)
             save_config(cfg)
-            self._cfg = cfg
-            rumps.notification("MeetCapture", "", f"Transcripts → {new_dir}")
+            self.cfg = cfg
 
-    def _on_quit(self, _):
-        # Don't kill daemon — let it keep running
-        rumps.quit_application()
+    def quitApp_(self, sender):
+        # Stop daemon
+        if self.daemon_proc and self.daemon_proc.poll() is None:
+            self.daemon_proc.terminate()
+        NSApp.terminate_(None)
 
+
+# ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
     MEETINGS_DIR.mkdir(parents=True, exist_ok=True)
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    app = MeetCaptureApp()
+
+    # Create NSApplication and set up as accessory app (no dock icon)
+    app = NSApplication.sharedApplication()
+    app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+
+    # Create and set delegate
+    delegate = MeetCaptureDelegate.alloc().init()
+    app.setDelegate_(delegate)
+
+    # Activate the app to connect to window server
+    app.activateIgnoringOtherApps_(True)
+
+    # Run the event loop
     app.run()
 
 
