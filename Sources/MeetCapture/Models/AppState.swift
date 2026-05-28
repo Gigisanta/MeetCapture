@@ -90,8 +90,12 @@ final class AppState: ObservableObject {
         // Register daemon
         daemonManager.registerIfNeeded()
         
-        // Connect to daemon (non-throwing, handles errors internally)
-        socketClient.connect()
+        // Connect to daemon (best effort)
+        do {
+            try socketClient.connect()
+        } catch {
+            // Non-fatal: daemon might not be running yet
+        }
         
         // Request notification permission
         requestNotificationPermission()
@@ -289,7 +293,7 @@ final class AppState: ObservableObject {
     private func pcmToFloat32(_ data: Data) -> [Float] {
         let count = data.count / MemoryLayout<Float>.size
         return data.withUnsafeBytes { buffer in
-            Array(buffer.bindCast(to: Float.self).prefix(count))
+            Array(buffer.bindMemory(to: Float.self, capacity: count).prefix(count))
         }
     }
     
@@ -301,7 +305,7 @@ final class AppState: ObservableObject {
         let content = UNMutableNotificationContent()
         content.title = "MeetCapture"
         content.body = notificationText
-        content.sound = .default
+        content.sound = UNNotificationSound.default
         
         let request = UNNotificationRequest(
             identifier: UUID().uuidString,

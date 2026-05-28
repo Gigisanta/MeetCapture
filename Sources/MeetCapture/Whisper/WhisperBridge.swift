@@ -1,47 +1,10 @@
+// WhisperBridge.swift
+// MeetCapture v4 — Whisper transcription via whisper-cli subprocess
+// Uses the installed whisper-cli binary (Homebrew) for transcription.
+// Future: can migrate to direct C API when linking libwhisper via Xcode.
+
 import Foundation
 import os
-
-// MARK: - Whisper C API Declarations
-
-/// Whisper context pointer (opaque handle)
-private typealias WhisperContext = OpaquePointer
-/// Whisper state pointer (for partial encoding)
-private typealias WhisperState = OpaquePointer
-
-// MARK: - C API Function Signatures (resolved at link time from libwhisper)
-
-@_silgen_name("whisper_init_from_file")
-private func whisperInitFromFile(_ path: UnsafePointer<CChar>) -> WhisperContext?
-
-@_silgen_name("whisper_free")
-private func whisperFree(_ ctx: WhisperContext?)
-
-@_silgen_name("whisper_full_default_params")
-private func whisperFullDefaultParams(_ strategy: CInt) -> whisper_full_params
-
-@_silgen_name("whisper_full")
-private func whisperFull(
-    _ ctx: WhisperContext?,
-    _ params: whisper_full_params,
-    _ samples: UnsafePointer<Float>?,
-    _ nSamples: CInt,
-    _ nThreads: CInt
-) -> CInt
-
-@_silgen_name("whisper_full_n_segments")
-private func whisperFullNSegments(_ ctx: WhisperContext?) -> CInt
-
-@_silgen_name("whisper_full_get_segment_text")
-private func whisperFullGetSegmentText(_ ctx: WhisperContext?, _ iSegment: CInt) -> UnsafePointer<CChar>?
-
-@_silgen_name("whisper_full_n_tokens")
-private func whisperFullNTokens(_ ctx: WhisperContext?, _ iSegment: CInt) -> CInt
-
-@_silgen_name("whisper_full_get_token_text")
-private func whisperFullGetTokenText(_ ctx: WhisperContext?, _ iSegment: CInt, _ iToken: CInt) -> UnsafePointer<CChar>?
-
-@_silgen_name("whisper_full_lang_id")
-private func whisperFullLangId(_ ctx: WhisperContext?, _ iSegment: CInt) -> CInt
 
 // MARK: - Whisper Model Size
 
@@ -55,7 +18,7 @@ enum WhisperModelSize: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
-    /// Approximate memory footprint in GB for GPU (Metal) loading
+    /// Approximate memory footprint in GB
     var estimatedMemoryGB: Double {
         switch self {
         case .tiny:          return 0.05
@@ -63,7 +26,7 @@ enum WhisperModelSize: String, CaseIterable, Identifiable {
         case .small:         return 0.46
         case .medium:        return 1.50
         case .large:         return 2.90
-        case .largeV3Turbo:  return 1.50  // turbo variant is smaller
+        case .largeV3Turbo:  return 1.50
         }
     }
 
@@ -76,287 +39,196 @@ enum WhisperModelSize: String, CaseIterable, Identifiable {
     }
 }
 
-// MARK: - WhisperBridge
+// MARK: - WhisperError
 
-/// Swift wrapper around the whisper.cpp C library.
-/// Thread-safe: uses a serial queue for all context operations.
-/// Supports Metal acceleration via whisper.cpp's built-in GPU backend.
-final class WhisperBridge {
+enum WhisperError: LocalizedError {
+    case noModelLoaded
+    case modelLoadFailed(path: String)
+    case transcriptionFailed(reason: String)
+    case processError(exitCode: Int32, stderr: String)
 
-    static let shared = WhisperBridge()
-
-    private let logger = Logger(subsystem: "com.meetcapture.whisper", category: "WhisperBridge")
-
-    /// The underlying whisper context pointer (nil when unloaded)
-    private var context: WhisperContext?
-
-    /// Currently loaded model info
-    private var loadedModel: WhisperModelSize?
-    private var loadedModelPath: String?
-
-    /// Serial queue to protect context access
-    private let queue = DispatchQueue(label: "com.meetcapture.whisper.bridge", qos: .userInitiated)
-
-    /// Whether a transcription is currently in progress
-    private var isTranscribing = false
-
-    /// Cancellation flag for in-progress transcriptions
-    private var cancellationRequested = false
-
-    // MARK: - Initialization
-
-    private init() {
-        logger.info("WhisperBridge initialized")
-    }
-
-    deinit {
-        unloadModelSync()
-    }
-
-    // MARK: - Public API
-
-    /// Load a whisper model from disk.
-    /// - Parameters:
-    ///   - path: Path to the ggml model file (e.g. ggml-base.bin)
-    ///   - model: Which model size to load
-    /// - Throws: WhisperError if loading fails
-    func loadModel(path: String, model: WhisperModelSize) throws {
-        try queue.sync {
-            // If already loaded with same model, skip
-            if loadedModel == model, loadedModelPath == path, context != nil {
-                logger.info("Model already loaded: \(model.rawValue)")
-                return
-            }
-
-            // Unload previous model if switching
-            if context != nil {
-                logger.info("Switching models: unloading \(self.loadedModel?.rawValue ?? "unknown")")
-                unloadModelSync()
-            }
-
-            logger.info("Loading whisper model: \(model.rawValue) from \(path)")
-
-            let cPath = path.cString(using: .utf8)!
-            guard let ctx = whisperInitFromFile(cPath) else {
-                throw WhisperError.modelLoadFailed(path: path)
-            }
-
-            self.context = ctx
-            self.loadedModel = model
-            self.loadedModelPath = path
-
-            logger.info("Model loaded successfully: \(model.rawValue)")
+    var errorDescription: String? {
+        switch self {
+        case .noModelLoaded:
+            return "No whisper model loaded"
+        case .modelLoadFailed(let path):
+            return "Failed to load model at: \(path)"
+        case .transcriptionFailed(let reason):
+            return "Transcription failed: \(reason)"
+        case .processError(let code, let stderr):
+            return "whisper-cli exited \(code): \(stderr)"
         }
     }
+}
 
-    /// Transcribe audio samples to text.
-    /// - Parameters:
-    ///   - samples: Array of 16-bit float samples at 16kHz mono
-    ///   - language: Language code (e.g. "en", "es"). Default: "en"
-    ///   - translate: If true, translate to English
-    ///   - useGPU: Whether to use Metal GPU acceleration (default: true)
-    /// - Returns: Transcribed text
-    /// - Throws: WhisperError if transcription fails
+// MARK: - WhisperBridge
+
+/// Transcribes audio using the whisper-cli binary.
+/// Thread-safe: all calls go through a serial dispatch queue.
+final class WhisperBridge {
+    static let shared = WhisperBridge()
+
+    private let logger = Logger(subsystem: "com.meetcapture.whisper", category: "Bridge")
+    private let queue = DispatchQueue(label: "com.meetcapture.whisper.bridge", qos: .userInitiated)
+
+    /// Path to whisper-cli binary
+    private let whisperCLIPath: String
+
+    /// Path to currently loaded model
+    private(set) var loadedModelPath: String?
+
+    /// Whether a model is currently loaded (ready for transcription)
+    var isModelLoaded: Bool { loadedModelPath != nil }
+
+    private init() {
+        // Find whisper-cli
+        let candidates = [
+            "/opt/homebrew/bin/whisper-cli",
+            "/usr/local/bin/whisper-cli",
+            "/opt/homebrew/bin/whisper",
+            "/usr/local/bin/whisper"
+        ]
+        whisperCLIPath = candidates.first { FileManager.default.fileExists(atPath: $0) } ?? "/opt/homebrew/bin/whisper-cli"
+        logger.info("whisper-cli path: \(self.whisperCLIPath)")
+    }
+
+    // MARK: - Model Management
+
+    /// Load a model (stores the path for later use)
+    func loadModel(path: String, model: WhisperModelSize) throws {
+        guard FileManager.default.fileExists(atPath: path) else {
+            throw WhisperError.modelLoadFailed(path: path)
+        }
+
+        // Verify whisper-cli exists
+        guard FileManager.default.fileExists(atPath: whisperCLIPath) else {
+            throw WhisperError.modelLoadFailed(path: "whisper-cli not found at \(whisperCLIPath)")
+        }
+
+        loadedModelPath = path
+        logger.info("Model loaded: \(model.rawValue) at \(path)")
+    }
+
+    /// Unload the current model
+    func unloadModel() {
+        loadedModelPath = nil
+        logger.info("Model unloaded")
+    }
+
+    // MARK: - Transcription
+
+    /// Transcribe audio samples by writing to a temp WAV file and calling whisper-cli
     func transcribe(
         samples: [Float],
         language: String = "en",
         translate: Bool = false,
         useGPU: Bool = true
     ) throws -> String {
+        guard let modelPath = loadedModelPath else {
+            throw WhisperError.noModelLoaded
+        }
+
         return try queue.sync {
-            guard let ctx = context else {
-                throw WhisperError.noModelLoaded
+            // Write samples to a temporary WAV file
+            let tempDir = FileManager.default.temporaryDirectory
+            let tempWAV = tempDir.appendingPathComponent("meetcapture-\(UUID().uuidString).wav")
+
+            try writeWAV(samples: samples, sampleRate: 16000, to: tempWAV)
+
+            defer {
+                try? FileManager.default.removeItem(at: tempWAV)
             }
 
-            guard !samples.isEmpty else {
-                return ""
+            // Build whisper-cli command
+            let outputBase = tempDir.appendingPathComponent("meetcapture-out-\(UUID().uuidString)")
+
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: whisperCLIPath)
+            process.arguments = [
+                "-m", modelPath,
+                "-f", tempWAV.path,
+                "-l", language,
+                "-otxt",
+                "-of", outputBase.path,
+                "-t", "4",  // 4 threads
+                "--no-prints"  // suppress stdout
+            ]
+
+            if translate {
+                process.arguments?.append("--translate")
             }
 
-            guard !cancellationRequested else {
-                throw WhisperError.transcriptionCancelled
+            let stdout = Pipe()
+            let stderr = Pipe()
+            process.standardOutput = stdout
+            process.standardError = stderr
+
+            try process.run()
+            process.waitUntilExit()
+
+            let exitCode = process.terminationStatus
+            let stderrData = stderr.fileHandleForReading.readDataToEndOfFile()
+            let stderrStr = String(data: stderrData, encoding: .utf8) ?? ""
+
+            guard exitCode == 0 else {
+                throw WhisperError.processError(exitCode: exitCode, stderr: stderrStr)
             }
 
-            isTranscribing = true
-            defer { isTranscribing = false }
-
-            // Configure parameters
-            var params = whisperFullDefaultParams(0) // 0 = greedy strategy
-            params.print_progress = 0
-            params.print_special = 0
-            params.print_realtime = 0
-            params.print_timestamps = 0
-            params.print_colors = 0
-            params.print_resources = 0
-            params.no_timestamps = translate ? 1 : 0
-            params.translate = translate ? 1 : 0
-            params.single_segment = 0
-            params.n_threads = Int32(ProcessInfo.processInfo.activeProcessorCount)
-
-            // Set language
-            language.withCString { langPtr in
-                _ = withUnsafeMutablePointer(to: &params.language.0) { buf in
-                    strncpy(buf, langPtr, 3)
-                }
+            // Read the output .txt file
+            let outputTXT = outputBase.path + ".txt"
+            guard FileManager.default.fileExists(atPath: outputTXT) else {
+                throw WhisperError.transcriptionFailed(reason: "Output file not created: \(outputTXT)")
             }
 
-            // Use Metal acceleration when available
-            if useGPU {
-                params.use_gpu = 1
-                params.gpu_device = -1 // auto-select
-            } else {
-                params.use_gpu = 0
-            }
+            let text = try String(contentsOfFile: outputTXT, encoding: .utf8)
 
-            // Run transcription
-            let samplesPtr = samples.withUnsafeBufferPointer { $0.baseAddress }
-            let result = whisperFull(ctx, params, samplesPtr, Int32(samples.count), params.n_threads)
+            // Cleanup
+            try? FileManager.default.removeItem(atPath: outputTXT)
 
-            guard result == 0 else {
-                throw WhisperError.transcriptionFailed(errorCode: result)
-            }
-
-            // Extract text from all segments
-            let nSegments = whisperFullNSegments(ctx)
-            var fullText = ""
-
-            for i in 0..<nSegments {
-                guard cancellationRequested == false else {
-                    throw WhisperError.transcriptionCancelled
-                }
-
-                if let segTextPtr = whisperFullGetSegmentText(ctx, i) {
-                    let segText = String(cString: segTextPtr).trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !segText.isEmpty {
-                        if !fullText.isEmpty {
-                            fullText += " "
-                        }
-                        fullText += segText
-                    }
-                }
-            }
-
-            logger.debug("Transcription complete: \(fullText.prefix(100))...")
-            return fullText
+            return text.trimmingCharacters(in: .whitespacesAndNewlines)
         }
     }
 
-    /// Transcribe with partial/streaming support.
-    /// Returns results segment by segment via callback.
-    func transcribeStreaming(
-        samples: [Float],
-        language: String = "en",
-        onSegment: @escaping (Int, String) -> Void
-    ) throws {
-        try queue.sync {
-            guard let ctx = context else {
-                throw WhisperError.noModelLoaded
-            }
+    // MARK: - WAV Writing
 
-            guard !samples.isEmpty else { return }
+    /// Write Float32 samples as a 16-bit PCM WAV file (mono, 16kHz)
+    private func writeWAV(samples: [Float], sampleRate: Int, to url: URL) throws {
+        let numSamples = samples.count
+        let numChannels: UInt16 = 1
+        let bitsPerSample: UInt16 = 16
+        let byteRate = UInt32(sampleRate) * UInt32(numChannels) * UInt32(bitsPerSample / 8)
+        let blockAlign = numChannels * (bitsPerSample / 8)
+        let dataSize = UInt32(numSamples * Int(bitsPerSample / 8))
+        let fileSize = 36 + dataSize
 
-            var params = whisperFullDefaultParams(0)
-            params.print_progress = 0
-            params.print_special = 0
-            params.print_realtime = 0
-            params.print_timestamps = 0
-            params.n_threads = Int32(ProcessInfo.processInfo.activeProcessorCount)
+        var data = Data()
 
-            language.withCString { langPtr in
-                _ = withUnsafeMutablePointer(to: &params.language.0) { buf in
-                    strncpy(buf, langPtr, 3)
-                }
-            }
+        // RIFF header
+        data.append(contentsOf: "RIFF".utf8)
+        data.append(contentsOf: withUnsafeBytes(of: fileSize.littleEndian) { Array($0) })
+        data.append(contentsOf: "WAVE".utf8)
 
-            params.use_gpu = 1
-            params.gpu_device = -1
+        // fmt chunk
+        data.append(contentsOf: "fmt ".utf8)
+        data.append(contentsOf: withUnsafeBytes(of: UInt32(16).littleEndian) { Array($0) }) // chunk size
+        data.append(contentsOf: withUnsafeBytes(of: UInt16(1).littleEndian) { Array($0) })  // PCM format
+        data.append(contentsOf: withUnsafeBytes(of: numChannels.littleEndian) { Array($0) })
+        data.append(contentsOf: withUnsafeBytes(of: UInt32(sampleRate).littleEndian) { Array($0) })
+        data.append(contentsOf: withUnsafeBytes(of: byteRate.littleEndian) { Array($0) })
+        data.append(contentsOf: withUnsafeBytes(of: blockAlign.littleEndian) { Array($0) })
+        data.append(contentsOf: withUnsafeBytes(of: bitsPerSample.littleEndian) { Array($0) })
 
-            let samplesPtr = samples.withUnsafeBufferPointer { $0.baseAddress }
-            let result = whisperFull(ctx, params, samplesPtr, Int32(samples.count), params.n_threads)
+        // data chunk
+        data.append(contentsOf: "data".utf8)
+        data.append(contentsOf: withUnsafeBytes(of: dataSize.littleEndian) { Array($0) })
 
-            guard result == 0 else {
-                throw WhisperError.transcriptionFailed(errorCode: result)
-            }
-
-            let nSegments = whisperFullNSegments(ctx)
-            for i in 0..<nSegments {
-                if let segTextPtr = whisperFullGetSegmentText(ctx, i) {
-                    let text = String(cString: segTextPtr).trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !text.isEmpty {
-                        onSegment(Int(i), text)
-                    }
-                }
-            }
+        // Convert Float32 to Int16 PCM
+        for sample in samples {
+            let clamped = max(-1.0, min(1.0, sample))
+            let int16Sample = Int16(clamped * 32767.0)
+            data.append(contentsOf: withUnsafeBytes(of: int16Sample.littleEndian) { Array($0) })
         }
+
+        try data.write(to: url)
     }
-
-    /// Cancel any in-progress transcription
-    func cancelTranscription() {
-        queue.sync {
-            cancellationRequested = true
-            // Reset after a brief delay so next transcription can proceed
-        }
-        queue.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-            self?.cancellationRequested = false
-        }
-    }
-
-    /// Unload the current model to free memory.
-    func unloadModel() {
-        queue.sync {
-            unloadModelSync()
-        }
-    }
-
-    /// Check if a model is currently loaded
-    var isModelLoaded: Bool {
-        queue.sync { context != nil }
-    }
-
-    /// Currently loaded model size (if any)
-    var currentModel: WhisperModelSize? {
-        queue.sync { loadedModel }
-    }
-
-    // MARK: - Internal
-
-    /// Must be called from within queue.sync or queue.async
-    private func unloadModelSync() {
-        guard let ctx = context else { return }
-
-        logger.info("Unloading whisper model: \(self.loadedModel?.rawValue ?? "unknown")")
-        whisperFree(ctx)
-
-        context = nil
-        loadedModel = nil
-        loadedModelPath = nil
-
-        logger.info("Model unloaded successfully")
-    }
-}
-
-// MARK: - WhisperError
-
-enum WhisperError: LocalizedError, CustomStringConvertible {
-    case modelLoadFailed(path: String)
-    case noModelLoaded
-    case transcriptionFailed(errorCode: Int32)
-    case transcriptionCancelled
-    case insufficientMemory(requiredMB: UInt64, availableMB: UInt64)
-
-    var description: String {
-        switch self {
-        case .modelLoadFailed(let path):
-            return "Failed to load whisper model from: \(path)"
-        case .noModelLoaded:
-            return "No whisper model loaded. Call loadModel() first."
-        case .transcriptionFailed(let code):
-            return "Whisper transcription failed with error code: \(code)"
-        case .transcriptionCancelled:
-            return "Transcription was cancelled"
-        case .insufficientMemory(let required, let available):
-            return "Insufficient memory: need \(required)MB, have \(available)MB"
-        }
-    }
-
-    var errorDescription: String? { description }
 }
