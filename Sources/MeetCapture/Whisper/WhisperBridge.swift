@@ -81,13 +81,15 @@ final class WhisperBridge {
     var isModelLoaded: Bool { loadedModelPath != nil }
 
     private init() {
-        // Find whisper-cli
+        // Find whisper-cli — bundled version first, then Homebrew
+        let bundleCLI = Bundle.main.resourcePath.map { "\($0)/whisper-cli" }
         let candidates = [
+            bundleCLI,
             "/opt/homebrew/bin/whisper-cli",
             "/usr/local/bin/whisper-cli",
             "/opt/homebrew/bin/whisper",
             "/usr/local/bin/whisper"
-        ]
+        ].compactMap { $0 }
         whisperCLIPath = candidates.first { FileManager.default.fileExists(atPath: $0) } ?? "/opt/homebrew/bin/whisper-cli"
         logger.info("whisper-cli path: \(self.whisperCLIPath)")
     }
@@ -120,7 +122,7 @@ final class WhisperBridge {
     /// Transcribe audio samples by writing to a temp WAV file and calling whisper-cli
     func transcribe(
         samples: [Float],
-        language: String = "en",
+        language: String = "es",
         translate: Bool = false,
         useGPU: Bool = true
     ) throws -> String {

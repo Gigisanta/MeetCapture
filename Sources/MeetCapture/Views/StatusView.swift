@@ -27,16 +27,21 @@ struct StatusView: View {
         // Permission warnings
         if !appState.hasAudioPermission {
             Section {
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 6) {
                     Label("Screen Recording required", systemImage: "exclamationmark.triangle.fill")
                         .font(.caption)
                         .foregroundColor(.orange)
-                    Button("Grant Permission") {
-                        // Opens System Settings > Privacy > Screen Recording
+                    Text("MeetCapture needs Screen Recording permission to capture system audio from Google Meet.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("Open System Settings → Screen Recording") {
                         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!)
                     }
-                    .font(.caption2)
+                    .font(.caption)
+                    .buttonStyle(.borderedProminent)
                 }
+                .padding(.vertical, 2)
             }
             Divider()
         }

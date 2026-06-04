@@ -76,11 +76,15 @@ SCRIPT
 chmod +x "$APP_BUNDLE/Contents/Resources/meet-daemon"
 
 # Sign the app (ad-hoc, required for ScreenCaptureKit + EventKit)
+# Set designated requirement to bundle ID (stable across builds)
 codesign --force --deep --sign - \
+    --preserve-metadata=identifier,entitlements \
+    -r='designated => identifier "com.maatwork.meetcapture"' \
+    "$APP_BUNDLE" 2>/dev/null || codesign --force --deep --sign - \
     --entitlements "$REPO_DIR/Sources/MeetCapture/MeetCapture.entitlements" \
     "$APP_BUNDLE" 2>/dev/null
 
-echo "  Signed: ad-hoc"
+echo "  Signed: ad-hoc (stable bundle ID requirement)"
 
 # Install to destination
 rm -rf "$DEST"
