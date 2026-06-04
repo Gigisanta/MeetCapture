@@ -99,14 +99,14 @@ struct SettingsView: View {
             if !appState.hasCalendarAccess {
                 Button("Grant Access") {
                     Task {
-                        try? await appState.calendarService.requestAccess()
+                        await appState.calendarService.requestAccess()
                     }
                 }
             }
             
             Text("Whitelisted emails:")
                 .font(.caption)
-            ForEach(CalendarService.whitelistedEmails, id: \.self) { email in
+            ForEach(Array(CalendarService.whitelistedEmails), id: \.self) { email in
                 Text(email)
                     .font(.caption2)
                     .foregroundStyle(.secondary)

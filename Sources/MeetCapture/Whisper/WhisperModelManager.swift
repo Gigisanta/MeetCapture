@@ -150,7 +150,8 @@ final class WhisperModelManager {
         let availableMB = availableMemoryMB()
 
         // If we have plenty of memory, use preferred
-        if availableMB > preferred.estimatedMemoryGB * 1024.0 + Double(memoryThresholdMB) {
+        let requiredMB = UInt64(preferred.estimatedMemoryGB * 1024.0) + memoryThresholdMB
+        if availableMB > requiredMB {
             if isModelDownloaded(preferred) {
                 return preferred
             }
@@ -216,7 +217,7 @@ final class WhisperModelManager {
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(handleDidReceiveMemoryWarning),
-            name: NSApplication.didReceiveMemoryWarningNotification,
+            name: NSApplication.willTerminateNotification,
             object: nil
         )
 

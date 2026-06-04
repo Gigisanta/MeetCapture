@@ -197,10 +197,11 @@ final class SocketClient {
             )
         }
 
+        let pathSize = MemoryLayout.size(ofValue: addr.sun_path)
         withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
             let dest = UnsafeMutableRawPointer(ptr).assumingMemoryBound(to: CChar.self)
             socketPath.withCString { src in
-                _ = strncpy(dest, src, MemoryLayout.size(ofValue: addr.sun_path))
+                _ = strncpy(dest, src, pathSize)
             }
         }
 
@@ -208,7 +209,7 @@ final class SocketClient {
 
         let result = withUnsafePointer(to: &addr) { ptr in
             ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
-                connect(socketFD, sockPtr, addrLen)
+                Darwin.connect(socketFD, sockPtr, addrLen)
             }
         }
 

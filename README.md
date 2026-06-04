@@ -1,162 +1,188 @@
-# MeetCapture
+# MeetCapture — Audio Transcription Suite
 
-**Automatic Google Meet transcription for macOS.** 100% local, zero cloud, no bots joining your calls.
-
-MeetCapture captures system audio during Google Meet calls, transcribes it with Whisper, and generates structured summaries — all without anyone knowing you're recording.
-
-Built by [MaatWork](https://maat.work) as an open-source tool for teams that need detailed meeting records without the privacy concerns of cloud-based transcription services.
+Suite de herramientas para captura y transcripcion de reuniones en macOS.
 
 ---
 
-## How It Works
+## Estado Actual (2026-05-29)
 
-```
-Google Calendar → Detect meeting with external attendees
-       ↓
-BlackHole (system audio loopback) → ffmpeg captures audio
-       ↓
-Meeting ends → Whisper.cpp transcribes (Apple Silicon GPU)
-       ↓
-Post-process → Clean artifacts, remove repetitions
-       ↓
-Structured summary → Markdown + HTML report
-```
-
-**Privacy:** Audio never leaves your machine. No third-party SaaS. No bot in the meeting. No one knows you're recording.
+| Componente | Estado | Descripcion |
+|---|---|---|
+| `transcribe.py` | **Activo** | Script unificado de transcripcion en `~/.hermes/scripts/` |
+| `transcribe_worker.py` | Referencia | Worker original con chunking (base para `transcribe.py`) |
+| `MeetCapture.app` | Pausado | Menu bar app para captura automatica de Google Meet |
+| `meet-daemon` | **Deprecado** | Daemon de captura de calendario (reemplazado por transcribe.py) |
+| Skill `audio-transcription-batch` | **Activo** | Documentacion del pipeline en `~/.hermes/skills/media/` |
 
 ---
 
-## Quick Start
+## Pipeline Actual
 
-### 1. Install dependencies
+```
+Audio (m4a, mp3, wav, ogg, etc.)
+    │
+    ▼
+~/.hermes/scripts/transcribe.py <audio> [title]
+    │
+    ├── ffmpeg → split en chunks WAV de 10min (si >10min)
+    ├── whisper-cli + ggml-base (141MB) + initial prompt
+    ├── concatenar chunks
+    ├── post-proceso (hallucinations, repeticiones, garbage)
+    │
+    ▼
+~/.hermes/Transcripts/YYYY-MM-DD_HHMM-<title>.txt
+```
+
+### Uso
 
 ```bash
-# Audio loopback (requires reboot)
-brew install blackhole-16ch
+# Transcripcion basica
+python3 ~/.hermes/scripts/transcribe.py ~/Downloads/reunion.m4a "Reunion-Virginia"
 
-# Whisper (local STT)
-brew install whisper-cpp
-mkdir -p ~/.whisper/models
-curl -L -o ~/.whisper/models/ggml-base.bin \
-  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin
+# Con modelo medium (si tenes RAM suficiente, ~2GB libre)
+WHISPER_MODEL=medium python3 ~/.hermes/scripts/transcribe.py ~/Downloads/reunion.m4a
 
-# FFmpeg
-brew install ffmpeg
-
-# Google Workspace CLI
-brew install googleworkspace-cli
-gws auth login --services calendar
+# Verificar modelo seleccionado
+python3 -c "from pathlib import Path; print('Modelos:', list(Path.home().joinpath('.whisper/models').glob('ggml-*.bin')))"
 ```
 
-### 2. Install MeetCapture
+### Output
+
+Los transcripts se guardan en `~/.hermes/Transcripts/`:
+```
+~/.hermes/Transcripts/
+├── 2026-05-26_0000-Reunion-Infranoba.txt
+├── 2026-05-28_1548-Reunion-con-Virginia.txt
+└── 2026-05-29_1316-Reunion-Virginia-v2.txt
+```
+
+---
+
+## Precision de Transcripcion
+
+### Modelo Actual: ggml-base (141MB)
+
+| Aspecto | Calidad |
+|---|---|
+| Palabras comunes en español | Buena |
+| Nombres propios (Virginia, Reinnova, MaatWork) | Limitada |
+| Terminos tecnicos (certificacion, redeterminacion) | Aceptable |
+| Puntuacion y segmentacion | Basica |
+
+### Mejoras Implementadas
+
+1. **Initial prompt** con terminos de dominio (participantes, proyectos, jargon tecnico)
+2. **Carry initial prompt** entre chunks para mantener contexto
+3. **Post-proceso unificado**: repeticiones + Jaccard similarity + garbage patterns
+4. **Formato WAV** (no FLAC) para compatibilidad con whisper-cli
+
+### Mejoras Disponibles
+
+| Opcion | Costo | Impacto | RAM |
+|---|---|---|---|
+| Modelo medium (ggml-medium.bin, 1.4GB) | $0 | Alto | ~2GB libre |
+| Post-proceso con LLM (correccion de nombres) | Tokens | Alto | API |
+| Fine-tuning con datos especificos | ~$100 GPU | Muy alto | N/A |
+
+Para usar medium:
+```bash
+# Descargar (una sola vez)
+curl -L --output ~/.whisper/models/ggml-medium.bin \
+  "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin"
+
+# Usar
+WHISPER_MODEL=medium python3 ~/.hermes/scripts/transcribe.py audio.m4a
+```
+
+---
+
+## Dependencias
+
+| Tool | Version | Instalacion |
+|---|---|---|
+| whisper-cli | ultima | `brew install whisper-cpp` |
+| ffmpeg | ultima | `brew install ffmpeg` |
+| ggml-base.bin | 141MB | Auto-descarga en primer uso |
+| Python | 3.10+ | Sistema |
+
+### Verificar dependencias
 
 ```bash
-git clone https://github.com/Gigisanta/MeetCapture.git
-cd MeetCapture
-
-# Create Python venv
-python3 -m venv .app-venv
-.app-venv/bin/pip install rumps
-
-# Compile native launcher
-clang -target arm64-apple-macosx13.0 \
-    -framework Cocoa -framework Foundation \
-    -o MeetCapture.app/Contents/MacOS/MeetCapture \
-    MeetCaptureLauncher.m
-
-# Copy Python files
-cp daemon.py MeetCapture.app/Contents/Resources/meet-daemon.py
-cp transcribe_worker.py MeetCapture.app/Contents/Resources/
-cp MeetCaptureApp.py MeetCapture.app/Contents/Resources/
-
-# Run
-open MeetCapture.app
-```
-
-### 3. Configure
-
-Click the microphone icon in the menu bar → **Settings** → Set your transcript directory.
-
----
-
-## Menu Bar
-
-The app shows a **microphone icon** in your menu bar:
-
-| Icon | State |
-|------|-------|
-| 🎤 (black) | Waiting for meeting |
-| 🎤 (red dot) | Recording in progress |
-| 🎤 (orange) | Daemon stopped |
-
-Click to see:
-- Current status and meeting name
-- Stop Recording
-- Open Transcripts Folder
-- View Log
-- Settings
-- Quit
-
----
-
-## What Gets Recorded
-
-- ✅ Meetings with a **Google Meet link** + **external attendees**
-- ❌ Personal events, solo calls, meetings without Meet link
-
----
-
-## Architecture
-
-```
-MeetCapture.app (native Objective-C, ~40MB RAM)
-  └── daemon.py (background, ~20MB RAM, 0% CPU idle)
-        ├── Calendar polling (smart intervals)
-        ├── ffmpeg capture (BlackHole → FLAC)
-        ├── transcribe_worker.py (async, chunked)
-        │     ├── Whisper.cpp (Apple Silicon GPU)
-        │     └── Streaming post-processing
-        └── Hermes integration (.pending signal)
+which whisper-cli && whisper-cli --version
+which ffmpeg && ffmpeg -version | head -1
+ls -lh ~/.whisper/models/ggml-base.bin
 ```
 
 ---
 
-## Project Structure
+## Estructura del Proyecto
 
 ```
-MeetCapture/
-├── README.md
-├── LICENSE (MIT)
-├── MeetCaptureLauncher.m    ← Native Objective-C menu bar app
-├── MeetCaptureApp.py        ← Python fallback (rumps)
-├── daemon.py                ← Background daemon
-├── transcribe_worker.py     ← Async transcription worker
-├── MeetCapture.app/         ← macOS app bundle
-├── com.maatwork.meetcapture.plist ← LaunchAgent
-└── docs/
-    ├── INSTALLATION.md
-    ├── ARCHITECTURE.md
-    └── TROUBLESHOOTING.md
+meetings-repo/                    # Este repo
+├── README.md                     # Este archivo
+├── SPEC.md                       # Spec original de MeetCapture v4
+├── Sources/                      # Swift sources (MeetCapture.app)
+├── transcribe_worker.py          # Worker original (referencia)
+├── docs/
+│   ├── ARCHITECTURE.md           # Arquitectura de MeetCapture.app
+│   ├── INSTALLATION.md           # Instalacion de MeetCapture.app
+│   └── TROUBLESHOOTING.md        # Troubleshooting de MeetCapture.app
+└── build.sh                      # Build script para MeetCapture.app
+
+~/.hermes/
+├── scripts/
+│   └── transcribe.py             # Script unificado de transcripcion
+├── Transcripts/                  # Output de transcripciones
+│   ├── YYYY-MM-DD_HHMM-title.txt
+│   └── ...
+└── skills/media/
+    └── audio-transcription-batch/ # Skill documentacion
+        └── SKILL.md
+
+~/meetings/                       # Runtime directory (MeetCapture app)
+├── inbox/                        # dropzone para audios
+└── recordings/                   # grabaciones del daemon (legacy)
+
+~/.hermes/Transcripts/            # Output centralizado
+├── YYYY-MM-DD_HHMM-title.txt     # transcripts crudos
+├── summaries/                    # resumenes HTML
+│   └── YYYY-MM-DD_resumen.html
+└── README.md
 ```
 
 ---
 
-## Contributing
+## MeetCapture.app (Pausado)
 
-1. Fork → Branch → Commit → Push → PR
+La app nativa de menu bar para captura automatica de Google Meet esta pausada.
+Los docs en `docs/` describen su arquitectura y funcionamiento.
+
+Para reactivar:
+```bash
+cd ~/meetings-repo
+./build.sh
+open ~/meetings/MeetCapture.app
+```
+
+**Nota:** El `meet-daemon` fue deprecado. La captura automatica de calendario
+y la transcripcion en vivo requieren re-evaluacion de la arquitectura.
 
 ---
 
-## License
+## Cambios Recientes
 
-MIT License. See [LICENSE](LICENSE).
+### 2026-05-29 — Consolidacion del pipeline
+
+- Creado `~/.hermes/scripts/transcribe.py` como script unificado
+- Deprecado `meet-daemon` (era parte de MeetCapture, no del pipeline de transcripcion)
+- Migrado formato de FLAC a WAV (compatibilidad con whisper-cli)
+- Agregado initial prompt con terminos de dominio
+- Creado directorio `~/.hermes/Transcripts/` como output estandar
+- Creada skill `audio-transcription-batch` con documentacion completa
+- Limpiado PID file, state, y logs del daemon viejo
 
 ---
 
-## Credits
+## Licencia
 
-- [whisper.cpp](https://github.com/ggerganov/whisper.cpp) — Local STT
-- [BlackHole](https://github.com/ExistentialAudio/BlackHole) — Audio loopback
-- [gws CLI](https://github.com/nicholasgasior/gws) — Google Calendar API
-
-Built by [MaatWork](https://maat.work)
+Proyecto interno MaatWork.

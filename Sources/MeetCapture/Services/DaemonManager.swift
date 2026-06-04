@@ -41,11 +41,8 @@ final class DaemonManager: ObservableObject {
         case .notFound:
             logger.error("Daemon plist not found in app bundle")
             
-        case .permissionDenied:
-            logger.error("Daemon registration permission denied")
-            
         @unknown default:
-            logger.warning("Unknown daemon status: \(String(describing: status))")
+            logger.warning("Unknown daemon status: \(String(describing: self.status))")
         }
     }
     
@@ -83,7 +80,6 @@ final class DaemonManager: ObservableObject {
         case .notRegistered: return "Not registered"
         case .notFound: return "Plist not found in bundle"
         case .requiresApproval: return "Needs approval"
-        case .permissionDenied: return "Permission denied"
         @unknown default: return "Unknown"
         }
     }

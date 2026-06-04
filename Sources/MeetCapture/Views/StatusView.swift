@@ -24,6 +24,34 @@ struct StatusView: View {
         
         Divider()
         
+        // Permission warnings
+        if !appState.hasAudioPermission {
+            Section {
+                VStack(alignment: .leading, spacing: 4) {
+                    Label("Screen Recording required", systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundColor(.orange)
+                    Button("Grant Permission") {
+                        // Opens System Settings > Privacy > Screen Recording
+                        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!)
+                    }
+                    .font(.caption2)
+                }
+            }
+            Divider()
+        }
+        
+        // Error message
+        if let error = appState.errorMessage {
+            Section {
+                Text(error)
+                    .font(.caption2)
+                    .foregroundColor(.red)
+                    .lineLimit(3)
+            }
+            Divider()
+        }
+        
         // Current status
         Section {
             switch appState.phase {
@@ -64,7 +92,7 @@ struct StatusView: View {
             Button(action: { appState.startRecording() }) {
                 Label("Start Recording", systemImage: "record.circle")
             }
-            .disabled(appState.phase == .recording || appState.phase == .transcribing)
+            .disabled(!appState.hasAudioPermission || appState.phase == .recording || appState.phase == .transcribing)
             
             Button(action: { appState.stopRecording() }) {
                 Label("Stop Recording", systemImage: "stop.circle")
@@ -158,11 +186,9 @@ struct StatusView: View {
         }
     }
     
-    // MARK: - Helpers
-    
     private func formatDuration(_ duration: TimeInterval) -> String {
         let minutes = Int(duration) / 60
         let seconds = Int(duration) % 60
-        return String(format: "%02d:%02d", minutes, seconds)
+        return String(format: "%d:%02d", minutes, seconds)
     }
 }
