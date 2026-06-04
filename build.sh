@@ -88,4 +88,30 @@ cp -R "$APP_BUNDLE" "$DEST"
 echo "  Installed to: $DEST"
 echo ""
 echo "Done. Run with: open '$DEST'"
-echo "For login item: osascript -e 'tell application \"System Events\" to make login item at end with properties {path: \"$DEST\", hidden: true}'"
+echo ""
+echo "=== Post-install: Register daemon ==="
+# Copy daemon plist to user's LaunchAgents with absolute paths
+DAEMON_PLIST_SRC="$DEST/Contents/Library/LaunchAgents/com.maatwork.meetcapture.daemon.plist"
+DAEMON_PLIST_DST="$HOME/Library/LaunchAgents/com.maatwork.meetcapture.daemon.plist"
+
+# Unload existing if present
+launchctl unload "$DAEMON_PLIST_DST" 2>/dev/null || true
+
+# Create modified plist with absolute paths
+python3 -c "
+import plistlib, os
+home = os.path.expanduser('~')
+with open('$DAEMON_PLIST_SRC', 'rb') as f:
+    plist = plistlib.load(f)
+plist.pop('BundleProgram', None)
+plist['ProgramArguments'] = ['$DEST/Contents/Resources/meet-daemon']
+plist['StandardOutPath'] = '/tmp/meetcapture-daemon.log'
+plist['StandardErrorPath'] = '/tmp/meetcapture-daemon.log'
+with open('$DAEMON_PLIST_DST', 'wb') as f:
+    plistlib.dump(plist, f)
+print('Plist written to $DAEMON_PLIST_DST')
+"
+
+# Load daemon
+launchctl load "$DAEMON_PLIST_DST" 2>/dev/null && echo "Daemon loaded" || echo "Daemon load deferred (will load at next app launch)"
+echo "Done."
