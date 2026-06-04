@@ -4,6 +4,7 @@
 import SwiftUI
 import Combine
 import UserNotifications
+import os
 
 /// Central app state — single source of truth
 @MainActor
@@ -84,8 +85,12 @@ final class AppState: ObservableObject {
     // MARK: - Lifecycle
     
     func startup() async {
+        let logger = Logger(subsystem: "com.maatwork.meetcapture", category: "appstate")
+        logger.info("startup() called — initializing services")
+        
         // Request permissions
         await requestPermissions()
+        logger.info("Permissions: calendar=\(self.hasCalendarAccess) audio=\(self.hasAudioPermission)")
         
         // Register daemon
         daemonManager.registerIfNeeded()

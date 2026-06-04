@@ -3,6 +3,7 @@
 
 import ServiceManagement
 import os.log
+import Foundation
 
 /// Manages the background daemon via SMAppService
 @MainActor
@@ -23,12 +24,16 @@ final class DaemonManager: ObservableObject {
         
         switch status {
         case .notRegistered:
+            // Try SMAppService first
             do {
                 try agentService.register()
-                logger.info("Daemon registered successfully")
+                logger.info("Daemon registered successfully via SMAppService")
                 refreshStatus()
             } catch {
-                logger.error("Failed to register daemon: \(error.localizedDescription)")
+                logger.warning("SMAppService registration failed: \(error.localizedDescription)")
+                logger.info("Falling back to launchctl bootstrap")
+                // Fallback: use launchctl directly
+                registerViaLaunchctl()
             }
             
         case .enabled:
@@ -39,7 +44,8 @@ final class DaemonManager: ObservableObject {
             openSystemSettings()
             
         case .notFound:
-            logger.error("Daemon plist not found in app bundle")
+            logger.warning("Daemon plist not found by SMAppService, trying direct registration")
+            registerViaLaunchctl()
             
         @unknown default:
             logger.warning("Unknown daemon status: \(String(describing: self.status))")
@@ -88,5 +94,64 @@ final class DaemonManager: ObservableObject {
     
     func openSystemSettings() {
         SMAppService.openSystemSettingsLoginItems()
+    }
+    
+    // MARK: - Fallback Registration
+    
+    /// Register daemon via launchctl bootstrap (fallback when SMAppService fails)
+    private func registerViaLaunchctl() {
+        guard let bundlePath = Bundle.main.bundlePath as NSString? else {
+            logger.error("Cannot determine bundle path")
+            return
+        }
+        let srcPlist = "\(bundlePath)/Contents/Library/LaunchAgents/com.maatwork.meetcapture.daemon.plist"
+        let dstPlist = NSHomeDirectory() + "/Library/LaunchAgents/com.maatwork.meetcapture.daemon.plist"
+        
+        guard FileManager.default.fileExists(atPath: srcPlist) else {
+            logger.error("Daemon plist not found at: \(srcPlist)")
+            return
+        }
+        
+        // Copy plist to user's LaunchAgents directory with absolute paths
+        let pythonPath = "\(bundlePath)/Contents/Resources/meet-daemon"
+        let logPath = "/tmp/meetcapture-daemon.log"
+        
+        // Read plist and update paths
+        guard var plistData = NSMutableDictionary(contentsOfFile: srcPlist) as? [String: Any] else {
+            logger.error("Cannot read daemon plist")
+            return
+        }
+        
+        // Replace BundleProgram with ProgramArguments using absolute paths
+        plistData.removeValue(forKey: "BundleProgram")
+        plistData["ProgramArguments"] = [pythonPath]
+        plistData["StandardOutPath"] = logPath
+        plistData["StandardErrorPath"] = logPath
+        
+        // Write updated plist
+        let updatedPlist = NSDictionary(dictionary: plistData)
+        guard updatedPlist.write(toFile: dstPlist, atomically: true) else {
+            logger.error("Cannot write daemon plist to \(dstPlist)")
+            return
+        }
+        
+        // Load via launchctl
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        process.arguments = ["load", dstPlist]
+        
+        do {
+            try process.run()
+            process.waitUntilExit()
+            if process.terminationStatus == 0 {
+                logger.info("Daemon registered via launchctl load")
+            } else {
+                logger.warning("launchctl load exited: \(process.terminationStatus)")
+            }
+        } catch {
+            logger.warning("launchctl load failed: \(error.localizedDescription)")
+        }
+        
+        refreshStatus()
     }
 }
