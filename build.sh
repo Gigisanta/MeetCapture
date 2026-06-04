@@ -7,7 +7,7 @@ APP_NAME="MeetCapture"
 BUILD_DIR="/tmp"
 APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
-DEST="${1:-$HOME/meetings/$APP_NAME.app}"
+DEST="${1:-$HOME/meetings/MeetCapture.app}"
 
 echo "Building $APP_NAME v4..."
 echo "  Sources:  $REPO_DIR/Sources/MeetCapture"

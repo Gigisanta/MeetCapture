@@ -32,6 +32,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Hide dock icon — menu bar only app
         NSApp.setActivationPolicy(.accessory)
+        
+        // Initialize services (permissions, daemon, calendar, socket)
+        Task { @MainActor in
+            await AppState.shared?.startup()
+        }
     }
     
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

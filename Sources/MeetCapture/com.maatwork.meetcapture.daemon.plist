@@ -6,9 +6,12 @@
     <key>Label</key>
     <string>com.maatwork.meetcapture.daemon</string>
 
-    <!-- Path relative to app bundle root -->
-    <key>BundleProgram</key>
-    <string>Contents/Resources/meet-daemon</string>
+    <!-- Python venv path inside meetings dir -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/prueba/meetings/.app-venv/bin/python3</string>
+        <string>/Users/prueba/meetings/MeetCapture.app/Contents/Resources/daemon_main.py</string>
+    </array>
 
     <!-- Run at login -->
     <key>RunAtLoad</key>
@@ -25,7 +28,7 @@
     <key>ThrottleInterval</key>
     <integer>30</integer>
 
-    <!-- Background priority — don't starve UI apps -->
+    <!-- Background priority -->
     <key>ProcessType</key>
     <string>Background</string>
     <key>LowPriorityIO</key>
