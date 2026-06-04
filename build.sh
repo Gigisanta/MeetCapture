@@ -10,7 +10,7 @@ REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 DEST="${1:-$HOME/meetings/MeetCapture.app}"
 
 echo "Building $APP_NAME v4..."
-echo "  Sources:  $REPO_DIR/Sources/MeetCapture"
+echo "  Sources:  $REPO_DIR/Sources"
 echo "  Output:   $DEST"
 
 # Create bundle structure
@@ -19,7 +19,7 @@ mkdir -p "$APP_BUNDLE/Contents/Resources"
 mkdir -p "$APP_BUNDLE/Contents/Library/LaunchAgents"
 
 # Find all Swift sources
-SOURCES=$(find "$REPO_DIR/Sources/MeetCapture" -name "*.swift" | sort | tr '\n' ' ')
+SOURCES=$(find "$REPO_DIR/Sources" -name "*.swift" | sort | tr '\n' ' ')
 N_SOURCES=$(echo "$SOURCES" | wc -w | tr -d ' ')
 echo "  Compiling $N_SOURCES Swift files..."
 
@@ -41,9 +41,9 @@ swiftc \
 echo "  Binary: $(du -h "$APP_BUNDLE/Contents/MacOS/$APP_NAME" | cut -f1)"
 
 # Copy metadata
-cp "$REPO_DIR/Sources/MeetCapture/Info.plist" "$APP_BUNDLE/Contents/"
-cp "$REPO_DIR/Sources/MeetCapture/MeetCapture.entitlements" "$APP_BUNDLE/Contents/"
-cp "$REPO_DIR/Sources/MeetCapture/com.maatwork.meetcapture.daemon.plist" \
+cp "$REPO_DIR/Resources/Info.plist" "$APP_BUNDLE/Contents/"
+cp "$REPO_DIR/Resources/MeetCapture.entitlements" "$APP_BUNDLE/Contents/"
+cp "$REPO_DIR/Resources/com.maatwork.meetcapture.daemon.plist" \
    "$APP_BUNDLE/Contents/Library/LaunchAgents/"
 
 # Bundle whisper-cli binary
@@ -53,8 +53,7 @@ if [ -f /opt/homebrew/bin/whisper-cli ]; then
 fi
 
 # Bundle Python daemon scripts
-cp "$REPO_DIR/Sources/meet-daemon/daemon_main.py" "$APP_BUNDLE/Contents/Resources/"
-cp "$REPO_DIR/Sources/meet-daemon/socket_server.py" "$APP_BUNDLE/Contents/Resources/"
+cp "$REPO_DIR/Daemon/server.py" "$APP_BUNDLE/Contents/Resources/"
 
 # Create daemon launcher script
 cat > "$APP_BUNDLE/Contents/Resources/meet-daemon" << 'SCRIPT'
@@ -71,7 +70,7 @@ else
     PYTHON="/usr/bin/python3"
 fi
 export PATH="$BUNDLE/Contents/Resources:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
-exec "$PYTHON" "$DIR/daemon_main.py"
+exec "$PYTHON" "$DIR/server.py"
 SCRIPT
 chmod +x "$APP_BUNDLE/Contents/Resources/meet-daemon"
 
@@ -81,7 +80,7 @@ codesign --force --deep --sign - \
     --preserve-metadata=identifier,entitlements \
     -r='designated => identifier "com.maatwork.meetcapture"' \
     "$APP_BUNDLE" 2>/dev/null || codesign --force --deep --sign - \
-    --entitlements "$REPO_DIR/Sources/MeetCapture/MeetCapture.entitlements" \
+    --entitlements "$REPO_DIR/Resources/MeetCapture.entitlements" \
     "$APP_BUNDLE" 2>/dev/null
 
 echo "  Signed: ad-hoc (stable bundle ID requirement)"

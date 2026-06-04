@@ -29,8 +29,6 @@ final class AppState: ObservableObject {
     let audioCapture = AudioCaptureService()
     let daemonManager = DaemonManager()
     let whisperManager = WhisperModelManager.shared
-    let socketClient = SocketClient()
-    let energyManager = EnergyManager()
     
     // MARK: - Private
     
@@ -38,6 +36,7 @@ final class AppState: ObservableObject {
     private var recordingStartDate: Date?
     private var cancellables = Set<AnyCancellable>()
     private let transcriptDir: String
+    private var energyActivity: NSObjectProtocol?
     
     // MARK: - Init
     
@@ -88,21 +87,10 @@ final class AppState: ObservableObject {
         let logger = Logger(subsystem: "com.maatwork.meetcapture", category: "appstate")
         logger.info("startup() called — initializing services")
         
-        // Request permissions
         await requestPermissions()
         logger.info("Permissions: calendar=\(self.hasCalendarAccess) audio=\(self.hasAudioPermission)")
         
-        // Register daemon
         daemonManager.registerIfNeeded()
-        
-        // Connect to daemon (best effort)
-        do {
-            try socketClient.connect()
-        } catch {
-            // Non-fatal: daemon might not be running yet
-        }
-        
-        // Request notification permission
         requestNotificationPermission()
         
         phase = .idle
@@ -112,18 +100,15 @@ final class AppState: ObservableObject {
         if phase == .recording {
             stopRecording()
         }
-        socketClient.disconnect()
-        energyManager.endRecordingActivity()
+        endRecordingActivity()
     }
     
     // MARK: - Permissions
     
     private func requestPermissions() async {
-        // Calendar
         await calendarService.requestAccess()
         hasCalendarAccess = calendarService.isAuthorized
         
-        // Audio (Screen Recording)
         hasAudioPermission = audioCapture.checkPermission()
         if !hasAudioPermission {
             audioCapture.requestPermission()
@@ -137,7 +122,6 @@ final class AppState: ObservableObject {
     // MARK: - Meeting Detection
     
     private func setupMeetingDetection() {
-        // React to calendar changes
         calendarService.$upcomingMeetings
             .receive(on: DispatchQueue.main)
             .sink { [weak self] meetings in
@@ -149,12 +133,10 @@ final class AppState: ObservableObject {
     private func evaluateMeetings(_ meetings: [Meeting]) {
         guard phase == .idle || phase == .approaching else { return }
         
-        // Find next meeting within 5 minutes
         if let next = meetings.first(where: { $0.timeUntilStart <= 300 && $0.timeUntilStart > -60 }) {
             if phase != .approaching {
                 phase = .approaching
                 currentMeeting = next
-                // Auto-start recording when meeting starts
                 scheduleRecording(for: next)
             }
         }
@@ -173,9 +155,7 @@ final class AppState: ObservableObject {
     func startRecording() {
         guard phase != .recording else { return }
         
-        // Re-check permission (user may have just granted it in System Settings)
         hasAudioPermission = audioCapture.checkPermission()
-
         guard hasAudioPermission else {
             audioCapture.requestPermission()
             errorMessage = "Grant Screen Recording permission, then try again"
@@ -183,36 +163,24 @@ final class AppState: ObservableObject {
         }
         
         let outputPath = "\(transcriptDir)/recording-\(Date().timeIntervalSince1970).pcm"
-
-        // Begin energy assertion
-        energyManager.beginRecordingActivity()
+        beginRecordingActivity()
         
-        // Start audio capture
         Task {
             do {
                 try await audioCapture.startCapture(outputPath: outputPath)
-
-                // Load whisper model for transcription
                 do {
                     try whisperManager.startRecording()
                 } catch {
-                    // Non-fatal: transcription will fall back to daemon
+                    // Non-fatal
                 }
                 
                 phase = .recording
                 recordingStartDate = Date()
                 startRecordingTimer()
-                
-                // Notify daemon via socket (best effort)
-                do {
-                    _ = try socketClient.startRecording(meetingTitle: currentMeeting?.title ?? "Unknown")
-                } catch {
-                    // Socket failure is non-fatal — recording continues locally
-                }
             } catch {
                 errorMessage = "Recording failed: \(error.localizedDescription)"
                 phase = .idle
-                energyManager.endRecordingActivity()
+                endRecordingActivity()
             }
         }
     }
@@ -224,25 +192,8 @@ final class AppState: ObservableObject {
         stopRecordingTimer()
         
         Task {
-            // Stop audio capture
             await audioCapture.stopCapture()
-            
-            // Notify daemon (best effort)
-            do {
-                _ = try socketClient.stopRecording()
-            } catch {
-                // Socket failure is non-fatal
-            }
-            
-            // Start transcription
-            if let pcmPath = audioCapture.currentOutputPath {
-                await transcribe(audioPath: pcmPath)
-            }
-            
-            // End energy assertion
-            energyManager.endRecordingActivity()
-            
-            // Unload whisper model to free memory
+            endRecordingActivity()
             whisperManager.stopRecording()
         }
     }
@@ -252,23 +203,15 @@ final class AppState: ObservableObject {
     private func transcribe(audioPath: String) async {
         do {
             let outputPath = audioPath.replacingOccurrences(of: ".pcm", with: ".txt")
-            
-            // Use whisper to transcribe
             let pcmData = try Data(contentsOf: URL(fileURLWithPath: audioPath))
             let samples = pcmToFloat32(pcmData)
-            
             let text = try whisperManager.transcribe(samples: samples)
-            
-            // Write transcript
             try text.write(toFile: outputPath, atomically: true, encoding: .utf8)
             
             lastTranscriptPath = outputPath
             phase = .done
-            
-            // Notify Hermes
             notifyHermes(transcriptPath: outputPath, meetingTitle: currentMeeting?.title)
             
-            // Return to idle after 10 seconds
             DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
                 self?.phase = .idle
                 self?.currentMeeting = nil
@@ -279,10 +222,26 @@ final class AppState: ObservableObject {
         }
     }
     
+    // MARK: - Energy Management (inline from EnergyManager)
+    
+    private func beginRecordingActivity() {
+        guard energyActivity == nil else { return }
+        energyActivity = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiated, .idleSystemSleepDisabled],
+            reason: "Recording Google Meet audio"
+        )
+    }
+    
+    private func endRecordingActivity() {
+        if let activity = energyActivity {
+            ProcessInfo.processInfo.endActivity(activity)
+            energyActivity = nil
+        }
+    }
+    
     // MARK: - Helpers
     
     private func setupBindings() {
-        // Reset error after 10 seconds
         $errorMessage
             .compactMap { $0 }
             .delay(for: .seconds(10), scheduler: DispatchQueue.main)
@@ -318,7 +277,6 @@ final class AppState: ObservableObject {
         let title = meetingTitle ?? "Google Meet"
         let notificationText = "Meeting transcript ready: \(title)"
         
-        // macOS local notification via UserNotifications framework
         let content = UNMutableNotificationContent()
         content.title = "MeetCapture"
         content.body = notificationText
