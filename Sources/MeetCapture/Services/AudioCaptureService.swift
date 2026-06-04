@@ -238,25 +238,45 @@ final class AudioCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, @un
     ///
     /// - Returns: `true` if screen recording permission is granted.
     func checkPermission() -> Bool {
-        let granted = CGPreflightScreenCaptureAccess()
-        let dbgSvc = "MeetCapture DEBUG: checkPermission() = \(granted)\n"; if let h = FileHandle(forWritingAtPath: "/tmp/meetcapture_debug.log") { h.seekToEndOfFile(); h.write(dbgSvc.data(using: .utf8)!); h.closeFile() } else { try? dbgSvc.write(toFile: "/tmp/meetcapture_debug.log", atomically: true, encoding: .utf8) }
-        logger.info("Screen capture permission check: \(granted ? "granted" : "not granted")")
+        // Use ScreenCaptureKit API (more reliable than CGPreflightScreenCaptureAccess)
+        // This queries the actual SCShareableContent which requires permission
+        var granted = false
+        let semaphore = DispatchSemaphore(value: 0)
+        Task {
+            do {
+                let _ = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+                granted = true
+            } catch {
+                granted = false
+            }
+            semaphore.signal()
+        }
+        let timeout = semaphore.wait(timeout: .now() + 5.0)
+        if timeout == .timedOut {
+            // Fallback: use CG API if SCKit times out
+            granted = CGPreflightScreenCaptureAccess()
+            logger.warning("SCShareableContent timed out, fallback to CG: \(granted)")
+        }
+        logger.info("Screen capture permission: \(granted ? "granted" : "not granted", privacy: .public)")
         return granted
     }
 
     /// Requests screen recording permission from the user.
     ///
-    /// This triggers the macOS system dialog asking the user to grant
-    /// "Screen & System Audio Recording" permission to MeetCapture.
-    /// After granting, the user may need to restart the app for the
-    /// permission to take effect (macOS quirk).
-    ///
-    /// This is an asynchronous operation — it shows a system dialog and
-    /// waits for the user's response. The actual permission state change
-    /// is handled by the system; this method just initiates the request.
+    /// Uses ScreenCaptureKit API to trigger the permission dialog.
+    /// On macOS 14+, this shows the "Screen & System Audio Recording" prompt.
+    /// After granting, the app must be restarted for permission to take effect.
     func requestPermission() {
-        logger.info("Requesting screen capture permission")
-        CGRequestScreenCaptureAccess()
+        logger.info("Requesting screen capture permission via CGRequestScreenCaptureAccess")
+        // CGRequestScreenCaptureAccess triggers the system permission dialog
+        // This must be called from the main thread
+        if Thread.isMainThread {
+            CGRequestScreenCaptureAccess()
+        } else {
+            DispatchQueue.main.async {
+                CGRequestScreenCaptureAccess()
+            }
+        }
     }
 
     /// Convenience method that checks permission and requests it if not granted.
