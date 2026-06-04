@@ -211,12 +211,18 @@ final class CalendarService: ObservableObject {
         }
 
         return attendees.compactMap { attendee -> String? in
-            guard let email = attendee.emailAddress?.lowercased(),
+            // EKParticipant has .url (mailto:), not .emailAddress
+            let url = attendee.url
+            guard let email = url.absoluteString
+                    .replacingOccurrences(of: "mailto:", with: "")
+                    .addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)?
+                    .removingPercentEncoding?
+                    .lowercased(),
                   !email.isEmpty else {
                 return nil
             }
             // Skip whitelisted (internal) emails.
-            if whitelistedEmails.contains(email) {
+            if Self.whitelistedEmails.contains(email) {
                 return nil
             }
             return email

@@ -167,13 +167,18 @@ final class AppState: ObservableObject {
     
     func startRecording() {
         guard phase != .recording else { return }
+        
+        // Re-check permission (user may have just granted it in System Settings)
+        hasAudioPermission = audioCapture.checkPermission()
+
         guard hasAudioPermission else {
-            errorMessage = "Screen Recording permission required"
+            audioCapture.requestPermission()
+            errorMessage = "Grant Screen Recording permission, then try again"
             return
         }
         
         let outputPath = "\(transcriptDir)/recording-\(Date().timeIntervalSince1970).pcm"
-        
+
         // Begin energy assertion
         energyManager.beginRecordingActivity()
         
@@ -181,7 +186,7 @@ final class AppState: ObservableObject {
         Task {
             do {
                 try await audioCapture.startCapture(outputPath: outputPath)
-                
+
                 // Load whisper model for transcription
                 do {
                     try whisperManager.startRecording()
@@ -300,7 +305,7 @@ final class AppState: ObservableObject {
     private func pcmToFloat32(_ data: Data) -> [Float] {
         let count = data.count / MemoryLayout<Float>.size
         return data.withUnsafeBytes { buffer in
-            Array(buffer.bindMemory(to: Float.self, capacity: count).prefix(count))
+            Array(buffer.bindMemory(to: Float.self).prefix(count))
         }
     }
     

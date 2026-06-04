@@ -1,34 +1,36 @@
+> **Status: PAUSED** — This describes the MeetCapture.app menu bar app.
+> For the ACTIVE transcription pipeline, see [TRANSCRIPTION-PIPELINE.md](TRANSCRIPTION-PIPELINE.md).
+
 # Architecture
 
 ## System Overview
 
-MeetCapture is a macOS menu bar application that automatically captures and transcribes Google Meet calls. It operates entirely locally — no audio leaves the machine, no bots join meetings, no cloud services are required.
+MeetCapture is a native macOS menu bar application built with Swift/SwiftUI that automatically captures and transcribes Google Meet calls. It operates entirely locally — no audio leaves the machine, no bots join meetings, no cloud services are required.
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  MeetCapture.app (menu bar, ~90MB RAM)                  │
-│  ├── Menu bar UI (rumps + PyObjC)                       │
-│  ├── Settings management                                │
-│  └── Daemon lifecycle management                        │
-└────────────────────┬────────────────────────────────────┘
-                     │ spawns
+│  MeetCapture.app (Swift/SwiftUI, ~30MB RAM idle)        │
+│  ├── MenuBarExtra (SwiftUI)                             │
+│  │   └── StatusView + SettingsView                      │
+│  ├── CalendarService (EventKit)                         │
+│  │   └── EKEventStore + change notifications            │
+│  ├── AudioCaptureService (ScreenCaptureKit)             │
+│  │   └── SCStream + SCShareableContent                  │
+│  ├── DaemonManager (SMAppService)                       │
+│  │   └── LaunchAgent lifecycle                          │
+│  ├── WhisperBridge (C FFI)                              │
+│  │   └── whisper.cpp library bindings                   │
+│  └── SocketClient (Unix Domain Socket)                  │
+│       └── IPC to meet-daemon                            │
+└─────────────────────────────────────────────────────────┘
+                     │ IPC: /tmp/meetcapture.sock
                      ▼
 ┌─────────────────────────────────────────────────────────┐
-│  daemon.py (background, ~20MB RAM, 0% CPU idle)         │
-│  ├── Google Calendar polling (gws CLI)                  │
-│  ├── Meeting detection logic                            │
-│  ├── ffmpeg audio capture                               │
-│  ├── Transcription orchestration                        │
-│  └── Hermes integration                                 │
-└────────────────────┬────────────────────────────────────┘
-                     │ spawns (on meeting end)
-                     ▼
-┌─────────────────────────────────────────────────────────┐
-│  transcribe_worker.py (detached process)                │
-│  ├── Audio chunking (>10min meetings)                   │
-│  ├── Whisper.cpp transcription                          │
-│  ├── Streaming post-processing                          │
-│  └── Hermes notification                                │
+│  meet-daemon (Python, background)                       │
+│  ├── Whisper transcription engine                       │
+│  ├── Audio chunking (5s segments)                       │
+│  ├── Post-processing (cleanup, dedup)                   │
+│  └── Transcript writing (Markdown)                      │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -36,72 +38,166 @@ MeetCapture is a macOS menu bar application that automatically captures and tran
 
 ## Components
 
-### 1. MeetCaptureApp.py — Menu Bar App
+### 1. MeetCaptureApp.swift — App Entry Point
 
-**Technology:** Python 3 + rumps (Ridiculously Uncomplicated macOS Python Statusbar apps)
-
-**Responsibilities:**
-- Display menu bar icon with state (●/◉/⚠)
-- Provide menu: status, start/stop, settings, open transcripts
-- Manage daemon lifecycle (start, monitor, restart)
-- Settings UI (transcript directory, auto-start)
-
-**State polling:** Every 3 seconds, reads `~/.meetings/.daemon_state.json` to update the UI.
-
-**Memory:** ~60MB (Python + rumps + PyObjC + Cocoa framework)
-
-### 2. daemon.py — Background Daemon
-
-**Technology:** Python 3, pure stdlib (no external dependencies)
+**Technology:** Swift + SwiftUI
 
 **Responsibilities:**
-- Poll Google Calendar via `gws` CLI
-- Detect active meetings with external attendees
-- Start/stop ffmpeg recording
-- Trigger transcription worker
-- Write state to `.daemon_state.json`
-- Log to `.daemon.log`
+- App lifecycle management (`@main`)
+- Menu bar icon via `MenuBarExtra`
+- State coordination via `AppState`
+- Window management (settings, status)
 
-**Smart polling intervals:**
-| State | Interval | Reason |
-|-------|----------|--------|
-| Idle | 120s | Save API calls |
-| Meeting approaching (within 5 min) | 30s | Quick detection |
-| Recording active | 10s | Detect meeting end |
+**Key Code:**
+```swift
+@main
+struct MeetCaptureApp: App {
+    @StateObject private var appState = AppState()
+    
+    var body: some Scene {
+        MenuBarExtra {
+            StatusView(appState: appState)
+        } label: {
+            Image(systemName: appState.menuBarIcon)
+        }
+    }
+}
+```
 
-**External attendee detection:**
-- Only records meetings with at least one attendee NOT in `MY_EMAILS`
-- Prevents recording personal events, solo calls, etc.
+### 2. AppState.swift — State Machine
 
-### 3. transcribe_worker.py — Transcription Worker
-
-**Technology:** Python 3 + Whisper.cpp CLI
-
-**Responsibilities:**
-- Split long audio into 10-minute chunks
-- Transcribe each chunk with Whisper
-- Post-process: remove hallucinations, repetitions, garbage
-- Concatenate chunk transcripts
-- Notify Hermes via `.pending` signal
-
-**Memory optimization:**
-- Chunks are processed sequentially and deleted immediately
-- Peak RAM ~50MB per chunk (vs ~300MB for full 60min file)
-- Post-processing is streaming (line-by-line, no full file load)
-
-### 4. launcher.c — Binary Launcher
-
-**Technology:** C, compiled to Mach-O arm64
+**Technology:** Swift + Combine
 
 **Responsibilities:**
-- Resolve Python venv path relative to app bundle
-- Find the correct Python executable (venv → system fallback)
-- Launch MeetCaptureApp.py
+- State management (IDLE → APPROACHING → RECORDING → TRANSCRIBING → DONE)
+- Service coordination
+- Error handling
+- UI state updates
 
-**Why a compiled binary?**
-- macOS executes binaries when double-clicking `.app` bundles
-- Shell scripts are opened in editors instead of executed
-- ~34KB, zero dependencies
+**State Transitions:**
+```
+IDLE → APPROACHING: Calendar detects meeting with Google Meet link
+APPROACHING → RECORDING: T-5min or manual start
+RECORDING → TRANSCRIBING: Meeting ends or manual stop
+TRANSCRIBING → DONE: Whisper completes
+DONE → IDLE: 30s timeout or manual dismiss
+```
+
+### 3. AudioCaptureService.swift — ScreenCaptureKit Audio Capture
+
+**Technology:** ScreenCaptureKit (macOS 14+)
+
+**Responsibilities:**
+- System audio capture via `SCStream`
+- PCM data extraction and writing
+- Permission management (`CGPreflightScreenCaptureAccess`)
+- Stream lifecycle management
+
+**Key Features:**
+- Captures all system audio (no virtual device needed)
+- Writes raw PCM to file for Whisper processing
+- Low CPU usage (~5% during recording)
+- Proper error handling and recovery
+
+**Permission Flow:**
+```swift
+func checkPermission() -> Bool {
+    return CGPreflightScreenCaptureAccess()
+}
+
+func requestPermission() {
+    CGRequestScreenCaptureAccess()
+}
+
+func startCapture(outputPath: String) async throws {
+    let content = try await SCShareableContent.excludingDesktopWindows(
+        false, onScreenWindowsOnly: true
+    )
+    // Configure and start SCStream
+}
+```
+
+### 4. CalendarService.swift — EventKit Integration
+
+**Technology:** EventKit + Combine
+
+**Responsibilities:**
+- Calendar monitoring via `EKEventStore`
+- Meeting detection with Google Meet links
+- Attendee analysis (external vs internal)
+- Real-time change notifications
+
+**Key Features:**
+- Native macOS calendar access
+- Instant change detection via `EKEventStoreChanged`
+- Smart meeting filtering (only Google Meet)
+- External attendee detection
+
+**Meeting Detection Logic:**
+```swift
+func findUpcomingMeetings() -> [Meeting] {
+    let predicate = eventStore.predicateForEvents(
+        withStart: now,
+        end: now.addingTimeInterval(3600),
+        calendars: nil
+    )
+    return eventStore.events(matching: predicate)
+        .filter { $0.hasGoogleMeetLink }
+        .filter { $0.hasExternalAttendees }
+}
+```
+
+### 5. DaemonManager.swift — SMAppService Lifecycle
+
+**Technology:** ServiceManagement (macOS 13+)
+
+**Responsibilities:**
+- LaunchAgent registration via `SMAppService`
+- Daemon start/stop/restart
+- Status monitoring
+- System Settings integration
+
+**Key Features:**
+- Proper lifecycle management (no manual plist editing)
+- Status tracking (enabled, notRegistered, notFound, requiresApproval)
+- Toggle registration
+- Open System Settings for approval
+
+### 6. WhisperBridge.swift — C FFI to whisper.cpp
+
+**Technology:** Swift C interop
+
+**Responsibilities:**
+- Load whisper.cpp shared library
+- Initialize Whisper context with model
+- Process audio chunks
+- Extract transcription text
+- Progress callbacks
+
+**Key Features:**
+- Direct library calls (no CLI process spawning)
+- Streaming transcription support
+- Memory-efficient chunk processing
+- Apple Silicon GPU acceleration
+
+### 7. SocketClient.swift — Unix Domain Socket IPC
+
+**Technology:** Swift + POSIX sockets
+
+**Responsibilities:**
+- Connect to meet-daemon socket (`/tmp/meetcapture.sock`)
+- Send commands (start_recording, stop_recording, status)
+- Receive responses
+- Connection lifecycle management
+
+**Protocol:**
+```json
+// Request
+{"command": "start_recording", "payload": {"title": "Team Meeting"}}
+
+// Response
+{"status": "ok", "data": {"recording_id": "123"}}
+```
 
 ---
 
@@ -110,112 +206,200 @@ MeetCapture is a macOS menu bar application that automatically captures and tran
 ### Recording Flow
 
 ```
-1. daemon.py polls Google Calendar (gws CLI)
-2. Finds meeting with Meet link + external attendee
-3. Checks if currently in meeting time window
-4. Starts ffmpeg: BlackHole 16ch → FLAC (16kHz mono)
-5. Polls every 10s to detect meeting end
-6. Meeting ends → sends SIGTERM to ffmpeg
-7. Spawns transcribe_worker.py (detached process)
-8. Worker splits audio → Whisper → post-process → notify
+1. CalendarService detects meeting
+   ↓
+2. AppState transitions to APPROACHING
+   ↓
+3. AudioCaptureService.startCapture()
+   ↓
+4. ScreenCaptureKit captures system audio
+   ↓
+5. PCM data written to file (5s chunks)
+   ↓
+6. Meeting ends → AppState transitions to TRANSCRIBING
+   ↓
+7. WhisperBridge processes PCM chunks
+   ↓
+8. Transcript written to Markdown file
+   ↓
+9. AppState transitions to DONE
+   ↓
+10. User notified, transcript available
 ```
 
-### Transcription Flow
+### Permission Flow
 
 ```
-1. Check audio duration
-2. If >10 min: split into chunks (ffmpeg segment)
-3. For each chunk:
-   a. Transcribe with Whisper (base model, 4 threads)
-   b. Delete chunk immediately (progressive cleanup)
-4. Concatenate all chunk transcripts
-5. Post-process (streaming, line-by-line):
-   - Remove [Music], [Applause], etc.
-   - Remove whisper hallucination repetitions
-   - Remove empty lines
-6. Copy transcript to configured directory
-7. Write .pending signal for Hermes
+1. App launches
+   ↓
+2. AudioCaptureService.checkPermission()
+   ↓
+3. If not granted → show "Grant Permission" button
+   ↓
+4. User clicks → CGRequestScreenCaptureAccess()
+   ↓
+5. System Settings opens
+   ↓
+6. User enables MeetCapture
+   ↓
+7. App restarts → permission detected
+   ↓
+8. Start Recording button enabled
 ```
 
 ---
 
-## File Locations
+## Performance Characteristics
 
-| File | Location | Purpose |
-|------|----------|---------|
-| App bundle | `~/meetings/MeetCapture.app` | macOS application |
-| Daemon | `~/meetings/meet-daemon.py` | Background service |
-| Worker | `~/meetings/.transcribe_worker.py` | Transcription process |
-| Config | `~/.meetcapture.json` | User configuration |
-| State | `~/meetings/.daemon_state.json` | Current daemon state |
-| PID | `~/meetings/.daemon.pid` | Daemon process ID |
-| Log | `~/meetings/.daemon.log` | Daemon log |
-| Queue | `~/meetings/.transcribe_queue.json` | Pending transcriptions |
-| LaunchAgent | `~/Library/LaunchAgents/com.maatwork.meetcapture.plist` | Auto-start |
-| Whisper model | `~/.whisper/models/ggml-base.bin` | STT model (141MB) |
-| Transcripts | Configurable via `transcript_dir` | Output directory |
+### Memory Usage
 
----
+| State | RAM | CPU |
+|-------|-----|-----|
+| Idle (menu bar) | ~30MB | 0% |
+| Recording | ~60MB | ~5% |
+| Transcribing | ~400MB-2GB | 80-100% |
+| Post-processing | ~50MB | 20% |
 
-## Resource Usage
+### Battery Impact
 
-| Component | RAM | CPU (idle) | CPU (active) |
-|-----------|-----|------------|--------------|
-| MeetCapture.app | ~60MB | 0% | <1% |
-| daemon.py | ~20MB | 0% | <2% |
-| transcribe_worker | ~50MB peak | N/A | <40% |
-| ffmpeg | ~10MB | N/A | <2% |
-| **Total idle** | **~80MB** | **0%** | — |
-| **Total recording** | **~100MB** | — | **<5%** |
-| **Total transcribing** | **~200MB peak** | — | **<40%** |
+- **Idle:** Negligible (0% CPU)
+- **Recording:** Low (~5% CPU, EnergyManager active)
+- **Transcribing:** High (CPU-bound, GPU-accelerated)
+- **Overall:** Minimal battery drain for typical meetings
+
+### Disk Usage
+
+- **App binary:** ~1MB
+- **Whisper model:** 141MB-1.6GB (depending on model)
+- **Transcripts:** ~1KB per minute of meeting
+- **Audio (temporary):** ~10MB per minute (PCM, deleted after transcription)
 
 ---
 
-## Security Considerations
+## Security Model
 
-### Privacy
+### Permissions
 
-- **No cloud services:** All processing is local
-- **No bot in meeting:** Audio is captured via system loopback, not by joining the call
-- **No network transmission:** Audio never leaves the machine
-- **Local storage only:** Transcripts are stored on local disk
+1. **Screen Recording** — For ScreenCaptureKit audio capture
+   - Required for system audio capture
+   - Granted in System Settings → Privacy & Security
+   - App must be code-signed for TCC to work
 
-### Authentication
+2. **Calendar Access** — For EventKit calendar monitoring
+   - Required for meeting detection
+   - Granted via macOS permission dialog
+   - Read-only access to calendar events
 
-- Google Calendar access via OAuth2 (gws CLI)
-- Token stored at `~/.config/gws/credentials.json`
-- Refresh token handles automatic renewal
+3. **Accessibility** — For window management (optional)
+   - Not required for core functionality
+   - Used for advanced window detection
 
-### Audio Capture
+### Code Signing
 
-- Uses BlackHole 16ch virtual audio device
-- Captures all system audio (not just Meet)
-- Other audio (music, notifications) may be captured
-- Post-processing removes some artifacts
+- **Development:** Ad-hoc signed (`codesign --force --deep --sign -`)
+- **Distribution:** Developer ID signed + notarized
+- **Requirements:** Valid code signature for TCC permissions
 
----
+### Data Protection
 
-## Limitations
-
-| Limitation | Impact | Workaround |
-|-----------|--------|------------|
-| macOS only | No Windows/Linux | Use cloud alternatives |
-| No speaker diarization | Can't identify who said what | Manual review |
-| BlackHole captures all audio | Music/notifications in transcript | Close other audio sources |
-| No real-time transcription | Only after meeting ends | Wait for summary |
-| Whisper hallucinations | May generate false text | Post-processing reduces but doesn't eliminate |
-| No multi-language | Spanish optimized | Change `--language` flag |
+- All processing is local
+- No network requests (except optional auto-update)
+- Transcripts stored in user-specified directory
+- Temporary audio files deleted after transcription
 
 ---
 
-## Future Improvements
+## Build System
 
-- [ ] Speaker diarization (identify who is speaking)
-- [ ] Real-time transcription during meeting
-- [ ] Multiple language support
-- [ ] Windows/Linux support
-- [ ] Cloud backup option (encrypted)
-- [ ] Meeting summary with AI (GPT-4, Claude)
-- [ ] Integration with other calendar providers
-- [ ] Audio level monitoring during recording
-- [ ] Automatic gain control
+### Dependencies
+
+- **Xcode Command Line Tools** 26.5+
+- **Swift** 6.3.2+
+- **macOS SDK** 14.0+
+- **Frameworks:** SwiftUI, ServiceManagement, EventKit, ScreenCaptureKit, Combine, UserNotifications, AppKit
+
+### Build Command
+
+```bash
+./build.sh
+```
+
+### Manual Build
+
+```bash
+swiftc \
+    -target arm64-apple-macosx14.0 \
+    -sdk "$(xcrun --show-sdk-path)" \
+    -framework SwiftUI \
+    -framework ServiceManagement \
+    -framework EventKit \
+    -framework ScreenCaptureKit \
+    -framework Combine \
+    -framework UserNotifications \
+    -framework AppKit \
+    -parse-as-library \
+    $(find Sources/MeetCapture -name "*.swift" | sort | tr '\n' ' ') \
+    -o ~/meetings/MeetCapture.app/Contents/MacOS/MeetCapture
+
+codesign --force --deep --sign - ~/meetings/MeetCapture.app
+```
+
+---
+
+## Testing
+
+### Unit Tests
+
+```bash
+# Run unit tests
+swift test
+```
+
+### Integration Tests
+
+```bash
+# Test calendar integration
+swift test --filter CalendarServiceTests
+
+# Test audio capture
+swift test --filter AudioCaptureServiceTests
+```
+
+### Manual Testing
+
+1. Launch app → verify menu bar icon
+2. Grant permissions → verify detection
+3. Create test meeting → verify calendar detection
+4. Start recording → verify audio capture
+5. Stop recording → verify transcription
+6. Check transcript → verify output quality
+
+---
+
+## Future Architecture
+
+### Phase 2: Enhanced Transcription
+
+- Whisper model auto-download
+- Multiple language support
+- Speaker diarization
+- Custom vocabulary
+
+### Phase 3: Integration
+
+- Note-taking app integration
+- Calendar event enrichment
+- Action item extraction
+- Meeting summary generation
+
+### Phase 4: Distribution
+
+- App Store submission
+- Notarization
+- Auto-update via Sparkle
+- Usage analytics (opt-in)
+
+---
+
+*Last updated: 2026-05-28*
+*Version: 4.0.0*

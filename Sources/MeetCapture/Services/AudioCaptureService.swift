@@ -28,7 +28,7 @@ import os.log
 
 /// Errors that can occur during audio capture operations.
 /// Each case provides a descriptive message for logging and UI display.
-enum CaptureError: LocalizedError, Equatable {
+enum CaptureError: LocalizedError {
     /// No display found on the system (shouldn't happen on a real Mac).
     case noDisplay
 
@@ -139,7 +139,6 @@ enum CaptureState: Equatable {
 /// await service.stopCapture()
 /// ```
 ///
-@MainActor
 final class AudioCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
 
     // MARK: - Published Properties
@@ -240,6 +239,7 @@ final class AudioCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, @un
     /// - Returns: `true` if screen recording permission is granted.
     func checkPermission() -> Bool {
         let granted = CGPreflightScreenCaptureAccess()
+        let dbgSvc = "MeetCapture DEBUG: checkPermission() = \(granted)\n"; if let h = FileHandle(forWritingAtPath: "/tmp/meetcapture_debug.log") { h.seekToEndOfFile(); h.write(dbgSvc.data(using: .utf8)!); h.closeFile() } else { try? dbgSvc.write(toFile: "/tmp/meetcapture_debug.log", atomically: true, encoding: .utf8) }
         logger.info("Screen capture permission check: \(granted ? "granted" : "not granted")")
         return granted
     }
@@ -609,7 +609,9 @@ final class AudioCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, @un
         }
 
         // Update the byte counter (dispatched to main actor for @Published).
-        let newTotal = bytesCaptured + totalLength
+        // Read current value from nonisolated context is safe for approximate display.
+        let currentBytes = bytesCaptured
+        let newTotal = currentBytes + totalLength
         // We use nonisolated(unsafe) to update from the audio queue.
         // This is safe because bytesCaptured is only read for UI display
         // and approximate values are fine.
