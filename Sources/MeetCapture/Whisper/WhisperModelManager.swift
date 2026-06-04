@@ -38,21 +38,28 @@ final class WhisperModelManager {
     // MARK: - Initialization
 
     private init() {
-        // Determine models directory
-        if let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
-            let appDir = appSupport.appendingPathComponent("MeetCapture/Models")
-            self.modelsDirectory = appDir
+        // Use ~/.whisper/models/ directory (same as whisper-cli default)
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let whisperModelsDir = home.appendingPathComponent(".whisper/models")
+        if FileManager.default.fileExists(atPath: whisperModelsDir.path) {
+            self.modelsDirectory = whisperModelsDir
+            logger.info("Using whisper models dir: \(whisperModelsDir.path)")
         } else {
-            self.modelsDirectory = URL(fileURLWithPath: NSHomeDirectory())
-                .appendingPathComponent("Library/Application Support/MeetCapture/Models")
+            // Fallback: Application Support
+            if let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
+                let appDir = appSupport.appendingPathComponent("MeetCapture/Models")
+                self.modelsDirectory = appDir
+            } else {
+                self.modelsDirectory = URL(fileURLWithPath: NSHomeDirectory())
+                    .appendingPathComponent("Library/Application Support/MeetCapture/Models")
+            }
+            // Ensure directory exists
+            try? FileManager.default.createDirectory(at: modelsDirectory, withIntermediateDirectories: true)
         }
-
-        // Ensure directory exists
-        try? FileManager.default.createDirectory(at: modelsDirectory, withIntermediateDirectories: true)
+        self.preferredModel = .base  // Use base by default (141MB, fast, safe for 8GB RAM)
 
         setupMemoryPressureMonitoring()
-
-        logger.info("WhisperModelManager initialized. Models dir: \(self.modelsDirectory.path)")
+        logger.info("WhisperModelManager initialized. Models dir: \(self.modelsDirectory.path, privacy: .public)")
     }
 
     deinit {
@@ -98,7 +105,7 @@ final class WhisperModelManager {
     /// Transcribe the given audio buffer.
     func transcribe(
         samples: [Float],
-        language: String = "en",
+        language: String = "es",
         translate: Bool = false
     ) throws -> String {
         guard isRecording else {
