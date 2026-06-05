@@ -6,11 +6,14 @@
     <key>Label</key>
     <string>com.maatwork.meetcapture.daemon</string>
 
-    <!-- Python venv path inside meetings dir -->
+    <!-- Phase 6 fix: use bundled meet-daemon shell wrapper (real path).
+         The previous BundleProgram pointing to daemon_main.py was a phantom
+         reference; daemon_main.py was deleted in the 2026-06-04 refactor.
+         The shell wrapper resolves the active Python (bundled venv → homebrew → system)
+         and execs server.py inside Contents/Resources. -->
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/prueba/meetings/.app-venv/bin/python3</string>
-        <string>/Users/prueba/meetings/MeetCapture.app/Contents/Resources/daemon_main.py</string>
+        <string>__BUNDLE_DIR__/Contents/Resources/meet-daemon</string>
     </array>
 
     <!-- Run at login -->
@@ -36,6 +39,10 @@
     <key>Nice</key>
     <integer>10</integer>
 
+    <!-- Phase 6: clean shutdown grace period -->
+    <key>ExitTimeOut</key>
+    <integer>30</integer>
+
     <!-- Environment -->
     <key>EnvironmentVariables</key>
     <dict>
@@ -49,6 +56,6 @@
     <key>StandardOutPath</key>
     <string>/tmp/meetcapture-daemon.log</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/meetcapture-daemon-err.log</string>
+    <string>/tmp/meetcapture-daemon.log</string>
 </dict>
 </plist>

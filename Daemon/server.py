@@ -16,6 +16,7 @@ import time
 import uuid
 import logging
 import threading
+import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -124,6 +125,15 @@ def handle_command(command: str, payload: Optional[dict], state: DaemonState) ->
         "stop_recording": lambda _p, s: s.stop_recording(),
         "get_status": lambda _p, s: s.get_status(),
         "ping": lambda _p, _s: {"ok": True, "pong": True, "timestamp": time.time()},
+        "health_check": lambda _p, s: {
+            "ok": True,
+            "pid": os.getpid(),
+            "uptime": s.uptime,
+            "memory_rss_mb": _memory_rss_mb(),
+            "active_session": s.is_recording,
+            "session_title": s.meeting_title,
+        },
+        "transcribe_path": _handle_transcribe_path,
     }
     handler = handlers.get(command)
     if handler is None:
@@ -133,6 +143,79 @@ def handle_command(command: str, payload: Optional[dict], state: DaemonState) ->
     except Exception as exc:
         logger.exception("Error handling command '%s'", command)
         return {"ok": False, "error": f"Internal error: {exc}"}
+
+
+def _memory_rss_mb() -> float:
+    """Best-effort RSS in MB, works on macOS."""
+    try:
+        import resource
+        usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        # macOS reports bytes
+        return round(usage / (1024 * 1024), 1)
+    except Exception:
+        return 0.0
+
+
+def _handle_transcribe_path(payload: dict, _state: DaemonState) -> dict:
+    """Phase 5: kick off whisper-cli on a path, return result synchronously."""
+    audio_path = payload.get("audio_path")
+    if not audio_path:
+        return {"ok": False, "error": "audio_path missing from payload"}
+    if not os.path.exists(audio_path):
+        return {"ok": False, "error": f"audio_path not found: {audio_path}"}
+    if not os.path.isfile(audio_path):
+        return {"ok": False, "error": f"audio_path is not a file: {audio_path}"}
+    model = payload.get("model", "base")
+    language = payload.get("language", "es")
+    return _transcribe_with_whisper(audio_path, model, language)
+
+
+def _transcribe_with_whisper(audio_path: str, model: str, language: str) -> dict:
+    """Run whisper-cli on a single file, return text. Streaming version is
+    future work — for now this is a synchronous transcription request."""
+    candidates = [
+        "/opt/homebrew/bin/whisper-cli",
+        "/usr/local/bin/whisper-cli",
+        "/opt/homebrew/bin/whisper",
+        "/usr/local/bin/whisper",
+    ]
+    cli = next((p for p in candidates if os.path.exists(p)), None)
+    if not cli:
+        return {"ok": False, "error": "whisper-cli not found"}
+
+    home = Path.home()
+    model_path = home / ".whisper" / "models" / f"ggml-{model}.bin"
+    if not model_path.exists():
+        return {"ok": False, "error": f"model not found: {model_path}"}
+
+    out_base = f"/tmp/meetcapture-daemon-{uuid.uuid4()}"
+    cmd = [
+        cli, "-m", str(model_path), "-f", audio_path,
+        "-l", language, "-otxt", "-of", out_base,
+        "-t", "4", "--no-prints"
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "whisper-cli timeout (10min)"}
+    except FileNotFoundError as exc:
+        return {"ok": False, "error": f"failed to exec: {exc}"}
+
+    if result.returncode != 0:
+        return {"ok": False, "error": f"whisper-cli exit {result.returncode}: {result.stderr[:500]}"}
+
+    txt_path = out_base + ".txt"
+    if not os.path.exists(txt_path):
+        return {"ok": False, "error": "output .txt not created"}
+
+    try:
+        with open(txt_path, "r", encoding="utf-8") as f:
+            text = f.read().strip()
+        os.unlink(txt_path)
+    except OSError as exc:
+        return {"ok": False, "error": f"could not read output: {exc}"}
+
+    return {"ok": True, "text": text, "model": model, "language": language, "duration_sec": time.time()}
 
 
 # ---------------------------------------------------------------------------

@@ -69,8 +69,10 @@ final class WhisperModelManager {
     private let queue = DispatchQueue(label: "com.meetcapture.whisper", qos: .userInitiated)
 
     private let whisperCLIPath: String
+    let whisperCLIPathAccessor: String  // Exposed for WhisperTranscriber
     private let modelsDirectory: URL
     private var loadedModelPath: String?
+    var loadedModelPathAccessor: String? { loadedModelPath }  // Exposed for WhisperTranscriber
     private var memoryPressureSource: DispatchSourceMemoryPressure?
     private var memoryCheckTimer: Timer?
 
@@ -92,6 +94,7 @@ final class WhisperModelManager {
             "/usr/local/bin/whisper"
         ].compactMap { $0 }
         whisperCLIPath = candidates.first { FileManager.default.fileExists(atPath: $0) } ?? "/opt/homebrew/bin/whisper-cli"
+        whisperCLIPathAccessor = whisperCLIPath
 
         // Models directory
         let home = FileManager.default.homeDirectoryForCurrentUser
