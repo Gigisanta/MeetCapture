@@ -4,6 +4,7 @@
 import Foundation
 import ScreenCaptureKit
 import CoreMedia
+import AppKit
 import os.log
 
 // MARK: - Capture Errors
@@ -110,6 +111,24 @@ final class AudioCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, @un
         }
     }
 
+    /// Open the Screen & System Audio Recording privacy pane in System Settings.
+    /// Falls back to the parent Security pane if the deep link is rejected.
+    func openPrivacySettings() {
+        let candidates = [
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenRecording",
+            "x-apple.systempreferences:com.apple.preference.security"
+        ]
+        for urlString in candidates {
+            if let url = URL(string: urlString),
+               NSWorkspace.shared.open(url) {
+                logger.info("Opened privacy pane: \(urlString)")
+                return
+            }
+        }
+        logger.error("Failed to open any privacy pane URL")
+    }
+
     @discardableResult
     func ensurePermission() -> Bool {
         if checkPermission() { return true }
@@ -130,7 +149,7 @@ final class AudioCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, @un
         lastError = nil
         bytesCaptured = 0
 
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
         guard let display = content.displays.first else {
             state = .error(CaptureError.noDisplay.localizedDescription)
             throw CaptureError.noDisplay

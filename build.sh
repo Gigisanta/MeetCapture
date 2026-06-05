@@ -1,13 +1,40 @@
 #!/bin/bash
 # Build MeetCapture v4 — Swift native menu bar app
-# Usage: ./build.sh [--install-to ~/Applications]
+# Usage: ./build.sh [--install-to ~/Applications] [--rollback]
 set -e
 
 APP_NAME="MeetCapture"
 BUILD_DIR="/tmp"
 APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
-DEST="${1:-$HOME/meetings/MeetCapture.app}"
+BACKUP_DIR="$HOME/meetings/.backups"
+MAX_BACKUPS=3
+
+# Determine DEST: the first arg that is NOT a flag
+DEST="$HOME/meetings/MeetCapture.app"
+for arg in "$@"; do
+    case "$arg" in
+        --*) ;;  # skip flags
+        *) DEST="$arg" ;;
+    esac
+done
+
+# Phase 6: rollback support
+if [ "${1:-}" = "--rollback" ] || [ "${2:-}" = "--rollback" ]; then
+    echo "Rolling back to previous build..."
+    LATEST=$(ls -dt "$BACKUP_DIR"/MeetCapture-* 2>/dev/null | head -1)
+    if [ -z "$LATEST" ]; then
+        echo "ERROR: No backups found in $BACKUP_DIR"
+        exit 1
+    fi
+    echo "Restoring $LATEST → $DEST"
+    pkill -x MeetCapture 2>/dev/null || true
+    sleep 1
+    rm -rf -- "$DEST"
+    cp -R "$LATEST" "$DEST"
+    echo "Rollback complete. Run: open '$DEST'"
+    exit 0
+fi
 
 echo "Building $APP_NAME v4..."
 echo "  Sources:  $REPO_DIR/Sources"
@@ -56,6 +83,12 @@ fi
 cp "$REPO_DIR/Daemon/server.py" "$APP_BUNDLE/Contents/Resources/"
 
 # Create daemon launcher script
+BUNDLE_DIR="$APP_BUNDLE"
+# Substitute __BUNDLE_DIR__ in bundled plist with absolute path so SMAppService finds it
+if [ -f "$APP_BUNDLE/Contents/Library/LaunchAgents/com.maatwork.meetcapture.daemon.plist" ]; then
+  sed -i '' "s|__BUNDLE_DIR__|$DEST|g" \
+    "$APP_BUNDLE/Contents/Library/LaunchAgents/com.maatwork.meetcapture.daemon.plist"
+fi
 cat > "$APP_BUNDLE/Contents/Resources/meet-daemon" << 'SCRIPT'
 #!/bin/bash
 # MeetCapture daemon launcher
@@ -86,6 +119,15 @@ codesign --force --deep --sign - \
 echo "  Signed: ad-hoc (stable bundle ID requirement)"
 
 # Install to destination
+# Phase 6: keep last 3 backups for rollback
+if [ -d "$DEST" ]; then
+    mkdir -p "$BACKUP_DIR"
+    TS=$(date +%Y%m%d-%H%M%S)
+    cp -R "$DEST" "$BACKUP_DIR/MeetCapture-$TS"
+    # Prune old backups
+    ls -dt "$BACKUP_DIR"/MeetCapture-* 2>/dev/null | tail -n +$((MAX_BACKUPS + 1)) | xargs -r rm -rf
+    echo "  Backed up previous build to $BACKUP_DIR/MeetCapture-$TS"
+fi
 rm -rf "$DEST"
 cp -R "$APP_BUNDLE" "$DEST"
 echo "  Installed to: $DEST"

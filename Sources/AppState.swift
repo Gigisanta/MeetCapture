@@ -10,6 +10,8 @@ import os
 @MainActor
 final class AppState: ObservableObject {
     static var shared: AppState?
+
+    private let logger = Logger(subsystem: "com.maatwork.meetcapture", category: "AppState")
     
     // MARK: - Published State
     
@@ -22,6 +24,7 @@ final class AppState: ObservableObject {
     @Published var recordingDuration: TimeInterval = 0
     @Published var transcriptionProgress: Double = 0
     @Published var lastTranscriptPath: String?
+    @Published var liveTranscriptBuffer: String = ""
     
     // MARK: - Services
     
@@ -29,6 +32,8 @@ final class AppState: ObservableObject {
     let audioCapture = AudioCaptureService()
     let daemonManager = DaemonManager()
     let whisperManager = WhisperModelManager.shared
+    let socketClient = SocketClient()
+    let healthMonitor = HealthMonitor()
     
     // MARK: - Private
     
@@ -37,17 +42,26 @@ final class AppState: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private let transcriptDir: String
     private var energyActivity: NSObjectProtocol?
+    private var lastRecordingPath: String?
     
     // MARK: - Init
-    
-    init() {
+
+    // nonisolated because SwiftUI's @main App.init() runs before the
+    // main actor isolation guarantees kick in. The body of init() is
+    // pure synchronous setup (logger, file paths) that does not touch
+    // any actor-isolated state. All mutations to @Published properties
+    // happen later, on the main actor.
+    nonisolated init() {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         transcriptDir = "\(home)/.hermes/TechPartners/MaatWork/meetings/transcripts"
-        
-        AppState.shared = self
-        
-        setupBindings()
-        setupMeetingDetection()
+
+        Task { @MainActor in
+            AppState.shared = self
+            // Defer setupMethods (which are @MainActor-isolated) until
+            // the next main-actor tick.
+            self.setupBindings()
+            self.setupMeetingDetection()
+        }
     }
     
     // MARK: - Menu Bar
@@ -86,14 +100,44 @@ final class AppState: ObservableObject {
     func startup() async {
         let logger = Logger(subsystem: "com.maatwork.meetcapture", category: "appstate")
         logger.info("startup() called — initializing services")
-        
+
         await requestPermissions()
         logger.info("Permissions: calendar=\(self.hasCalendarAccess) audio=\(self.hasAudioPermission)")
-        
+
         daemonManager.registerIfNeeded()
         requestNotificationPermission()
-        
+
+        // Ping daemon to verify IPC and refresh status indicator
+        await refreshDaemonStatus()
+
+        healthMonitor.start(socketClient: socketClient, appState: self)
+
         phase = .idle
+    }
+
+    /// Ping the daemon via SocketClient. Updates `isDaemonRunning` accordingly.
+    /// Retries with backoff up to ~10s to handle the startup race where
+    /// launchctl loads the daemon AFTER the app has already started.
+    func refreshDaemonStatus() async {
+        var attempts = 0
+        let maxAttempts = 15
+        while attempts < maxAttempts {
+            do {
+                let resp = try await socketClient.send(command: "ping", timeout: 1.0)
+                if (resp["data"] as? [String: Any])?["pong"] as? Bool == true {
+                    isDaemonRunning = true
+                    return
+                }
+            } catch {
+                // ignore, will retry
+            }
+            attempts += 1
+            // 500ms, 750ms, 1s, 1.25s, ... up to 2s cap
+            let sleepMs = min(2000, 500 + attempts * 250)
+            try? await Task.sleep(nanoseconds: UInt64(sleepMs) * 1_000_000)
+        }
+        isDaemonRunning = false
+        logger.warning("Daemon not reachable after \(maxAttempts) attempts (~10s)")
     }
     
     func shutdown() {
@@ -154,29 +198,36 @@ final class AppState: ObservableObject {
     
     func startRecording() {
         guard phase != .recording else { return }
-        
+
         hasAudioPermission = audioCapture.checkPermission()
         guard hasAudioPermission else {
-            audioCapture.requestPermission()
-            errorMessage = "Grant Screen Recording permission, then try again"
+            errorMessage = "Screen Recording permission required. Click the banner to open System Settings."
+            audioCapture.openPrivacySettings()
             return
         }
-        
+
         let outputPath = "\(transcriptDir)/recording-\(Date().timeIntervalSince1970).pcm"
+        lastRecordingPath = outputPath
         beginRecordingActivity()
-        
+
         Task {
             do {
                 try await audioCapture.startCapture(outputPath: outputPath)
                 do {
                     try whisperManager.startRecording()
                 } catch {
-                    // Non-fatal
+                    logger.warning("Whisper preload failed (non-fatal): \(error.localizedDescription)")
                 }
-                
+
                 phase = .recording
                 recordingStartDate = Date()
                 startRecordingTimer()
+
+                // Tell daemon we are recording (fire-and-forget, for status/badge)
+                socketClient.sendFireAndForget(
+                    command: "start_recording",
+                    payload: ["meeting_title": currentMeeting?.title ?? "Manual recording"]
+                )
             } catch {
                 errorMessage = "Recording failed: \(error.localizedDescription)"
                 phase = .idle
@@ -184,46 +235,93 @@ final class AppState: ObservableObject {
             }
         }
     }
-    
+
     func stopRecording() {
         guard phase == .recording else { return }
-        
+
         phase = .transcribing
+        transcriptionProgress = 0
         stopRecordingTimer()
-        
+
+        let recordedPath = lastRecordingPath
+
         Task {
             await audioCapture.stopCapture()
             endRecordingActivity()
             whisperManager.stopRecording()
+            socketClient.sendFireAndForget(command: "stop_recording")
+
+            guard let recordedPath else {
+                errorMessage = "No recording path found."
+                phase = .idle
+                return
+            }
+
+            // The kill-shot fix: transcribe() was never called.
+            await transcribe(audioPath: recordedPath)
         }
     }
     
     // MARK: - Transcription
-    
+
+    /// Stream-transcribe a PCM file in 30s chunks. Phase 3 fix: bounded RAM.
     private func transcribe(audioPath: String) async {
         do {
             let outputPath = audioPath.replacingOccurrences(of: ".pcm", with: ".txt")
-            let pcmData = try Data(contentsOf: URL(fileURLWithPath: audioPath))
-            let samples = pcmToFloat32(pcmData)
-            let text = try whisperManager.transcribe(samples: samples)
-            try text.write(toFile: outputPath, atomically: true, encoding: .utf8)
-            
+            let outputURL = URL(fileURLWithPath: outputPath)
+            let outputBase = audioPath.replacingOccurrences(of: ".pcm", with: "")
+            _ = outputBase
+
+            // Try streaming transcription first (Phase 3)
+            if let stream = WhisperTranscriber(audioPath: audioPath, whisperManager: whisperManager) {
+                let progressStream = stream.progress
+                let textStream = stream.text
+
+                // Forward progress to @Published
+                Task { @MainActor in
+                    for await p in progressStream {
+                        self.transcriptionProgress = p
+                    }
+                }
+
+                // Forward text chunks to @Published live buffer
+                Task { @MainActor in
+                    for await chunk in textStream {
+                        self.appendLiveTranscript(chunk)
+                    }
+                }
+
+                let finalText = try await stream.run()
+                try finalText.write(to: outputURL, atomically: true, encoding: .utf8)
+            } else {
+                // Fallback: file missing, log and bail
+                throw WhisperError.transcriptionFailed(reason: "Could not open \(audioPath)")
+            }
+
             lastTranscriptPath = outputPath
+            liveTranscriptBuffer = ""
+            transcriptionProgress = 1.0
             phase = .done
             notifyHermes(transcriptPath: outputPath, meetingTitle: currentMeeting?.title)
-            
+
             DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
                 self?.phase = .idle
                 self?.currentMeeting = nil
             }
         } catch {
+            logger.error("Transcribe failed: \(error.localizedDescription)")
             errorMessage = "Transcription failed: \(error.localizedDescription)"
             phase = .idle
         }
     }
+
+    /// Append incremental text from streaming whisper to the live buffer.
+    func appendLiveTranscript(_ chunk: String) {
+        liveTranscriptBuffer += chunk + " "
+    }
     
     // MARK: - Energy Management (inline from EnergyManager)
-    
+
     private func beginRecordingActivity() {
         guard energyActivity == nil else { return }
         energyActivity = ProcessInfo.processInfo.beginActivity(
@@ -231,16 +329,16 @@ final class AppState: ObservableObject {
             reason: "Recording Google Meet audio"
         )
     }
-    
+
     private func endRecordingActivity() {
         if let activity = energyActivity {
             ProcessInfo.processInfo.endActivity(activity)
             energyActivity = nil
         }
     }
-    
+
     // MARK: - Helpers
-    
+
     private func setupBindings() {
         $errorMessage
             .compactMap { $0 }
@@ -250,7 +348,7 @@ final class AppState: ObservableObject {
             }
             .store(in: &cancellables)
     }
-    
+
     private func startRecordingTimer() {
         recordingDuration = 0
         recordingTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
@@ -260,28 +358,21 @@ final class AppState: ObservableObject {
             }
         }
     }
-    
+
     private func stopRecordingTimer() {
         recordingTimer?.invalidate()
         recordingTimer = nil
     }
-    
-    private func pcmToFloat32(_ data: Data) -> [Float] {
-        let count = data.count / MemoryLayout<Float>.size
-        return data.withUnsafeBytes { buffer in
-            Array(buffer.bindMemory(to: Float.self).prefix(count))
-        }
-    }
-    
+
     private func notifyHermes(transcriptPath: String, meetingTitle: String?) {
         let title = meetingTitle ?? "Google Meet"
         let notificationText = "Meeting transcript ready: \(title)"
-        
+
         let content = UNMutableNotificationContent()
         content.title = "MeetCapture"
         content.body = notificationText
         content.sound = UNNotificationSound.default
-        
+
         let request = UNNotificationRequest(
             identifier: UUID().uuidString,
             content: content,
