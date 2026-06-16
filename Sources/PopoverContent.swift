@@ -1,6 +1,8 @@
 // PopoverContent.swift
-// MeetCapture v4 — Phase 4 premium popover UI
-// Replaces the cramped MenuBarExtra menu with a 360x520 branded popover.
+// MeetCapture v4 — minimal, native popover.
+// Compact and content-sized: a status line, one primary action that toggles
+// Record/Stop, and a thin footer. Uses system materials instead of a heavy
+// custom gradient so it reads as a native macOS menu-bar popover.
 
 import SwiftUI
 import AppKit
@@ -10,310 +12,205 @@ struct PopoverContent: View {
     @State private var now: Date = Date()
     private let tick = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
-    var body: some View {
-        ZStack {
-            // Layered background for proper glassmorphism depth
-            Brand.heroGradient.ignoresSafeArea()
+    private static let width: CGFloat = 300
 
-            VStack(spacing: 0) {
-                heroHeader
-                Divider().opacity(0.3)
-                ScrollView {
-                    VStack(spacing: 12) {
-                        permissionBanner
-                        liveTranscriptCard
-                        currentStatusCard
-                        upcomingMeetingCard
-                        actionsCard
-                    }
-                    .padding(14)
-                }
-                Divider().opacity(0.3)
-                footerBar
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            header
+            if !appState.hasAudioPermission { permissionRow }
+            statusRow
+            if appState.phase == .transcribing || !appState.liveTranscriptBuffer.isEmpty {
+                liveTranscript
             }
+            if let next = appState.calendarService.nextMeeting, appState.phase != .recording {
+                upcomingRow(next)
+            }
+            primaryButton
+            Divider()
+            footer
         }
-        .frame(width: 360, height: 520)
-        .background(WindowAccessor())
+        .padding(14)
+        .frame(width: Self.width)
+        .background(.regularMaterial)
         .onReceive(tick) { now = $0 }
     }
 
-    // MARK: - Hero Header
+    // MARK: - Header
 
-    private var heroHeader: some View {
-        HStack(spacing: 12) {
-            ZStack {
-                Circle()
-                    .fill(LinearGradient(
-                        colors: [Brand.pastelViolet, Brand.pastelVioletDeep],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ))
-                    .frame(width: 38, height: 38)
-                Image(systemName: "waveform.circle.fill")
-                    .font(.system(size: 22, weight: .semibold))
-                    .foregroundStyle(.white)
-            }
-            VStack(alignment: .leading, spacing: 2) {
-                Text("MeetCapture")
-                    .font(Brand.heroTitle)
-                    .foregroundStyle(.white)
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(appState.isDaemonRunning ? Brand.successGreen : Brand.warnAmber)
-                        .frame(width: 6, height: 6)
-                    Text(appState.isDaemonRunning ? "Daemon online" : "Daemon offline")
-                        .font(Brand.caption)
-                        .foregroundStyle(.white.opacity(0.7))
-                }
+    private var header: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(phaseColor)
+                .frame(width: 8, height: 8)
+            Text("MeetCapture")
+                .font(.system(size: 13, weight: .semibold))
+            Spacer()
+            Text(appState.phase.rawValue.capitalized)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    // MARK: - Permission
+
+    private var permissionRow: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "mic.slash.fill")
+                .foregroundStyle(Brand.warnAmber)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Microphone access needed")
+                    .font(.system(size: 12, weight: .medium))
+                Text("Captures your voice + the call audio.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
             }
             Spacer()
-            VStack(alignment: .trailing, spacing: 2) {
-                Text("v4.2.0")
-                    .font(Brand.label)
-                    .foregroundStyle(.white.opacity(0.5))
-                Text(appState.phase.rawValue.capitalized)
-                    .font(Brand.label)
-                    .foregroundStyle(phaseColor)
+            Button("Grant") {
+                appState.audioCapture.requestPermission { granted in
+                    appState.hasAudioPermission = granted
+                }
+            }
+            .controlSize(.small)
+        }
+        .padding(8)
+        .background(Brand.warnAmber.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    // MARK: - Status
+
+    private var statusRow: some View {
+        HStack(spacing: 10) {
+            Image(systemName: appState.menuBarIcon)
+                .font(.system(size: 18))
+                .foregroundStyle(phaseColor)
+                .frame(width: 22)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(statusHeadline)
+                    .font(.system(size: 12, weight: .medium))
+                Text(statusSubline)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer()
+            if appState.phase == .recording {
+                Text(formatDuration(appState.recordingDuration))
+                    .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(Brand.recordingRed)
+                    .monospacedDigit()
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 14)
     }
 
-    // MARK: - Permission Banner
+    // MARK: - Live transcript
 
-    @ViewBuilder
-    private var permissionBanner: some View {
-        if !appState.hasAudioPermission {
-            Brand.glassCard(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .frame(height: 96)
-                .overlay(
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack(spacing: 6) {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .foregroundStyle(Brand.warnAmber)
-                            Text("Screen Recording required")
-                                .font(Brand.cardTitle)
-                                .foregroundStyle(.white)
-                        }
-                        Text("MeetCapture captures system audio from your Google Meet calls. Grant access in System Settings.")
-                            .font(Brand.cardSubtitle)
-                            .foregroundStyle(.white.opacity(0.75))
-                            .fixedSize(horizontal: false, vertical: true)
-                        HStack(spacing: 8) {
-                            Button("Open System Settings") {
-                                appState.audioCapture.openPrivacySettings()
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .tint(Brand.pastelViolet)
-                            .controlSize(.small)
-                            Button("Retry") {
-                                appState.hasAudioPermission = appState.audioCapture.checkPermission()
-                            }
-                            .buttonStyle(.bordered)
-                            .tint(.white.opacity(0.6))
-                            .controlSize(.small)
-                        }
-                    }
-                    .padding(12),
-                    alignment: .topLeading
-                )
+    private var liveTranscript: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(appState.liveTranscriptBuffer.isEmpty ? "Listening…" : appState.liveTranscriptBuffer)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .lineLimit(3)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if appState.phase == .transcribing {
+                ProgressView(value: appState.transcriptionProgress)
+                    .controlSize(.small)
+            }
+        }
+        .padding(8)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    // MARK: - Upcoming
+
+    private func upcomingRow(_ meeting: Meeting) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "calendar")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            Text(meeting.title)
+                .font(.system(size: 11))
+                .lineLimit(1)
+            Spacer()
+            Text(meetingCountdown(for: meeting))
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
         }
     }
 
-    // MARK: - Live Transcript
+    // MARK: - Primary action (toggles)
 
     @ViewBuilder
-    private var liveTranscriptCard: some View {
-        if appState.phase == .transcribing || !appState.liveTranscriptBuffer.isEmpty {
-            Brand.glassCard(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .frame(minHeight: 80, maxHeight: 140)
-                .overlay(
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack {
-                            Image(systemName: "waveform")
-                                .foregroundStyle(Brand.transcribingOrange)
-                            Text("Live transcript")
-                                .font(Brand.cardTitle)
-                                .foregroundStyle(.white)
-                            Spacer()
-                            if appState.phase == .transcribing {
-                                Text("\(Int(appState.transcriptionProgress * 100))%")
-                                    .font(Brand.label)
-                                    .foregroundStyle(.white.opacity(0.7))
-                            }
-                        }
-                        Text(appState.liveTranscriptBuffer.isEmpty ? "Listening…" : appState.liveTranscriptBuffer)
-                            .font(Brand.cardSubtitle)
-                            .foregroundStyle(.white.opacity(0.85))
-                            .lineLimit(4)
-                            .truncationMode(.tail)
-                        if appState.phase == .transcribing {
-                            ProgressView(value: appState.transcriptionProgress)
-                                .progressViewStyle(.linear)
-                                .tint(Brand.pastelViolet)
-                        }
-                    }
-                    .padding(12),
-                    alignment: .topLeading
-                )
-        }
-    }
-
-    // MARK: - Current Status
-
-    private var currentStatusCard: some View {
-        Brand.glassCard(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .frame(minHeight: 80)
-            .overlay(
-                HStack(spacing: 14) {
-                    ZStack {
-                        Circle()
-                            .fill(phaseColor.opacity(0.18))
-                            .frame(width: 48, height: 48)
-                        Image(systemName: appState.menuBarIcon)
-                            .font(.system(size: 22, weight: .semibold))
-                            .foregroundStyle(phaseColor)
-                    }
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(statusHeadline)
-                            .font(Brand.cardTitle)
-                            .foregroundStyle(.white)
-                        Text(statusSubline)
-                            .font(Brand.cardSubtitle)
-                            .foregroundStyle(.white.opacity(0.7))
-                            .lineLimit(2)
-                    }
-                    Spacer()
-                    if appState.phase == .recording {
-                        VStack(alignment: .trailing) {
-                            Text(formatDuration(appState.recordingDuration))
-                                .font(Brand.monoCountdown)
-                                .foregroundStyle(Brand.recordingRed)
-                            Text("REC")
-                                .font(Brand.label)
-                                .foregroundStyle(Brand.recordingRed.opacity(0.8))
-                        }
-                    }
+    private var primaryButton: some View {
+        switch appState.phase {
+        case .recording:
+            Button(role: .destructive) { appState.stopRecording() } label: {
+                Label("Stop recording", systemImage: "stop.fill")
+                    .frame(maxWidth: .infinity)
+            }
+            .controlSize(.large)
+            .tint(Brand.recordingRed)
+        case .transcribing:
+            Button {} label: {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Transcribing…")
                 }
-                .padding(14),
-                alignment: .leading
-            )
-    }
-
-    // MARK: - Upcoming Meeting
-
-    @ViewBuilder
-    private var upcomingMeetingCard: some View {
-        if let next = appState.calendarService.nextMeeting {
-            Brand.glassCard(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .frame(minHeight: 60)
-                .overlay(
-                    HStack(spacing: 12) {
-                        Image(systemName: "video.fill")
-                            .font(.system(size: 20))
-                            .foregroundStyle(Brand.pastelVioletSoft)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(next.title)
-                                .font(Brand.cardTitle)
-                                .foregroundStyle(.white)
-                                .lineLimit(1)
-                            Text(meetingCountdown(for: next))
-                                .font(Brand.cardSubtitle)
-                                .foregroundStyle(Brand.pastelVioletSoft)
-                        }
-                        Spacer()
-                        VStack(alignment: .trailing) {
-                            Text(formattedTimeOfDay(next.startDate))
-                                .font(Brand.label)
-                                .foregroundStyle(.white.opacity(0.8))
-                            if !next.externalAttendees.isEmpty {
-                                Text("\(next.externalAttendees.count) externos")
-                                    .font(Brand.caption)
-                                    .foregroundStyle(.white.opacity(0.5))
-                            }
-                        }
-                    }
-                    .padding(12),
-                    alignment: .leading
-                )
-        }
-    }
-
-    // MARK: - Actions
-
-    private var actionsCard: some View {
-        HStack(spacing: 10) {
-            Button(action: { appState.startRecording() }) {
+                .frame(maxWidth: .infinity)
+            }
+            .controlSize(.large)
+            .disabled(true)
+        default:
+            Button { appState.startRecording() } label: {
                 Label("Record", systemImage: "record.circle.fill")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
+            .controlSize(.large)
             .tint(Brand.recordingRed)
-            .controlSize(.large)
-            .disabled(!appState.hasAudioPermission || appState.phase == .recording || appState.phase == .transcribing)
-
-            Button(action: { appState.stopRecording() }) {
-                Label("Stop", systemImage: "stop.circle.fill")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.bordered)
-            .tint(.white.opacity(0.8))
-            .controlSize(.large)
-            .disabled(appState.phase != .recording)
+            .disabled(!appState.hasAudioPermission)
         }
     }
 
     // MARK: - Footer
 
-    private var footerBar: some View {
-        HStack(spacing: 14) {
+    private var footer: some View {
+        HStack(spacing: 12) {
             if let path = appState.lastTranscriptPath {
-                Button(action: {
+                Button {
                     NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
-                }) {
-                    Label("Open transcript", systemImage: "doc.text")
-                        .font(Brand.label)
+                } label: {
+                    Label("Last transcript", systemImage: "doc.text")
+                        .font(.system(size: 11))
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(Brand.pastelVioletSoft)
+                .buttonStyle(.link)
             }
             Spacer()
-            Button(action: { appState.daemonManager.openSystemSettings() }) {
-                Image(systemName: "gear")
-                    .foregroundStyle(.white.opacity(0.6))
+            HStack(spacing: 4) {
+                Circle()
+                    .fill(appState.isDaemonRunning ? Brand.successGreen : .secondary)
+                    .frame(width: 5, height: 5)
+                Text("v4.2.0")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+            Button {
+                NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+            } label: {
+                Image(systemName: "gearshape")
             }
             .buttonStyle(.plain)
-            Button(action: { NSApp.terminate(nil) }) {
+            .help("Settings")
+            Button { NSApp.terminate(nil) } label: {
                 Image(systemName: "power")
-                    .foregroundStyle(.white.opacity(0.6))
             }
             .buttonStyle(.plain)
             .keyboardShortcut("q")
+            .help("Quit (⌘Q)")
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .foregroundStyle(.secondary)
     }
 
-// MARK: - Helpers
-
-/// Enables the .window MenuBarExtra style to be visually transparent so
-/// the gradient + glassmorphism underneath actually shows through.
-struct WindowAccessor: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView {
-        let v = NSView()
-        DispatchQueue.main.async {
-            if let w = v.window {
-                w.isOpaque = false
-                w.backgroundColor = .clear
-                w.titlebarAppearsTransparent = true
-                w.hasShadow = true
-            }
-        }
-        return v
-    }
-    func updateNSView(_ nsView: NSView, context: Context) {}
-}
+    // MARK: - Derived
 
     private var phaseColor: Color {
         switch appState.phase {
@@ -321,52 +218,41 @@ struct WindowAccessor: NSViewRepresentable {
         case .transcribing: return Brand.transcribingOrange
         case .done:         return Brand.successGreen
         case .approaching:  return Brand.pastelViolet
-        case .idle:         return .white.opacity(0.5)
+        case .idle:         return .secondary
         }
     }
 
     private var statusHeadline: String {
         switch appState.phase {
-        case .idle:         return "Waiting for meeting"
-        case .approaching:  return appState.currentMeeting?.title ?? "Meeting approaching"
-        case .recording:    return "Recording in progress"
-        case .transcribing: return "Transcribing audio"
+        case .idle:         return "Ready"
+        case .approaching:  return appState.currentMeeting?.title ?? "Meeting starting"
+        case .recording:    return "Recording"
+        case .transcribing: return "Transcribing"
         case .done:         return "Transcript ready"
         }
     }
 
     private var statusSubline: String {
         switch appState.phase {
-        case .idle:         return "Monitoring your calendar for Google Meet calls"
-        case .approaching:  return "Auto-record will start when the meeting begins"
-        case .recording:    return "Capturing system audio to disk"
-        case .transcribing: return "Whisper is generating your transcript"
+        case .idle:         return "Watching for Google Meet calls"
+        case .approaching:  return "Auto-record starts when it begins"
+        case .recording:    return "Capturing mic + call audio"
+        case .transcribing: return "Generating transcript locally"
         case .done:         return "Saved to your transcripts folder"
         }
     }
 
     private func formatDuration(_ duration: TimeInterval) -> String {
-        let minutes = Int(duration) / 60
-        let seconds = Int(duration) % 60
-        return String(format: "%02d:%02d", minutes, seconds)
+        let m = Int(duration) / 60, s = Int(duration) % 60
+        return String(format: "%02d:%02d", m, s)
     }
 
     private func meetingCountdown(for meeting: Meeting) -> String {
         let interval = meeting.startDate.timeIntervalSince(now)
-        if interval < 0 && meeting.endDate > now { return "In progress" }
-        if interval < 0 { return "Ended" }
+        if interval < 0 && meeting.endDate > now { return "now" }
+        if interval < 0 { return "ended" }
         let m = Int(interval) / 60
-        let s = Int(interval) % 60
-        if m > 60 {
-            let h = m / 60
-            return "in \(h)h \(m % 60)m"
-        }
-        return "in \(m)m \(s)s"
-    }
-
-    private func formattedTimeOfDay(_ date: Date) -> String {
-        let f = DateFormatter()
-        f.dateFormat = "HH:mm"
-        return f.string(from: date)
+        if m >= 60 { return "in \(m / 60)h \(m % 60)m" }
+        return "in \(m)m"
     }
 }

@@ -10,8 +10,8 @@ Suite de herramientas para captura y transcripcion de reuniones en macOS.
 |---|---|---|
 | `transcribe.py` | **Activo** | Script unificado de transcripcion en `~/.hermes/scripts/` |
 | `transcribe_worker.py` | Referencia | Worker original con chunking (base para `transcribe.py`) |
-| `MeetCapture.app` | Pausado | Menu bar app para captura automatica de Google Meet |
-| `meet-daemon` | **Deprecado** | Daemon de captura de calendario (reemplazado por transcribe.py) |
+| `MeetCapture.app` | **Activo** | Menu bar app: captura system audio de Google Meet (Core Audio tap) + transcribe local. Requiere permiso de Microfono. |
+| `meet-daemon` (`Daemon/server.py`) | **Activo** | Daemon de status/IPC (fire-and-forget); el core captura+transcribe es 100% Swift |
 | Skill `audio-transcription-batch` | **Activo** | Documentacion del pipeline en `~/.hermes/skills/media/` |
 
 ---
@@ -152,20 +152,33 @@ meetings-repo/                    # Este repo
 
 ---
 
-## MeetCapture.app (Pausado)
+## MeetCapture.app (Activo)
 
-La app nativa de menu bar para captura automatica de Google Meet esta pausada.
-Los docs en `docs/` describen su arquitectura y funcionamiento.
+App nativa de menu bar que captura el system audio de las llamadas de Google
+Meet y lo transcribe localmente con whisper-cli.
 
-Para reactivar:
 ```bash
-cd ~/meetings-repo
-./build.sh
+cd ~/.hermes/repos/meet-capture
+./build.sh                 # compila, firma ad-hoc, instala, recarga daemon
 open ~/meetings/MeetCapture.app
 ```
 
-**Nota:** El `meet-daemon` fue deprecado. La captura automatica de calendario
-y la transcripcion en vivo requieren re-evaluacion de la arquitectura.
+**Captura (2026-06-16):** usa un **aggregate device de Core Audio** (macOS
+14.4+) que combina un **process tap de system audio** (participantes remotos)
+**+ el microfono** (tu voz) — asi el transcript incluye a todos, no solo a la
+otra parte. No usa ScreenCaptureKit (`SCStream` no entrega frames en macOS
+15+/26). Las dos fuentes se mezclan a **mono Float32** en el IOProc; la rate la
+fija el dispositivo (48kHz solo-tap, 44.1kHz cuando el mic interno manda el
+clock), se lee en runtime y el transcriber resamplea a 16kHz desde la rate real
+(nada hardcodeado). **Requiere permiso de Microfono**: la app lo pide al iniciar
+y habilita Record al concederlo. Precision: modelo **medium** + initial prompt
+de dominio (nombres/jergon MaatWork) + carry de contexto entre chunks + dedup de
+repeticiones; el modelo se libera al terminar (idle ~15MB RAM).
+
+> Nota de entorno: el process tap funciona en proceso aislado y el contrato
+> captura→transcripcion esta verificado a nivel codigo. Si el tap se cuelga al
+> iniciar captura tras mucho debugging de TCC/coreaudiod, reiniciar la Mac
+> restablece el subsistema de audio.
 
 ---
 

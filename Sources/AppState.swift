@@ -113,6 +113,18 @@ final class AppState: ObservableObject {
         healthMonitor.start(socketClient: socketClient, appState: self)
 
         phase = .idle
+
+        // Test-only: MEETCAPTURE_SELFTEST_SECS=N records N seconds then stops
+        // (and transcribes) without any UI interaction. Never set in production;
+        // lets the harness exercise the real capture→transcript path headlessly.
+        if let raw = ProcessInfo.processInfo.environment["MEETCAPTURE_SELFTEST_SECS"],
+           let secs = Double(raw), secs > 0 {
+            logger.warning("SELFTEST: recording \(secs)s")
+            startRecording()
+            DispatchQueue.main.asyncAfter(deadline: .now() + secs) { [weak self] in
+                self?.stopRecording()
+            }
+        }
     }
 
     /// Ping the daemon via SocketClient. Updates `isDaemonRunning` accordingly.
@@ -155,7 +167,11 @@ final class AppState: ObservableObject {
         
         hasAudioPermission = audioCapture.checkPermission()
         if !hasAudioPermission {
-            audioCapture.requestPermission()
+            // Update the UI once the user answers the prompt (otherwise the
+            // "Microphone access required" banner sticks until app restart).
+            audioCapture.requestPermission { [weak self] granted in
+                self?.hasAudioPermission = granted
+            }
         }
     }
     
@@ -201,7 +217,7 @@ final class AppState: ObservableObject {
 
         hasAudioPermission = audioCapture.checkPermission()
         guard hasAudioPermission else {
-            errorMessage = "Screen Recording permission required. Click the banner to open System Settings."
+            errorMessage = "Microphone permission required. Click the banner to open System Settings."
             audioCapture.openPrivacySettings()
             return
         }
@@ -266,14 +282,20 @@ final class AppState: ObservableObject {
 
     /// Stream-transcribe a PCM file in 30s chunks. Phase 3 fix: bounded RAM.
     private func transcribe(audioPath: String) async {
+        // WhisperTranscriber loads the model on demand; free it (and stop the
+        // memory-monitor timer) once we're done so an idle app doesn't sit on
+        // 150MB–1.4GB of model after every meeting.
+        defer { whisperManager.stopRecording() }
         do {
             let outputPath = audioPath.replacingOccurrences(of: ".pcm", with: ".txt")
             let outputURL = URL(fileURLWithPath: outputPath)
             let outputBase = audioPath.replacingOccurrences(of: ".pcm", with: "")
             _ = outputBase
 
-            // Try streaming transcription first (Phase 3)
-            if let stream = WhisperTranscriber(audioPath: audioPath, whisperManager: whisperManager) {
+            // Try streaming transcription first (Phase 3). Pass the actual
+            // capture rate so the transcriber resamples correctly (48k or 44.1k).
+            let captureRate = audioCapture.currentSampleRate
+            if let stream = WhisperTranscriber(audioPath: audioPath, sampleRate: captureRate, whisperManager: whisperManager) {
                 let progressStream = stream.progress
                 let textStream = stream.text
 

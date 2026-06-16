@@ -52,7 +52,7 @@ echo "  Compiling $N_SOURCES Swift files..."
 
 # Compile
 swiftc \
-    -target arm64-apple-macosx14.0 \
+    -target arm64-apple-macosx14.4 \
     -sdk "$(xcrun --show-sdk-path)" \
     -framework SwiftUI \
     -framework ServiceManagement \

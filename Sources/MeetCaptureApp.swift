@@ -48,16 +48,13 @@ struct MeetCaptureApp: App {
 // MARK: - AppDelegate
 
 class AppDelegate: NSObject, NSApplicationDelegate {
-    // CRITICAL: own the AppState and create it as early as possible.
-    // Stored as a nonisolated(unsafe) property so the @main App can grab it
-    // from `init()` (NSApplicationDelegateAdaptor instantiates AppDelegate
-    // synchronously before MeetCaptureApp.init runs).
-    //
-    // AppState is @MainActor-isolated, but init() is a non-isolated synchronous
-    // setup that doesn't touch any actor state — using `nonisolated(unsafe)`
-    // is safe here because the actual startup() call happens on the main actor
-    // in applicationDidFinishLaunching.
-    nonisolated(unsafe) static let sharedAppState = AppState()
+    // CRITICAL: own the AppState and create it as early as possible so the
+    // @main App can grab it from `init()` (NSApplicationDelegateAdaptor
+    // instantiates AppDelegate synchronously before MeetCaptureApp.init runs).
+    // AppState is @MainActor-isolated (hence Sendable) and its init() is a
+    // non-isolated synchronous setup; the actual startup() call happens on the
+    // main actor in applicationDidFinishLaunching.
+    static let sharedAppState = AppState()
     private let appState = AppDelegate.sharedAppState
 
     func applicationDidFinishLaunching(_ notification: Notification) {

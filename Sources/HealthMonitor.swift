@@ -22,12 +22,26 @@ final class HealthMonitor {
         self.socketClient = socketClient
         self.appState = appState
         stop()
-        timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+        // BUG #16 fix: MenuBarExtra apps without a Dock icon don't pump the
+        // main run loop the same way a regular app does. Timer.scheduledTimer
+        // schedules on the current run loop (which is main) but the run loop
+        // may not process timer events when the app is otherwise idle. Adding
+        // explicitly to .common mode makes the timer fire regardless.
+        let timer = Timer(timeInterval: 30, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.tick()
             }
         }
-        logger.info("HealthMonitor started (30s interval)")
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+        logger.info("HealthMonitor started (30s interval, .common run loop mode)")
+
+        // Kick off an initial tick so the daemon status reflects reality
+        // within a few seconds of startup (instead of waiting 30s for the
+        // first scheduled tick).
+        Task { @MainActor in
+            self.tick()
+        }
     }
 
     func stop() {
@@ -37,6 +51,7 @@ final class HealthMonitor {
 
     private func tick() {
         guard let appState else { return }
+        Self.appendDiag("HealthMonitor.tick()")
         Task {
             // 1. Ping daemon
             do {
@@ -105,5 +120,21 @@ final class HealthMonitor {
         c.sound = UNNotificationSound.default
         let req = UNNotificationRequest(identifier: UUID().uuidString, content: c, trigger: nil)
         UNUserNotificationCenter.current().add(req)
+    }
+
+    /// Always-on diagnostic log so we can debug IPC issues even in release builds.
+    static let diagPath = "/tmp/meetcapture-socket-diag.log"
+    static func appendDiag(_ msg: String) {
+        let ts = ISO8601DateFormatter().string(from: Date())
+        let line = "\(ts) [Health] \(msg)\n"
+        if let data = line.data(using: .utf8) {
+            if let handle = try? FileHandle(forWritingTo: URL(fileURLWithPath: diagPath)) {
+                _ = try? handle.seekToEnd()
+                try? handle.write(contentsOf: data)
+                try? handle.close()
+            } else {
+                try? data.write(to: URL(fileURLWithPath: diagPath))
+            }
+        }
     }
 }

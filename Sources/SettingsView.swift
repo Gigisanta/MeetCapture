@@ -6,7 +6,7 @@ import SwiftUI
 struct SettingsView: View {
     @ObservedObject var appState: AppState
     @AppStorage("autoRecord") private var autoRecord = true
-    @AppStorage("whisperModel") private var whisperModel = "large-v3-turbo"
+    @AppStorage("whisperModel") private var whisperModel = "medium"
     @AppStorage("notifyHermes") private var notifyHermes = true
     @AppStorage("transcriptDir") private var transcriptDir = ""
     
@@ -58,13 +58,17 @@ struct SettingsView: View {
         Form {
             Picker("Whisper Model", selection: $whisperModel) {
                 Text("tiny (75MB, fastest)").tag("tiny")
-                Text("base (142MB, fast)").tag("base")
+                Text("base (142MB, fast — safe on 8GB)").tag("base")
                 Text("small (461MB, balanced)").tag("small")
+                Text("medium (1.4GB, high accuracy)").tag("medium")
                 Text("large-v3-turbo (1.6GB, best)").tag("large-v3-turbo")
             }
+            Text("Auto-downgrades if free RAM is low. Undownloaded models fall back to the best available.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
             
             HStack {
-                Text("Screen Recording permission:")
+                Text("Microphone permission:")
                 Spacer()
                 Circle()
                     .fill(appState.hasAudioPermission ? .green : .red)
@@ -75,7 +79,9 @@ struct SettingsView: View {
             
             if !appState.hasAudioPermission {
                 Button("Grant Permission") {
-                    appState.audioCapture.requestPermission()
+                    appState.audioCapture.requestPermission { granted in
+                        appState.hasAudioPermission = granted
+                    }
                 }
             }
         }
@@ -126,7 +132,7 @@ struct SettingsView: View {
             Text("MeetCapture")
                 .font(.title2)
             
-            Text("v4.0.0")
+            Text("v4.2.0")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             

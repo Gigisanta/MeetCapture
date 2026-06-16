@@ -1,7 +1,9 @@
 // WhisperTranscriber.swift
 // MeetCapture v4 — Phase 3 streaming transcription
-// Reads a 16kHz/16-bit/mono PCM file in 30s windows, runs whisper-cli per chunk,
-// emits progress + final assembled text via AsyncStream.
+// Reads the raw PCM file written by AudioCaptureService (Core Audio tap:
+// Float32, interleaved, 48kHz, stereo) in 30s windows. Each window is
+// downmixed to mono, resampled to 16kHz, converted to 16-bit, and handed to
+// whisper-cli. Emits progress + final assembled text via AsyncStream.
 
 import Foundation
 import os
@@ -10,10 +12,14 @@ import os
 /// Bounded memory: ~2 MB peak regardless of total audio length.
 final class WhisperTranscriber {
     static let chunkSeconds: Int = 30
-    static let sampleRate: Int = 16_000
-    static let bytesPerSample: Int = 2  // Int16
+    // On-disk capture format: mono Float32 at `captureSampleRate` (set per
+    // recording — the aggregate may run at 48k or 44.1k).
+    static let bytesPerSample: Int = 4                 // mono Float32
+    static let frameBytes: Int = bytesPerSample        // mono → 1 sample/frame
+    static let targetSampleRate: Int = 16_000          // whisper requires 16kHz
 
     private let audioPath: String
+    private let captureSampleRate: Double
     private let whisperManager: WhisperModelManager
     private let logger = Logger(subsystem: "com.maatwork.meetcapture", category: "WhisperStream")
 
@@ -22,8 +28,9 @@ final class WhisperTranscriber {
     private let progressContinuation: AsyncStream<Double>.Continuation
     private let textContinuation: AsyncStream<String>.Continuation
 
-    init?(audioPath: String, whisperManager: WhisperModelManager) {
+    init?(audioPath: String, sampleRate: Double, whisperManager: WhisperModelManager) {
         self.audioPath = audioPath
+        self.captureSampleRate = sampleRate > 0 ? sampleRate : 48_000
         self.whisperManager = whisperManager
 
         var pCont: AsyncStream<Double>.Continuation!
@@ -41,7 +48,8 @@ final class WhisperTranscriber {
 
     /// Run the streaming transcription. Returns the assembled final text.
     func run() async throws -> String {
-        let chunkSizeBytes = Self.chunkSeconds * Self.sampleRate * Self.bytesPerSample
+        // Whole frames per chunk (mono Float32 at the capture rate).
+        let chunkSizeBytes = Self.chunkSeconds * Int(captureSampleRate) * Self.frameBytes
         let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: audioPath))
         defer { try? handle.close() }
 
@@ -57,6 +65,9 @@ final class WhisperTranscriber {
         var assembled: [String] = []
         var bytesRead: Int = 0
         var chunkIndex: Int = 0
+        // Carry the tail of the previous chunk's text as context so whisper keeps
+        // continuity across 30s boundaries (names/topics don't reset each chunk).
+        var carriedTail = ""
 
         while true {
             let chunk = try handle.read(upToCount: chunkSizeBytes) ?? Data()
@@ -64,19 +75,21 @@ final class WhisperTranscriber {
             bytesRead += chunk.count
             chunkIndex += 1
 
-            // Convert Int16 PCM → Float32 in place, write to temp WAV
+            // Downmix 48k stereo Float32 → 16k mono Int16, write temp WAV
             let wavURL = FileManager.default.temporaryDirectory
                 .appendingPathComponent("meetcapture-chunk-\(UUID().uuidString).wav")
             defer { try? FileManager.default.removeItem(at: wavURL) }
 
-            try writeWAV(pcmData: chunk, sampleRate: Self.sampleRate, to: wavURL)
+            try writeWAV(captureData: chunk, to: wavURL)
 
             // Run whisper-cli on this chunk
-            let text = try await runWhisper(on: wavURL)
+            let text = try await runWhisper(on: wavURL, context: carriedTail)
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty {
                 assembled.append(trimmed)
                 textContinuation.yield(trimmed)
+                // Keep the last ~220 chars as context for the next chunk.
+                carriedTail = String(trimmed.suffix(220))
             }
 
             // Progress
@@ -89,16 +102,44 @@ final class WhisperTranscriber {
         progressContinuation.yield(1.0)
         progressContinuation.finish()
         textContinuation.finish()
-        return assembled.joined(separator: " ")
+        return Self.dedupRepeats(assembled.joined(separator: " "))
+    }
+
+    /// Remove whisper-cli's repeated-block hallucination. On short/silence-padded
+    /// clips (notably the final partial chunk) it re-emits whole spans verbatim,
+    /// e.g. "A. B. A. B." → we drop a sentence when an identical one (ignoring
+    /// case/punctuation) already appeared within the last `window` sentences.
+    /// A length gate keeps legitimate short repeats ("Sí. Sí.", "Hola. … Hola.").
+    static func dedupRepeats(_ text: String) -> String {
+        let parts = text.replacingOccurrences(of: "\n", with: " ")
+            .components(separatedBy: CharacterSet(charactersIn: ".!?"))
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        func norm(_ s: String) -> String { String(s.lowercased().unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }) }
+        let window = 8       // covers whole-transcript duplication of a few sentences
+        let minLen = 12      // only dedup substantial sentences, not short interjections
+        var out: [String] = []
+        var normOut: [String] = []
+        for p in parts {
+            let np = norm(p)
+            if np.count > minLen && normOut.suffix(window).contains(np) { continue }
+            out.append(p)
+            normOut.append(np)
+        }
+        return out.isEmpty ? "" : out.joined(separator: ". ") + "."
     }
 
     // MARK: - Whisper invocation
 
-    private func runWhisper(on wavURL: URL) async throws -> String {
+    private func runWhisper(on wavURL: URL, context: String = "") async throws -> String {
         guard let modelPath = whisperManager.loadedModelPathAccessor else {
             throw WhisperError.noModelLoaded
         }
         let cliPath = whisperManager.whisperCLIPathAccessor
+        // Domain prompt + carried tail from the previous chunk for continuity.
+        let prompt = context.isEmpty
+            ? WhisperModelManager.domainPrompt
+            : WhisperModelManager.domainPrompt + " " + context
 
         return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<String, Error>) in
             DispatchQueue.global(qos: .userInitiated).async {
@@ -109,7 +150,10 @@ final class WhisperTranscriber {
                     "-f", wavURL.path,
                     "-l", "es",
                     "-otxt", "-of", wavURL.deletingPathExtension().path,
-                    "-t", "4",
+                    "-t", "\(WhisperModelManager.whisperThreads)",
+                    "--prompt", prompt,
+                    "--carry-initial-prompt",
+                    "--no-timestamps",
                     "--no-prints"
                 ]
                 let stderr = Pipe()
@@ -147,34 +191,57 @@ final class WhisperTranscriber {
         }
     }
 
-    /// Write a minimal WAV header + raw 16-bit PCM samples to disk.
-    private func writeWAV(pcmData: Data, sampleRate: Int, to url: URL) throws {
+    /// Convert a window of captured PCM (mono Float32 at `captureSampleRate`)
+    /// into a 16kHz mono 16-bit WAV that whisper-cli reads natively. Resamples
+    /// from the actual capture rate (48k or 44.1k) via linear interpolation.
+    /// ponytail: linear resample, not a polyphase FIR — speech content sits well
+    /// below 8kHz and whisper is robust to the mild aliasing; swap in a low-pass
+    /// if sibilance quality ever matters.
+    private func writeWAV(captureData: Data, to url: URL) throws {
+        let inCount = captureData.count / Self.frameBytes        // mono samples
+        let ratio = captureSampleRate / Double(Self.targetSampleRate)  // e.g. 2.756
+        let outCount = ratio > 0 ? Int(Double(inCount) / ratio) : 0
+        var int16Samples = [Int16](repeating: 0, count: max(0, outCount))
+
+        captureData.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            let floats = raw.bindMemory(to: Float.self)  // [m0, m1, m2, ...]
+            guard inCount > 0 else { return }
+            for j in 0..<outCount {
+                let srcPos = Double(j) * ratio
+                let i0 = Int(srcPos)
+                let frac = Float(srcPos - Double(i0))
+                let a = floats[i0]
+                let b = (i0 + 1 < inCount) ? floats[i0 + 1] : a
+                let mono = a + (b - a) * frac
+                let clamped = max(-1.0, min(1.0, mono))
+                int16Samples[j] = Int16(clamped * 32767.0)
+            }
+        }
+
         let numChannels: UInt16 = 1
         let bitsPerSample: UInt16 = 16
+        let sampleRate = Self.targetSampleRate
         let byteRate = UInt32(sampleRate) * UInt32(numChannels) * UInt32(bitsPerSample / 8)
         let blockAlign = numChannels * (bitsPerSample / 8)
-        let dataSize = UInt32(pcmData.count)
+        let dataSize = UInt32(int16Samples.count * Int(bitsPerSample / 8))
         let chunkSize = 36 + dataSize
 
-        var header = Data()
-        header.append("RIFF".data(using: .ascii)!)
-        header.append(littleEndian32(chunkSize))
-        header.append("WAVE".data(using: .ascii)!)
-        header.append("fmt ".data(using: .ascii)!)
-        header.append(littleEndian32(16))           // PCM header size
-        header.append(littleEndian16(1))            // PCM format
-        header.append(littleEndian16(numChannels))
-        header.append(littleEndian32(UInt32(sampleRate)))
-        header.append(littleEndian32(byteRate))
-        header.append(littleEndian16(blockAlign))
-        header.append(littleEndian16(bitsPerSample))
-        header.append("data".data(using: .ascii)!)
-        header.append(littleEndian32(dataSize))
-
-        var combined = Data()
-        combined.append(header)
-        combined.append(pcmData)
-        try combined.write(to: url)
+        var out = Data()
+        out.append("RIFF".data(using: .ascii)!)
+        out.append(littleEndian32(chunkSize))
+        out.append("WAVE".data(using: .ascii)!)
+        out.append("fmt ".data(using: .ascii)!)
+        out.append(littleEndian32(16))           // PCM header size
+        out.append(littleEndian16(1))            // PCM format
+        out.append(littleEndian16(numChannels))
+        out.append(littleEndian32(UInt32(sampleRate)))
+        out.append(littleEndian32(byteRate))
+        out.append(littleEndian16(blockAlign))
+        out.append(littleEndian16(bitsPerSample))
+        out.append("data".data(using: .ascii)!)
+        out.append(littleEndian32(dataSize))
+        int16Samples.withUnsafeBytes { out.append(contentsOf: $0) }
+        try out.write(to: url)
     }
 
     private func littleEndian16(_ v: UInt16) -> Data {
