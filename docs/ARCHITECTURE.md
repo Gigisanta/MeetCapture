@@ -1,21 +1,23 @@
-> **Update 2026-06-15 — current state of the menu bar app**
+> **Status: ACTIVE (v4.3.0).** Source of truth: [../README.md](../README.md).
 >
-> The app is under active development (not paused). Two architectural facts in
-> this document are now out of date; the rest still applies:
+> This document describes the MeetCapture.app menu bar app, which is in active
+> production use. Key architectural facts:
 >
-> 1. **Audio capture no longer uses ScreenCaptureKit / `SCStream`.** On macOS
->    15+/26, `SCStream.startCapture()` succeeds but never delivers any
->    sample-buffer callbacks (audio or screen) — a confirmed OS regression,
->    reproducible with minimal textbook code under the granted identity.
->    Capture was migrated to a **Core Audio process tap** (`CATapDescription` +
->    private aggregate device, macOS 14.4+), which captures the global system
->    audio mix as Float32 48kHz stereo. See `Sources/AudioCapture.swift`.
+> 1. **Audio capture uses a Core Audio process tap + aggregate device**
+>    (`CATapDescription` + private aggregate device, macOS 14.4+). It captures
+>    the system audio (other call participants) **plus the microphone** (your own
+>    voice), mixed to mono Float32 in the IOProc. It does NOT use
+>    ScreenCaptureKit / `SCStream`: on macOS 15+/26 `SCStream.startCapture()`
+>    succeeds but never delivers any sample-buffer callbacks — a confirmed OS
+>    regression, reproducible with minimal textbook code under the granted
+>    identity — which is why capture was migrated. See `Sources/AudioCapture.swift`.
 > 2. **The required permission is Microphone, not Screen Recording.** Core Audio
 >    process taps are gated by the Microphone (audio input) TCC permission. The
 >    app requests it at launch and gates the Record button on it.
 >
-> The transcription pipeline (`Sources/WhisperTranscriber.swift`) downmixes +
-> resamples the captured 48kHz stereo to 16kHz mono before running whisper-cli.
+> The transcription pipeline (`Sources/WhisperTranscriber.swift`) shells out to
+> the `whisper-cli` binary via `Process`; it resamples the captured audio to
+> 16kHz mono (from the device's real rate, read at runtime) before transcribing.
 > The standalone CLI pipeline ([TRANSCRIPTION-PIPELINE.md](TRANSCRIPTION-PIPELINE.md))
 > remains available for transcribing arbitrary audio files.
 
@@ -32,12 +34,12 @@ MeetCapture is a native macOS menu bar application built with Swift/SwiftUI that
 │  │   └── StatusView + SettingsView                      │
 │  ├── CalendarService (EventKit)                         │
 │  │   └── EKEventStore + change notifications            │
-│  ├── AudioCaptureService (ScreenCaptureKit)             │
-│  │   └── SCStream + SCShareableContent                  │
+│  ├── AudioCaptureService (Core Audio process tap)      │
+│  │   └── CATapDescription + aggregate device + mic      │
 │  ├── DaemonManager (SMAppService)                       │
 │  │   └── LaunchAgent lifecycle                          │
-│  ├── WhisperBridge (C FFI)                              │
-│  │   └── whisper.cpp library bindings                   │
+│  ├── WhisperTranscriber (shells out to whisper-cli)     │
+│  │   └── Process/exec → whisper-cli binary              │
 │  └── SocketClient (Unix Domain Socket)                  │
 │       └── IPC to meet-daemon                            │
 └─────────────────────────────────────────────────────────┘
@@ -101,37 +103,39 @@ TRANSCRIBING → DONE: Whisper completes
 DONE → IDLE: 30s timeout or manual dismiss
 ```
 
-### 3. AudioCaptureService.swift — ScreenCaptureKit Audio Capture
+### 3. AudioCaptureService.swift — Core Audio Process Tap Capture
 
-**Technology:** ScreenCaptureKit (macOS 14+)
+**Technology:** Core Audio (process tap + aggregate device, macOS 14.4+)
 
 **Responsibilities:**
-- System audio capture via `SCStream`
-- PCM data extraction and writing
-- Permission management (`CGPreflightScreenCaptureAccess`)
-- Stream lifecycle management
+- Capture system audio (other participants) **+ the microphone** (your voice)
+  via a `CATapDescription` process tap aggregated with the default input
+- Mix both sources to mono Float32 in the IOProc; write samples to file
+- Permission management (Microphone / `AVCaptureDevice` audio authorization)
+- Tap/aggregate lifecycle management, including rebuild on device change
 
 **Key Features:**
-- Captures all system audio (no virtual device needed)
-- Writes raw PCM to file for Whisper processing
+- Captures the full call (system audio + mic), not just the remote side
+- Rate-agnostic: reads the device's real sample rate at runtime (48kHz tap-only,
+  44.1kHz when the internal mic drives the clock) — nothing hardcoded
+- Device-change resilience: if you switch headphones/output mid-call, the tap
+  silently stops delivering audio with no error, so the service listens for
+  device changes and **rebuilds the tap + aggregate** into the same file
 - Low CPU usage (~5% during recording)
-- Proper error handling and recovery
 
 **Permission Flow:**
 ```swift
 func checkPermission() -> Bool {
-    return CGPreflightScreenCaptureAccess()
+    AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
 }
 
 func requestPermission() {
-    CGRequestScreenCaptureAccess()
+    AVCaptureDevice.requestAccess(for: .audio) { _ in }
 }
 
 func startCapture(outputPath: String) async throws {
-    let content = try await SCShareableContent.excludingDesktopWindows(
-        false, onScreenWindowsOnly: true
-    )
-    // Configure and start SCStream
+    // Build a CATapDescription process tap, aggregate it with the default
+    // input (mic), install an IOProc that mixes to mono Float32, and write.
 }
 ```
 
@@ -181,22 +185,23 @@ func findUpcomingMeetings() -> [Meeting] {
 - Toggle registration
 - Open System Settings for approval
 
-### 6. WhisperBridge.swift — C FFI to whisper.cpp
+### 6. WhisperTranscriber.swift — shells out to the whisper-cli binary
 
-**Technology:** Swift C interop
+**Technology:** Swift `Process` (exec of the `whisper-cli` binary)
 
 **Responsibilities:**
-- Load whisper.cpp shared library
-- Initialize Whisper context with model
-- Process audio chunks
-- Extract transcription text
-- Progress callbacks
+- Resample/downmix captured audio to 16kHz mono WAV
+- Spawn `whisper-cli` per chunk with the model + domain initial prompt
+- Read transcription text from whisper-cli output
+- Apply post-processing (dedup, garbage removal)
 
 **Key Features:**
-- Direct library calls (no CLI process spawning)
-- Streaming transcription support
-- Memory-efficient chunk processing
-- Apple Silicon GPU acceleration
+- Shells out to the `whisper-cli` binary via `Process` (no linked
+  whisper.cpp library / C-FFI)
+- Default model is **medium**; uses Silero VAD, a domain initial prompt,
+  carry-initial-prompt across chunks, dedup, and per-chunk gain normalization
+- Memory-efficient chunk processing; the model is released when done (idle ~15MB)
+- Apple Silicon GPU acceleration (via whisper-cli)
 
 ### 7. SocketClient.swift — Unix Domain Socket IPC
 
@@ -230,13 +235,13 @@ func findUpcomingMeetings() -> [Meeting] {
    ↓
 3. AudioCaptureService.startCapture()
    ↓
-4. ScreenCaptureKit captures system audio
+4. Core Audio process tap + aggregate device captures system audio + mic
    ↓
-5. PCM data written to file (5s chunks)
+5. Mono Float32 samples written to file
    ↓
 6. Meeting ends → AppState transitions to TRANSCRIBING
    ↓
-7. WhisperBridge processes PCM chunks
+7. WhisperTranscriber shells out to whisper-cli per chunk
    ↓
 8. Transcript written to Markdown file
    ↓
@@ -250,13 +255,13 @@ func findUpcomingMeetings() -> [Meeting] {
 ```
 1. App launches
    ↓
-2. AudioCaptureService.checkPermission()
+2. AudioCaptureService.checkPermission()  (Microphone authorization)
    ↓
 3. If not granted → show "Grant Permission" button
    ↓
-4. User clicks → CGRequestScreenCaptureAccess()
+4. User clicks → AVCaptureDevice.requestAccess(for: .audio)
    ↓
-5. System Settings opens
+5. System Settings opens (Privacy & Security → Microphone)
    ↓
 6. User enables MeetCapture
    ↓
@@ -298,9 +303,10 @@ func findUpcomingMeetings() -> [Meeting] {
 
 ### Permissions
 
-1. **Screen Recording** — For ScreenCaptureKit audio capture
-   - Required for system audio capture
-   - Granted in System Settings → Privacy & Security
+1. **Microphone** — For the Core Audio process tap audio capture
+   - Required for system audio + mic capture (process taps are gated by the
+     Microphone TCC permission)
+   - Granted in System Settings → Privacy & Security → Microphone
    - App must be code-signed for TCC to work
 
 2. **Calendar Access** — For EventKit calendar monitoring
@@ -334,7 +340,7 @@ func findUpcomingMeetings() -> [Meeting] {
 - **Xcode Command Line Tools** 26.5+
 - **Swift** 6.3.2+
 - **macOS SDK** 14.0+
-- **Frameworks:** SwiftUI, ServiceManagement, EventKit, ScreenCaptureKit, Combine, UserNotifications, AppKit
+- **Frameworks:** SwiftUI, ServiceManagement, EventKit, CoreAudio, AudioToolbox, AVFoundation, Combine, UserNotifications, AppKit
 
 ### Build Command
 
@@ -351,7 +357,9 @@ swiftc \
     -framework SwiftUI \
     -framework ServiceManagement \
     -framework EventKit \
-    -framework ScreenCaptureKit \
+    -framework CoreAudio \
+    -framework AudioToolbox \
+    -framework AVFoundation \
     -framework Combine \
     -framework UserNotifications \
     -framework AppKit \
@@ -419,5 +427,5 @@ swift test --filter AudioCaptureServiceTests
 
 ---
 
-*Last updated: 2026-05-28*
-*Version: 4.0.0*
+*Last updated: 2026-06-16*
+*Version: 4.3.0*

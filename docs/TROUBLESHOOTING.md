@@ -1,5 +1,6 @@
-> **Status: PAUSED** — This describes the MeetCapture.app menu bar app.
-> For the ACTIVE transcription pipeline troubleshooting, see [TRANSCRIPTION-PIPELINE.md](TRANSCRIPTION-PIPELINE.md#troubleshooting).
+> **Status: ACTIVE (v4.3.0)** — This describes the MeetCapture.app menu bar app,
+> in active production use. Source of truth: [../README.md](../README.md).
+> For the standalone CLI transcription pipeline troubleshooting, see [TRANSCRIPTION-PIPELINE.md](TRANSCRIPTION-PIPELINE.md#troubleshooting).
 
 # Troubleshooting
 
@@ -23,14 +24,14 @@ codesign --force --deep --sign - ~/meetings/MeetCapture.app
 
 ---
 
-### Screen Recording permission not detected
+### Microphone permission not detected
 
 **Cause:** The app isn't code-signed properly, or the TCC database is stale.
 
 **Fix:**
 ```bash
 # Reset TCC database for our app
-tccutil reset ScreenCapture com.maatwork.meetcapture
+tccutil reset Microphone com.maatwork.meetcapture
 
 # Re-sign the app
 codesign --force --deep --sign - ~/meetings/MeetCapture.app
@@ -48,11 +49,11 @@ open ~/meetings/MeetCapture.app
 
 ### "Start Recording" button does nothing
 
-**Cause:** Screen Recording permission not granted, or permission not detected after granting.
+**Cause:** Microphone permission not granted, or permission not detected after granting.
 
 **Fix:**
 1. Click "Grant Permission" in the app
-2. Enable MeetCapture in System Settings → Privacy & Security → Screen Recording
+2. Enable MeetCapture in System Settings → Privacy & Security → Microphone
 3. **Restart the app** after granting permission:
    ```bash
    pkill -f "meetings/MeetCapture.app"
@@ -73,16 +74,20 @@ cat /tmp/meetcapture_debug.log
 
 ### No audio captured (0-byte recordings)
 
-**Cause:** Screen Recording permission not granted, or ScreenCaptureKit not capturing audio.
+**Cause:** Microphone permission not granted, or the process tap isn't capturing audio.
 
 **Fix:**
-1. Verify Screen Recording permission:
-   - System Settings → Privacy & Security → Screen Recording
+1. Verify Microphone permission:
+   - System Settings → Privacy & Security → Microphone
    - MeetCapture should be listed and enabled
 
 2. Restart the app after granting permission
 
 3. Verify you're in a Google Meet call (not just a regular call)
+
+4. If you switched audio output (headphones/AirPods) mid-call, the app
+   rebuilds the tap automatically; if capture still stalls, stop and restart
+   recording
 
 **Debug:**
 ```bash
@@ -316,7 +321,7 @@ rm -rf ~/Library/Logs/MeetCapture
 rm -f /tmp/meetcapture_debug.log
 
 # Reset TCC permissions
-tccutil reset ScreenCapture com.maatwork.meetcapture
+tccutil reset Microphone com.maatwork.meetcapture
 tccutil reset Calendar com.maatwork.meetcapture
 
 # Relaunch
@@ -395,5 +400,5 @@ ps aux | grep MeetCapture > /tmp/meetcapture_processes.txt
 
 ---
 
-*Last updated: 2026-05-28*
-*Version: 4.0.0*
+*Last updated: 2026-06-16*
+*Version: 4.3.0*
