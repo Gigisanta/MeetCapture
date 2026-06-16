@@ -29,6 +29,7 @@ final class AppState: ObservableObject {
     // MARK: - Services
     
     let calendarService = CalendarService()
+    let callDetector = CallDetector()
     let audioCapture = AudioCaptureService()
     let daemonManager = DaemonManager()
     let whisperManager = WhisperModelManager.shared
@@ -43,6 +44,10 @@ final class AppState: ObservableObject {
     private let transcriptDir: String
     private var energyActivity: NSObjectProtocol?
     private var lastRecordingPath: String?
+    /// True only when the CURRENT recording was started automatically by live
+    /// call detection — so we auto-stop it when the call ends, but never
+    /// auto-stop a recording the user started by hand.
+    private var autoStartedRecording = false
     
     // MARK: - Init
 
@@ -111,6 +116,11 @@ final class AppState: ObservableObject {
         await refreshDaemonStatus()
 
         healthMonitor.start(socketClient: socketClient, appState: self)
+
+        // Begin watching for live calls (auto-record). Cheap 4s poll; the
+        // auto-start path itself is gated on mic permission, so starting the
+        // watcher before the grant resolves is harmless.
+        callDetector.start()
 
         phase = .idle
 
@@ -188,6 +198,29 @@ final class AppState: ObservableObject {
                 self?.evaluateMeetings(meetings)
             }
             .store(in: &cancellables)
+
+        // Live-call detection: auto start/stop on real mic-in-use, independent of
+        // the calendar (covers ad-hoc calls). Honors the "autoRecord" setting.
+        callDetector.$isCallActive
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] active in
+                self?.handleCallActivity(active)
+            }
+            .store(in: &cancellables)
+    }
+
+    private func handleCallActivity(_ active: Bool) {
+        guard UserDefaults.standard.object(forKey: "autoRecord") as? Bool ?? true else { return }
+        if active {
+            guard phase == .idle || phase == .approaching, hasAudioPermission else { return }
+            logger.info("Auto-starting recording — live call detected")
+            autoStartedRecording = true
+            startRecording()
+        } else if phase == .recording, autoStartedRecording {
+            logger.info("Auto-stopping recording — live call ended")
+            stopRecording()
+        }
     }
     
     private func evaluateMeetings(_ meetings: [Meeting]) {
@@ -255,6 +288,7 @@ final class AppState: ObservableObject {
     func stopRecording() {
         guard phase == .recording else { return }
 
+        autoStartedRecording = false   // manual or auto, this recording is done
         phase = .transcribing
         transcriptionProgress = 0
         stopRecordingTimer()

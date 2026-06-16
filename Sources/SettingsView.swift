@@ -31,8 +31,11 @@ struct SettingsView: View {
     
     private var generalSettings: some View {
         Form {
-            Toggle("Auto-record when meeting detected", isOn: $autoRecord)
-            
+            Toggle("Auto-record live calls & calendar meetings", isOn: $autoRecord)
+            Text("Starts recording when a browser, Zoom, Teams or FaceTime is using the mic — even for ad-hoc calls not on your calendar.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
             Toggle("Notify Hermes on transcript ready", isOn: $notifyHermes)
             
             HStack {
@@ -132,7 +135,7 @@ struct SettingsView: View {
             Text("MeetCapture")
                 .font(.title2)
             
-            Text("v4.2.0")
+            Text("v4.3.0")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             
