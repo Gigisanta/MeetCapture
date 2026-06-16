@@ -65,6 +65,25 @@ enum WhisperError: LocalizedError {
 final class WhisperModelManager {
     static let shared = WhisperModelManager()
 
+    /// Domain-specific initial prompt — primes whisper with participant names,
+    /// company/project names and jargon so it spells them correctly instead of
+    /// guessing homophones ("MaatWork" not "Matwork", "MeetCapture" not "Met
+    /// Capture"). Kept in sync with ~/.hermes/scripts/transcribe.py.
+    static let domainPrompt = """
+    Transcripción de reunión de trabajo en español argentino. \
+    Participantes: Gio, Virginia, Nacho. \
+    Empresas y proyectos: MaatWork, Reinnova, Infrannova, Cactus Wealth, MaatQuant, \
+    Reinnova Consum, MaatWork Gym, MaatWorkHUB, PlanningMaatWork, MeetCapture, Hermes. \
+    Personas: Virginia Folgueiro, Nacho Infante. \
+    Términos técnicos: certificación, redeterminación de precios, planificación, \
+    etapas, obras, tickets, gestión documental, inventario, presupuesto, partida, \
+    parte de obra, orden de compra, proveedor, acopio, baseline, desvío, cash flow, KPI, rubro.
+    """
+
+    /// Threads for whisper-cli. Uses available cores (capped) for speed without
+    /// starving the UI. Apple Silicon counts efficiency cores too.
+    static let whisperThreads: Int = max(4, min(8, ProcessInfo.processInfo.activeProcessorCount))
+
     private let logger = Logger(subsystem: "com.meetcapture.whisper", category: "ModelManager")
     private let queue = DispatchQueue(label: "com.meetcapture.whisper", qos: .userInitiated)
 
@@ -84,12 +103,14 @@ final class WhisperModelManager {
     var isModelLoaded: Bool { loadedModelPath != nil }
 
     private init() {
-        // Find whisper-cli
+        // Find whisper-cli. Prefer the Homebrew/system install: the copy bundled
+        // into the .app by build.sh is missing its @rpath dylibs (libwhisper,
+        // libggml) and fails with "Library not loaded", so it must NOT be first.
         let bundleCLI = Bundle.main.resourcePath.map { "\($0)/whisper-cli" }
         let candidates = [
-            bundleCLI,
             "/opt/homebrew/bin/whisper-cli",
             "/usr/local/bin/whisper-cli",
+            bundleCLI,
             "/opt/homebrew/bin/whisper",
             "/usr/local/bin/whisper"
         ].compactMap { $0 }
@@ -110,7 +131,7 @@ final class WhisperModelManager {
             }
             try? FileManager.default.createDirectory(at: modelsDirectory, withIntermediateDirectories: true)
         }
-        self.preferredModel = .base
+        self.preferredModel = .medium
 
         setupMemoryPressureMonitoring()
         logger.info("WhisperModelManager initialized. Models dir: \(self.modelsDirectory.path)")
@@ -125,6 +146,14 @@ final class WhisperModelManager {
     func startRecording() throws {
         guard !isRecording else { return }
         isRecording = true
+        // Honor the user's model choice from Settings (@AppStorage "whisperModel").
+        // selectBestModel still downgrades if there isn't enough free RAM, so an
+        // over-ambitious choice can't freeze the machine. Falls back to the
+        // init default (.base) when the setting is unset.
+        if let saved = UserDefaults.standard.string(forKey: "whisperModel"),
+           let chosen = WhisperModelSize(rawValue: saved) {
+            preferredModel = chosen
+        }
         let model = selectBestModel(for: preferredModel)
         try loadModel(model)
         startMemoryMonitoring()
@@ -222,20 +251,24 @@ final class WhisperModelManager {
     // MARK: - Model Selection
 
     private func selectBestModel(for preferred: WhisperModelSize) -> WhisperModelSize {
+        // whisper-cli runs as a transient subprocess and mmaps the model file,
+        // so most of its footprint is file-backed (reclaimable). The old gate
+        // ("need full model size + 512MB FREE") was written for an in-process
+        // model and wrongly forced everyone down to `base`, wrecking accuracy.
+        // Estimate the resident working set as ~60% of the model size and honor
+        // the user's choice when it fits; the live memory-pressure source still
+        // downgrades if the OS reports genuine pressure.
         let availableMB = availableMemoryMB()
-        let requiredMB = UInt64(preferred.estimatedMemoryGB * 1024.0) + memoryThresholdMB
-        if availableMB > requiredMB, isModelDownloaded(preferred) {
+        func workingSetMB(_ m: WhisperModelSize) -> UInt64 { UInt64(m.estimatedMemoryGB * 0.6 * 1024.0) }
+
+        if isModelDownloaded(preferred), availableMB > workingSetMB(preferred) {
             return preferred
         }
         let fallbackOrder: [WhisperModelSize] = [.largeV3Turbo, .medium, .small, .base, .tiny]
-        for model in fallbackOrder {
-            guard isModelDownloaded(model) else { continue }
-            let reqMB = UInt64(model.estimatedMemoryGB * 1024.0)
-            if availableMB > reqMB + memoryThresholdMB {
-                return model
-            }
+        for model in fallbackOrder where isModelDownloaded(model) {
+            if availableMB > workingSetMB(model) { return model }
         }
-        return isModelDownloaded(.tiny) ? .tiny : .base
+        return isModelDownloaded(.base) ? .base : .tiny
     }
 
     private func smallerModel(than current: WhisperModelSize) -> WhisperModelSize {
@@ -290,28 +323,38 @@ final class WhisperModelManager {
 
     private func periodicMemoryCheck() {
         guard isRecording, let current = activeModel else { return }
+        // Only downgrade on GENUINELY critical free memory (absolute floor), not
+        // relative to model size. The relative check used to ping-pong the model
+        // mid-recording — producing chunks transcribed by different models — even
+        // though the mmap'd subprocess was perfectly healthy. 300MB is the floor
+        // below which the system is actually in trouble.
         let availableMB = availableMemoryMB()
-        let requiredMB = UInt64(current.estimatedMemoryGB * 1024.0)
-        if availableMB < requiredMB + memoryThresholdMB {
+        if availableMB < 300 {
             let smaller = smallerModel(than: current)
             if smaller != current {
+                logger.warning("Critically low memory (\(availableMB)MB) — downgrading \(current.rawValue)→\(smaller.rawValue)")
                 do { try loadModel(smaller) } catch { logger.error("Failed to auto-downgrade: \(error)") }
             }
         }
     }
 
+    /// System-wide free memory in MB (free + inactive pages, both reclaimable).
+    /// The previous implementation returned physicalMemory minus THIS process's
+    /// RSS, which on a 16GB box reports ~15.9GB "available" even when the system
+    /// is actually swapping — defeating the whole point of model downgrading.
     private func availableMemoryMB() -> UInt64 {
-        var info = mach_task_basic_info()
-        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size) / 4
-        let result = withUnsafeMutablePointer(to: &info) {
+        var stats = vm_statistics64_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64_data_t>.size / MemoryLayout<integer_t>.size)
+        let result = withUnsafeMutablePointer(to: &stats) {
             $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
-                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
+                host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &count)
             }
         }
-        guard result == KERN_SUCCESS else { return 4096 }
-        let usedMB = UInt64(info.resident_size) / (1024 * 1024)
-        let totalMB = ProcessInfo.processInfo.physicalMemory / (1024 * 1024)
-        return totalMB > usedMB ? totalMB - usedMB : 0
+        // Conservative fallback: assume only the base model is safe.
+        guard result == KERN_SUCCESS else { return 512 }
+        let pageSize = UInt64(vm_kernel_page_size)
+        let reclaimable = (UInt64(stats.free_count) + UInt64(stats.inactive_count)) * pageSize
+        return reclaimable / (1024 * 1024)
     }
 
     // MARK: - WAV Writing

@@ -11,9 +11,9 @@
     <key>CFBundleDisplayName</key>
     <string>MeetCapture</string>
     <key>CFBundleVersion</key>
-    <string>4.0.0</string>
+    <string>4.2.0</string>
     <key>CFBundleShortVersionString</key>
-    <string>4.0.0</string>
+    <string>4.2.0</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleExecutable</key>
@@ -23,7 +23,7 @@
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>LSMinimumSystemVersion</key>
-    <string>14.0</string>
+    <string>14.4</string>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.productivity</string>
 
@@ -40,6 +40,9 @@
     <!-- Privacy descriptions — REQUIRED for TCC prompts -->
     <key>NSMicrophoneUsageDescription</key>
     <string>MeetCapture captures system audio from Google Meet calls for transcription.</string>
+
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>MeetCapture captures your system audio (the Google Meet call) to transcribe it locally.</string>
 
     <key>NSScreenCaptureUsageDescription</key>
     <string>MeetCapture captures system audio to include in meeting transcripts.</string>

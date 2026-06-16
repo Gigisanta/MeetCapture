@@ -1,5 +1,23 @@
-> **Status: PAUSED** — This describes the MeetCapture.app menu bar app.
-> For the ACTIVE transcription pipeline, see [TRANSCRIPTION-PIPELINE.md](TRANSCRIPTION-PIPELINE.md).
+> **Update 2026-06-15 — current state of the menu bar app**
+>
+> The app is under active development (not paused). Two architectural facts in
+> this document are now out of date; the rest still applies:
+>
+> 1. **Audio capture no longer uses ScreenCaptureKit / `SCStream`.** On macOS
+>    15+/26, `SCStream.startCapture()` succeeds but never delivers any
+>    sample-buffer callbacks (audio or screen) — a confirmed OS regression,
+>    reproducible with minimal textbook code under the granted identity.
+>    Capture was migrated to a **Core Audio process tap** (`CATapDescription` +
+>    private aggregate device, macOS 14.4+), which captures the global system
+>    audio mix as Float32 48kHz stereo. See `Sources/AudioCapture.swift`.
+> 2. **The required permission is Microphone, not Screen Recording.** Core Audio
+>    process taps are gated by the Microphone (audio input) TCC permission. The
+>    app requests it at launch and gates the Record button on it.
+>
+> The transcription pipeline (`Sources/WhisperTranscriber.swift`) downmixes +
+> resamples the captured 48kHz stereo to 16kHz mono before running whisper-cli.
+> The standalone CLI pipeline ([TRANSCRIPTION-PIPELINE.md](TRANSCRIPTION-PIPELINE.md))
+> remains available for transcribing arbitrary audio files.
 
 # Architecture
 

@@ -162,7 +162,17 @@ echo "$R" | grep -q 'is not a file' && {
 } || { red "  ✗ Directory: $R"; FAIL=$((FAIL+1)); }
 rmdir /tmp/fake-audio-dir
 
-# Nonexistent model
+# Nonexistent model — needs a real audio file present (daemon validates the
+# path arg before the model arg), so generate it here rather than relying on
+# Section 5 having run first.
+/opt/homebrew/bin/python3 - <<'PY' >/dev/null
+import struct, math, wave
+sr, dur, freq, amp = 16000, 1, 440, 16000
+samples = [int(amp * 0.3 * math.sin(2*math.pi*freq*i/sr)) for i in range(sr*dur)]
+with wave.open('/tmp/e2e-test.wav', 'wb') as w:
+    w.setnchannels(1); w.setsampwidth(2); w.setframerate(sr)
+    w.writeframes(b''.join(struct.pack('<h', s) for s in samples))
+PY
 R=$(send '{"command":"transcribe_path","payload":{"audio_path":"/tmp/e2e-test.wav","model":"huge-model"}}' 2)
 echo "$R" | grep -q '"model not found' && {
     green "  ✓ Nonexistent model rejected"
