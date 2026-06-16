@@ -67,14 +67,23 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
     @Published private(set) var bytesCaptured: Int = 0
     @Published private(set) var lastError: String?
 
-    /// Actual sample rate the aggregate device delivered, read at setup time.
-    /// On-disk PCM is mono Float32 at this rate.
-    private(set) var currentSampleRate: Double = 48_000
+    /// Sample rate of the on-disk PCM. Pinned at the FIRST build of a recording
+    /// so that rebuilds after a device change (which may run at a different
+    /// rate) stay consistent — the IOProc resamples the live stream to this.
+    private var recordingSampleRate: Double = 0
+    /// Rate the current aggregate actually runs at (updates on each rebuild).
+    private var liveInputRate: Double = 48_000
+    /// What the transcriber reads the file as.
+    var currentSampleRate: Double { recordingSampleRate > 0 ? recordingSampleRate : 48_000 }
 
     private var tapID = AudioObjectID(kAudioObjectUnknown)
     private var aggregateID = AudioObjectID(kAudioObjectUnknown)
     private var procID: AudioDeviceIOProcID?
     private var fileHandle: FileHandle?
+    /// Serializes rebuilds (device-change) against teardown so the Core Audio
+    /// object IDs are never mutated from two threads at once.
+    private let rebuildQueue = DispatchQueue(label: "com.meetcapture.rebuild")
+    private var deviceListenerBlock: AudioObjectPropertyListenerBlock?
     /// Serial queue for disk writes. The IOProc runs on a realtime audio thread
     /// where blocking `write()` calls cause dropped samples (the truncated
     /// captures we saw). We copy each buffer and flush it here instead.
@@ -132,6 +141,7 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
     private func setupCapture(outputPath: String) throws {
         lastError = nil
         bytesCaptured = 0
+        recordingSampleRate = 0   // pinned on first buildCoreAudio()
 
         // Output file
         guard FileManager.default.createFile(atPath: outputPath, contents: nil) else {
@@ -144,18 +154,26 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
         self.outputPath = outputPath
         currentOutputPath = outputPath
 
+        try buildCoreAudio()
+        installDeviceListeners()
+        state = .recording
+        logger.info("Audio capture started (tap+mic) → \(outputPath)")
+    }
+
+    /// Builds the tap + aggregate + IOProc and starts it, writing into the
+    /// already-open `fileHandle`. Reusable for the initial setup AND for
+    /// rebuilding after a device change (which would otherwise leave the tap
+    /// delivering zero buffers — a silent, unrecoverable capture).
+    private func buildCoreAudio() throws {
         // 1. Global system-audio tap (excludes nothing — capture the full mix)
         let desc = CATapDescription(stereoGlobalTapButExcludeProcesses: [])
         desc.isPrivate = true
         var tap = AudioObjectID(kAudioObjectUnknown)
         var err = AudioHardwareCreateProcessTap(desc, &tap)
-        guard err == noErr else { failCleanup(); throw CaptureError.tapCreationFailed(err) }
+        guard err == noErr else { throw CaptureError.tapCreationFailed(err) }
         tapID = tap
 
         // 2. Private aggregate = system-audio tap + (if available) the mic.
-        //    Adding the mic as a sub-device is what captures YOUR voice — the
-        //    tap alone only hears the remote participants coming out of the
-        //    speakers. If there's no input device, we fall back to tap-only.
         let aggUID = "meetcapture-tap-\(UUID().uuidString)"
         var subDeviceList: [[String: Any]] = []
         if let micUID = defaultInputUID() {
@@ -170,11 +188,11 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
         ]
         var agg = AudioObjectID(kAudioObjectUnknown)
         err = AudioHardwareCreateAggregateDevice(aggDesc as CFDictionary, &agg)
-        guard err == noErr else { failCleanup(); throw CaptureError.aggregateCreationFailed(err) }
+        guard err == noErr else { throw CaptureError.aggregateCreationFailed(err) }
         aggregateID = agg
 
-        // Read the rate the aggregate actually settled on (mic clock may force
-        // 44.1k). The transcriber resamples from exactly this.
+        // Rate this aggregate runs at. First build pins the on-disk rate; later
+        // rebuilds resample to it so the file stays single-rate.
         var rate = 0.0
         var rsz = UInt32(MemoryLayout<Double>.size)
         var rateAddr = AudioObjectPropertyAddress(
@@ -182,16 +200,18 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain)
         if AudioObjectGetPropertyData(agg, &rateAddr, 0, nil, &rsz, &rate) == noErr, rate > 0 {
-            currentSampleRate = rate
+            liveInputRate = rate
         }
-        logger.info("Aggregate rate: \(self.currentSampleRate) Hz, mic=\(!subDeviceList.isEmpty)")
+        if recordingSampleRate == 0 { recordingSampleRate = liveInputRate }
+        let outRate = recordingSampleRate
+        logger.info("Core Audio built: live=\(self.liveInputRate)Hz disk=\(outRate)Hz mic=\(!subDeviceList.isEmpty)")
 
-        // 3. IOProc → sum all sub-streams (mic + system) to mono Float32, write.
+        // 3. IOProc → sum all sub-streams (mic + system) to mono Float32,
+        //    resample to the pinned disk rate if the device changed, then write.
         var proc: AudioDeviceIOProcID?
         err = AudioDeviceCreateIOProcIDWithBlock(&proc, agg, nil) { [weak self] _, inInputData, _, _, _ in
             guard let self else { return }
             let abl = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inInputData))
-            // All sub-streams share the same frame count per callback.
             var frames = 0
             for b in abl where b.mNumberChannels > 0 {
                 frames = max(frames, Int(b.mDataByteSize) / (4 * Int(b.mNumberChannels)))
@@ -211,20 +231,86 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
                 }
             }
             for f in 0..<frames { mono[f] = max(-1, min(1, mono[f])) }
+            // Resample to the pinned disk rate only when the device rate differs
+            // (post-rebuild); the common case is a no-op. Per-callback linear
+            // interp drops the ~10ms boundary sample — inaudible for STT.
+            let live = self.liveInputRate
+            if abs(live - outRate) > 1, live > 0 {
+                let r = live / outRate
+                let outN = Int(Double(frames) / r)
+                if outN > 0 {
+                    var rs = [Float](repeating: 0, count: outN)
+                    for j in 0..<outN {
+                        let p = Double(j) * r
+                        let i = Int(p), fr = Float(p - Double(i))
+                        let a = mono[i], b = (i + 1 < frames) ? mono[i + 1] : a
+                        rs[j] = a + (b - a) * fr
+                    }
+                    mono = rs
+                }
+            }
             // ponytail: the array alloc + Data copy on the audio thread is
             // acceptable jitter for a transcription tap; blocking disk I/O stays
             // off the realtime thread via writeQueue (no dropped samples).
             let bytes = mono.withUnsafeBytes { Data($0) }
             self.writeQueue.async { try? self.fileHandle?.write(contentsOf: bytes) }
         }
-        guard err == noErr, let proc else { failCleanup(); throw CaptureError.ioProcCreationFailed(err) }
+        guard err == noErr, let proc else { throw CaptureError.ioProcCreationFailed(err) }
         procID = proc
 
         err = AudioDeviceStart(agg, proc)
-        guard err == noErr else { failCleanup(); throw CaptureError.deviceStartFailed(err) }
+        guard err == noErr else { throw CaptureError.deviceStartFailed(err) }
+    }
 
-        state = .recording
-        logger.info("Audio capture started (tap+mic) → \(outputPath)")
+    // MARK: - Device-change resilience
+    //
+    // A default input/output device change (AirPods connect/sleep, plugging in
+    // headphones, switching output) leaves the existing tap delivering zero
+    // buffers with no error. We listen for those changes and rebuild the tap +
+    // aggregate into the same output file so capture continues seamlessly.
+
+    private func installDeviceListeners() {
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.handleDeviceChange()
+        }
+        deviceListenerBlock = block
+        for selector in [kAudioHardwarePropertyDefaultInputDevice,
+                         kAudioHardwarePropertyDefaultOutputDevice] {
+            var addr = AudioObjectPropertyAddress(
+                mSelector: selector,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain)
+            AudioObjectAddPropertyListenerBlock(
+                AudioObjectID(kAudioObjectSystemObject), &addr, rebuildQueue, block)
+        }
+    }
+
+    private func removeDeviceListeners() {
+        guard let block = deviceListenerBlock else { return }
+        for selector in [kAudioHardwarePropertyDefaultInputDevice,
+                         kAudioHardwarePropertyDefaultOutputDevice] {
+            var addr = AudioObjectPropertyAddress(
+                mSelector: selector,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain)
+            AudioObjectRemovePropertyListenerBlock(
+                AudioObjectID(kAudioObjectSystemObject), &addr, rebuildQueue, block)
+        }
+        deviceListenerBlock = nil
+    }
+
+    /// Runs on `rebuildQueue` (the listener queue), so it's already serialized
+    /// against itself; stopCapture also syncs on this queue before teardown.
+    private func handleDeviceChange() {
+        guard state.isRecording else { return }
+        logger.warning("Default audio device changed — rebuilding tap to avoid silent capture")
+        teardownCoreAudio()
+        do {
+            try buildCoreAudio()
+        } catch {
+            logger.error("Tap rebuild failed: \(error.localizedDescription)")
+            lastError = "Audio device changed and capture could not be restarted."
+        }
     }
 
     /// UID of the current default input device (microphone), or nil if none.
@@ -248,7 +334,8 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
     }
 
     private func failCleanup() {
-        teardownCoreAudio()
+        removeDeviceListeners()
+        rebuildQueue.sync { teardownCoreAudio() }
         writeQueue.sync {}
         fileHandle?.closeFile()
         fileHandle = nil
@@ -257,7 +344,9 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
 
     func stopCapture() async {
         guard state == .recording else { return }
-        teardownCoreAudio()               // AudioDeviceStop → no more IOProc calls
+        removeDeviceListeners()            // no further rebuilds
+        // Serialize teardown against any in-flight device-change rebuild.
+        rebuildQueue.sync { teardownCoreAudio() }   // AudioDeviceStop → no more IOProc calls
         writeQueue.sync {}                 // drain any queued writes before closing
         fileHandle?.closeFile()
         fileHandle = nil

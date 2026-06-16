@@ -79,6 +79,20 @@ if [ -f /opt/homebrew/bin/whisper-cli ]; then
     echo "  Bundled: whisper-cli"
 fi
 
+# Ensure the Silero VAD model exists (skips silence → faster, fewer
+# hallucinations). Optional: the app runs without it, just without VAD.
+VAD_MODEL="$HOME/.whisper/models/ggml-silero-v5.1.2.bin"
+if [ ! -f "$VAD_MODEL" ]; then
+    mkdir -p "$HOME/.whisper/models"
+    if curl -fsSL -o "$VAD_MODEL" \
+        "https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin" 2>/dev/null; then
+        echo "  Downloaded: Silero VAD model"
+    else
+        rm -f "$VAD_MODEL"
+        echo "  VAD model download skipped (offline) — app runs without VAD"
+    fi
+fi
+
 # Bundle Python daemon scripts
 cp "$REPO_DIR/Daemon/server.py" "$APP_BUNDLE/Contents/Resources/"
 
