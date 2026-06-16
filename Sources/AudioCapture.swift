@@ -64,7 +64,6 @@ enum CaptureState: Equatable {
 /// from it to 16kHz — nothing about the rate is hardcoded.
 final class AudioCaptureService: NSObject, @unchecked Sendable {
     @Published private(set) var state: CaptureState = .idle
-    @Published private(set) var bytesCaptured: Int = 0
     @Published private(set) var lastError: String?
 
     /// Sample rate of the on-disk PCM. Pinned at the FIRST build of a recording
@@ -147,11 +146,20 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
 
     private func setupCapture(outputPath: String) throws {
         lastError = nil
-        bytesCaptured = 0
         recordingSampleRate = 0   // pinned on first buildCoreAudio()
 
-        // Output file
-        guard FileManager.default.createFile(atPath: outputPath, contents: nil) else {
+        // Create the transcript directory if missing — createFile does NOT make
+        // intermediate dirs, so on a clean machine the first recording would
+        // otherwise fail. 0700/0600: meeting audio is sensitive, keep it private
+        // to the user even on a shared Mac.
+        let dir = (outputPath as NSString).deletingLastPathComponent
+        try? FileManager.default.createDirectory(
+            atPath: dir, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
+
+        guard FileManager.default.createFile(
+            atPath: outputPath, contents: nil,
+            attributes: [.posixPermissions: 0o600]) else {
             throw CaptureError.fileCreationFailed(path: outputPath, reason: "Could not create file")
         }
         guard let handle = FileHandle(forWritingAtPath: outputPath) else {
@@ -161,7 +169,17 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
         self.outputPath = outputPath
         currentOutputPath = outputPath
 
-        try buildCoreAudio()
+        do {
+            try buildCoreAudio()
+        } catch {
+            // Don't leak the open file handle or any partially-created Core Audio
+            // objects (a tap created before the aggregate failed, etc.) if the
+            // build throws midway.
+            teardownCoreAudio()
+            fileHandle?.closeFile()
+            fileHandle = nil
+            throw error
+        }
         installDeviceListeners()
         state = .recording
         logger.info("Audio capture started (tap+mic) → \(outputPath)")
@@ -350,15 +368,6 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
             mElement: kAudioObjectPropertyElementMain)
         guard AudioObjectGetPropertyData(devID, &uaddr, 0, nil, &usz, &uid) == noErr else { return nil }
         return uid?.takeRetainedValue() as String?
-    }
-
-    private func failCleanup() {
-        removeDeviceListeners()
-        rebuildQueue.sync { teardownCoreAudio() }
-        writeQueue.sync {}
-        fileHandle?.closeFile()
-        fileHandle = nil
-        state = .error("capture setup failed")
     }
 
     func stopCapture() async {

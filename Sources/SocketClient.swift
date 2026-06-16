@@ -153,7 +153,14 @@ final class SocketClient: NSObject, @unchecked Sendable {
                     return
                 }
 
-                // Read with timeout using select()
+                // Read with timeout using select(). select()/fd_set only address
+                // descriptors < FD_SETSIZE (1024); a higher fd would index past
+                // the fd_set bitmap (stack corruption). Fail safely instead.
+                guard fd >= 0, fd < 1024 else {
+                    self.disconnect()
+                    cont.resume(throwing: SocketClientError.receiveFailed("fd \(fd) ≥ FD_SETSIZE"))
+                    return
+                }
                 var readFds = fd_set()
                 fdZero(&readFds)
                 fdSet(fd, &readFds)
