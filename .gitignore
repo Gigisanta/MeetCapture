@@ -35,10 +35,11 @@ venv/
 *.flac
 *.wav
 
-# IDE
+# IDE / agent tooling
 .cursor/
 .vscode/
 .idea/
+.claude/
 
 # Credentials
 .env

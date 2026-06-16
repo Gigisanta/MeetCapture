@@ -3,6 +3,7 @@
 state/
 logs/
 progress/
+*.done
 
 # Durable decision artifacts below are TRACKED (do NOT ignore):
 #   specs/      confirmed interview specs

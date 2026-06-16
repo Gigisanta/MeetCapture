@@ -1,7 +1,13 @@
 # Transcription Pipeline — Reference Guide
 
-> **Status:** This is the ACTIVE transcription pipeline.
-> The MeetCapture app docs (ARCHITECTURE.md, INSTALLATION.md, TROUBLESHOOTING.md) describe the PAUSED menu bar app.
+> **Status:** This describes the standalone CLI transcription pipeline
+> (`~/.hermes/scripts/transcribe.py`) for transcribing arbitrary audio files.
+> The MeetCapture menu bar app (see ARCHITECTURE.md, INSTALLATION.md,
+> TROUBLESHOOTING.md) is also ACTIVE and has its own built-in transcriber.
+> Source of truth: [../README.md](../README.md).
+>
+> Note: this CLI defaults to the **base** model; the MeetCapture app defaults to
+> **medium**. The two are separate.
 
 ---
 

@@ -1,18 +1,19 @@
-> **Status: PAUSED** — This describes the MeetCapture.app menu bar app.
-> For the ACTIVE transcription pipeline, see [TRANSCRIPTION-PIPELINE.md](TRANSCRIPTION-PIPELINE.md).
+> **Status: ACTIVE (v4.3.0)** — This describes the MeetCapture.app menu bar app,
+> in active production use. Source of truth: [../README.md](../README.md).
+> For the standalone CLI transcription pipeline, see [TRANSCRIPTION-PIPELINE.md](TRANSCRIPTION-PIPELINE.md).
 
 # Installation Guide
 
 ## Prerequisites
 
 ### macOS Version
-- macOS 14.0 (Sonoma) or later
-- Apple Silicon Mac (M1/M2/M3/M4) required for ScreenCaptureKit
+- macOS 14.4 or later (Core Audio process tap API)
+- Apple Silicon Mac (M1/M2/M3/M4)
 
 ### Hardware
-- 8GB RAM minimum (Whisper base model uses ~400MB during transcription)
+- 8GB RAM minimum (Whisper medium model uses ~800MB during transcription)
 - ~2GB disk space (Whisper model + app)
-- Microphone access permission (for ScreenCaptureKit audio capture)
+- Microphone access permission (required for the Core Audio process tap)
 
 ### Development Tools
 - Xcode Command Line Tools 26.5+
@@ -68,7 +69,9 @@ swiftc \
     -framework SwiftUI \
     -framework ServiceManagement \
     -framework EventKit \
-    -framework ScreenCaptureKit \
+    -framework CoreAudio \
+    -framework AudioToolbox \
+    -framework AVFoundation \
     -framework Combine \
     -framework UserNotifications \
     -framework AppKit \
@@ -84,7 +87,7 @@ codesign --force --deep --sign - ~/meetings/MeetCapture.app
 
 ## Step 4: Grant Permissions
 
-### Screen Recording Permission
+### Microphone Permission
 
 1. Launch MeetCapture:
    ```bash
@@ -93,7 +96,7 @@ codesign --force --deep --sign - ~/meetings/MeetCapture.app
 
 2. Click the menu bar icon → "Grant Permission"
 
-3. System Settings will open → Enable MeetCapture in **Privacy & Security → Screen Recording**
+3. System Settings will open → Enable MeetCapture in **Privacy & Security → Microphone**
 
 4. **Restart the app** after granting permission:
    ```bash
@@ -137,13 +140,14 @@ curl -L -o ~/Library/Application\ Support/MeetCapture/Models/ggml-small.bin \
 
 ### Model Selection
 
-MeetCapture selects the best model based on available RAM:
+MeetCapture defaults to the **medium** model (1.5GB) for accuracy. Smaller
+models can be substituted if RAM is constrained:
 
-| RAM Available | Model Selected | Size | Quality |
-|---------------|----------------|------|---------|
-| < 8GB | base | 141MB | Good |
-| 8-16GB | small | 466MB | Better |
-| > 16GB | medium | 1.5GB | Great |
+| Model | Size | Quality | RAM during transcription |
+|-------|------|---------|--------------------------|
+| base | 141MB | Good | ~300MB |
+| small | 466MB | Better | ~600MB |
+| **medium (default)** | 1.5GB | Great | ~800MB |
 
 ---
 
@@ -190,11 +194,11 @@ cd ~/meetings-repo && ./build.sh
 codesign --force --deep --sign - ~/meetings/MeetCapture.app
 ```
 
-### Screen Recording permission not detected
+### Microphone permission not detected
 
 ```bash
 # Reset TCC database for our app
-tccutil reset ScreenCapture com.maatwork.meetcapture
+tccutil reset Microphone com.maatwork.meetcapture
 
 # Relaunch and grant permission again
 pkill -f "meetings/MeetCapture.app"
@@ -203,8 +207,8 @@ open ~/meetings/MeetCapture.app
 
 ### No audio captured
 
-1. Ensure Screen Recording permission is granted
-2. Check System Settings → Privacy & Security → Screen Recording
+1. Ensure Microphone permission is granted
+2. Check System Settings → Privacy & Security → Microphone
 3. Restart the app after granting permission
 4. Verify you're in a Google Meet call (not just a regular call)
 
@@ -257,8 +261,8 @@ rm -rf ~/Documents/MeetCapture
 ### Reset Permissions
 
 ```bash
-# Reset Screen Recording permission
-tccutil reset ScreenCapture com.maatwork.meetcapture
+# Reset Microphone permission
+tccutil reset Microphone com.maatwork.meetcapture
 
 # Reset Calendar permission
 tccutil reset Calendar com.maatwork.meetcapture
@@ -318,7 +322,9 @@ swiftc \
     -framework SwiftUI \
     -framework ServiceManagement \
     -framework EventKit \
-    -framework ScreenCaptureKit \
+    -framework CoreAudio \
+    -framework AudioToolbox \
+    -framework AVFoundation \
     -framework Combine \
     -framework UserNotifications \
     -framework AppKit \
@@ -358,7 +364,7 @@ xcrun notarytool submit ~/meetings/MeetCapture.app \
 
 | Requirement | Minimum | Recommended |
 |-------------|---------|-------------|
-| macOS | 14.0 (Sonoma) | 14.0+ |
+| macOS | 14.4 | 14.4+ |
 | Architecture | Apple Silicon | M1/M2/M3/M4 |
 | RAM | 8GB | 16GB+ |
 | Disk | 2GB | 5GB+ |
@@ -366,5 +372,5 @@ xcrun notarytool submit ~/meetings/MeetCapture.app \
 
 ---
 
-*Last updated: 2026-05-28*
-*Version: 4.0.0*
+*Last updated: 2026-06-16*
+*Version: 4.3.0*
