@@ -51,13 +51,20 @@ N_SOURCES=$(echo "$SOURCES" | wc -w | tr -d ' ')
 echo "  Compiling $N_SOURCES Swift files..."
 
 # Compile
+# Frameworks: CoreAudio + AudioToolbox are the capture core (process tap,
+# aggregate device, CallDetector); AVFoundation gates mic permission. Linked
+# explicitly so a fresh-machine build can't silently fail to resolve the tap
+# symbols via implicit autolink. ScreenCaptureKit was dropped — the app no
+# longer uses SCStream (it never delivered frames on macOS 15+/26).
 swiftc \
     -target arm64-apple-macosx14.4 \
     -sdk "$(xcrun --show-sdk-path)" \
     -framework SwiftUI \
     -framework ServiceManagement \
     -framework EventKit \
-    -framework ScreenCaptureKit \
+    -framework CoreAudio \
+    -framework AudioToolbox \
+    -framework AVFoundation \
     -framework Combine \
     -framework UserNotifications \
     -framework AppKit \
@@ -73,10 +80,21 @@ cp "$REPO_DIR/Resources/MeetCapture.entitlements" "$APP_BUNDLE/Contents/"
 cp "$REPO_DIR/Resources/com.maatwork.meetcapture.daemon.plist" \
    "$APP_BUNDLE/Contents/Library/LaunchAgents/"
 
-# Bundle whisper-cli binary
-if [ -f /opt/homebrew/bin/whisper-cli ]; then
-    cp /opt/homebrew/bin/whisper-cli "$APP_BUNDLE/Contents/Resources/"
-    echo "  Bundled: whisper-cli"
+# Bundle whisper-cli binary. Probe PATH + both Homebrew prefixes (Apple Silicon
+# /opt/homebrew, Intel /usr/local) so this doesn't silently skip on non-default
+# installs. Warn LOUDLY if missing — without it transcription fails at runtime.
+WHISPER_CLI="$(command -v whisper-cli 2>/dev/null || true)"
+if [ -z "$WHISPER_CLI" ]; then
+    for p in "$(brew --prefix 2>/dev/null)/bin/whisper-cli" /opt/homebrew/bin/whisper-cli /usr/local/bin/whisper-cli; do
+        [ -x "$p" ] && { WHISPER_CLI="$p"; break; }
+    done
+fi
+if [ -n "$WHISPER_CLI" ] && [ -x "$WHISPER_CLI" ]; then
+    cp "$WHISPER_CLI" "$APP_BUNDLE/Contents/Resources/"
+    echo "  Bundled: whisper-cli ($WHISPER_CLI)"
+else
+    echo "  ⚠️  WARNING: whisper-cli not found — transcription will FAIL at runtime."
+    echo "      Install it:  brew install whisper-cpp"
 fi
 
 # Ensure the Silero VAD model exists (skips silence → faster, fewer
@@ -137,7 +155,7 @@ exec "$PYTHON" "$DIR/server.py"
 SCRIPT
 chmod +x "$APP_BUNDLE/Contents/Resources/meet-daemon"
 
-# Sign the app (ad-hoc, required for ScreenCaptureKit + EventKit)
+# Sign the app (ad-hoc, required for the Core Audio tap (mic TCC) + EventKit)
 # Set designated requirement to bundle ID (stable across builds)
 codesign --force --deep --sign - \
     --preserve-metadata=identifier,entitlements \
