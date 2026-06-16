@@ -88,6 +88,13 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
     /// where blocking `write()` calls cause dropped samples (the truncated
     /// captures we saw). We copy each buffer and flush it here instead.
     private let writeQueue = DispatchQueue(label: "com.meetcapture.audiowrite", qos: .utility)
+    /// Reused across IOProc callbacks so the realtime audio thread never heap-
+    /// allocates the mix/resample buffers (malloc there can block on a lock →
+    /// priority inversion → dropped samples). Safe as plain stored buffers:
+    /// `AudioDeviceStop` drains any in-flight callback before a rebuild starts a
+    /// new IOProc, so exactly one callback ever touches these at a time.
+    private var scratchMono: [Float] = []
+    private var scratchResample: [Float] = []
     private var outputPath: String?
     private(set) var currentOutputPath: String?
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.meetcapture", category: "AudioCapture")
@@ -217,42 +224,54 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
                 frames = max(frames, Int(b.mDataByteSize) / (4 * Int(b.mNumberChannels)))
             }
             guard frames > 0 else { return }
-            var mono = [Float](repeating: 0, count: frames)
-            // Each sub-device contributes its OWN mono mix, summed at full level
-            // (mic + system) so neither source is attenuated; clamp avoids clip.
-            for b in abl {
-                guard let md = b.mData, b.mNumberChannels > 0 else { continue }
-                let ch = Int(b.mNumberChannels)
-                let fp = md.bindMemory(to: Float.self, capacity: frames * ch)
-                for f in 0..<frames {
-                    var acc: Float = 0
-                    for c in 0..<ch { acc += fp[f * ch + c] }
-                    mono[f] += acc / Float(ch)
+            // Mix every sub-device (mic + system) to mono at full level into the
+            // reused scratch buffer; clamp avoids clip. Grow only when a larger
+            // callback arrives — steady state allocates nothing.
+            if self.scratchMono.count < frames { self.scratchMono = [Float](repeating: 0, count: frames) }
+            self.scratchMono.withUnsafeMutableBufferPointer { mono in
+                for f in 0..<frames { mono[f] = 0 }
+                for b in abl {
+                    guard let md = b.mData, b.mNumberChannels > 0 else { continue }
+                    let ch = Int(b.mNumberChannels)
+                    let fp = md.bindMemory(to: Float.self, capacity: frames * ch)
+                    for f in 0..<frames {
+                        var acc: Float = 0
+                        for c in 0..<ch { acc += fp[f * ch + c] }
+                        mono[f] += acc / Float(ch)
+                    }
                 }
+                for f in 0..<frames { mono[f] = max(-1, min(1, mono[f])) }
             }
-            for f in 0..<frames { mono[f] = max(-1, min(1, mono[f])) }
             // Resample to the pinned disk rate only when the device rate differs
             // (post-rebuild); the common case is a no-op. Per-callback linear
             // interp drops the ~10ms boundary sample — inaudible for STT.
             let live = self.liveInputRate
-            if abs(live - outRate) > 1, live > 0 {
+            let srcBuf: [Float]
+            let count: Int
+            if abs(live - outRate) > 1, live > 0, Int(Double(frames) / (live / outRate)) > 0 {
                 let r = live / outRate
                 let outN = Int(Double(frames) / r)
-                if outN > 0 {
-                    var rs = [Float](repeating: 0, count: outN)
-                    for j in 0..<outN {
-                        let p = Double(j) * r
-                        let i = Int(p), fr = Float(p - Double(i))
-                        let a = mono[i], b = (i + 1 < frames) ? mono[i + 1] : a
-                        rs[j] = a + (b - a) * fr
+                if self.scratchResample.count < outN { self.scratchResample = [Float](repeating: 0, count: outN) }
+                self.scratchMono.withUnsafeBufferPointer { m in
+                    self.scratchResample.withUnsafeMutableBufferPointer { rs in
+                        for j in 0..<outN {
+                            let p = Double(j) * r
+                            let i = Int(p), fr = Float(p - Double(i))
+                            let a = m[i], b = (i + 1 < frames) ? m[i + 1] : a
+                            rs[j] = a + (b - a) * fr
+                        }
                     }
-                    mono = rs
                 }
+                srcBuf = self.scratchResample; count = outN
+            } else {
+                srcBuf = self.scratchMono; count = frames
             }
-            // ponytail: the array alloc + Data copy on the audio thread is
-            // acceptable jitter for a transcription tap; blocking disk I/O stays
-            // off the realtime thread via writeQueue (no dropped samples).
-            let bytes = mono.withUnsafeBytes { Data($0) }
+            // One owned copy for the off-thread write (handoff is unavoidable;
+            // the scratch buffers are reused next callback). Blocking disk I/O
+            // stays off the realtime thread via writeQueue (no dropped samples).
+            let bytes = srcBuf.withUnsafeBytes { raw in
+                Data(bytes: raw.baseAddress!, count: count * MemoryLayout<Float>.size)
+            }
             self.writeQueue.async { try? self.fileHandle?.write(contentsOf: bytes) }
         }
         guard err == noErr, let proc else { throw CaptureError.ioProcCreationFailed(err) }

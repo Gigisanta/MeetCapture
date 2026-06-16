@@ -163,6 +163,7 @@ final class AppState: ObservableObject {
     }
     
     func shutdown() {
+        callDetector.stop()
         if phase == .recording {
             stopRecording()
         }
@@ -280,6 +281,7 @@ final class AppState: ObservableObject {
             } catch {
                 errorMessage = "Recording failed: \(error.localizedDescription)"
                 phase = .idle
+                autoStartedRecording = false   // don't leave a stale auto-stop armed
                 endRecordingActivity()
             }
         }
