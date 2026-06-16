@@ -90,7 +90,17 @@ final class WhisperModelManager {
     private let whisperCLIPath: String
     let whisperCLIPathAccessor: String  // Exposed for WhisperTranscriber
     private let modelsDirectory: URL
-    private var loadedModelPath: String?
+    // `loadedModelPath`, `activeModel` and `isRecording` are mutated from several
+    // threads — the recording Task, the memory-pressure DispatchSource (global
+    // queue), the periodic timer (main) — and read by the transcriber's worker
+    // thread. Guard the trio with a lock so a torn `String?` read can't crash and
+    // a mid-transcription model swap stays consistent.
+    private let stateLock = NSLock()
+    private var _loadedModelPath: String?
+    private var loadedModelPath: String? {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _loadedModelPath }
+        set { stateLock.lock(); defer { stateLock.unlock() }; _loadedModelPath = newValue }
+    }
     var loadedModelPathAccessor: String? { loadedModelPath }  // Exposed for WhisperTranscriber
 
     /// Path to a Silero VAD ggml model if one is present (`ggml-silero-*.bin`),
@@ -104,12 +114,20 @@ final class WhisperModelManager {
     private var memoryPressureSource: DispatchSourceMemoryPressure?
     private var memoryCheckTimer: Timer?
 
-    private(set) var activeModel: WhisperModelSize?
-    private(set) var isRecording = false
+    private var _activeModel: WhisperModelSize?
+    private(set) var activeModel: WhisperModelSize? {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _activeModel }
+        set { stateLock.lock(); defer { stateLock.unlock() }; _activeModel = newValue }
+    }
+    private var _isRecording = false
+    private(set) var isRecording: Bool {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _isRecording }
+        set { stateLock.lock(); defer { stateLock.unlock() }; _isRecording = newValue }
+    }
     var preferredModel: WhisperModelSize = .largeV3Turbo
     var memoryThresholdMB: UInt64 = 512
 
-    var isModelLoaded: Bool { loadedModelPath != nil }
+    var isModelLoaded: Bool { stateLock.lock(); defer { stateLock.unlock() }; return _loadedModelPath != nil }
 
     private init() {
         // Find whisper-cli. Prefer the Homebrew/system install: the copy bundled
@@ -174,54 +192,6 @@ final class WhisperModelManager {
         stopMemoryMonitoring()
         unloadModel()
         activeModel = nil
-    }
-
-    // MARK: - Transcription
-
-    func transcribe(samples: [Float], language: String = "es", translate: Bool = false) throws -> String {
-        guard isRecording else { throw WhisperError.noModelLoaded }
-        guard isModelLoaded else { throw WhisperError.noModelLoaded }
-
-        return try queue.sync {
-            let tempDir = FileManager.default.temporaryDirectory
-            let tempWAV = tempDir.appendingPathComponent("meetcapture-\(UUID().uuidString).wav")
-            try writeWAV(samples: samples, sampleRate: 16000, to: tempWAV)
-            defer { try? FileManager.default.removeItem(at: tempWAV) }
-
-            let outputBase = tempDir.appendingPathComponent("meetcapture-out-\(UUID().uuidString)")
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: whisperCLIPath)
-            process.arguments = [
-                "-m", loadedModelPath!,
-                "-f", tempWAV.path,
-                "-l", language,
-                "-otxt", "-of", outputBase.path,
-                "-t", "4", "--no-prints"
-            ]
-            if translate { process.arguments?.append("--translate") }
-
-            let stdout = Pipe()
-            let stderr = Pipe()
-            process.standardOutput = stdout
-            process.standardError = stderr
-
-            try process.run()
-            process.waitUntilExit()
-
-            let exitCode = process.terminationStatus
-            let stderrStr = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            guard exitCode == 0 else {
-                throw WhisperError.processError(exitCode: exitCode, stderr: stderrStr)
-            }
-
-            let outputTXT = outputBase.path + ".txt"
-            guard FileManager.default.fileExists(atPath: outputTXT) else {
-                throw WhisperError.transcriptionFailed(reason: "Output file not created")
-            }
-            let text = try String(contentsOfFile: outputTXT, encoding: .utf8)
-            try? FileManager.default.removeItem(atPath: outputTXT)
-            return text.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
     }
 
     // MARK: - Model Management
@@ -366,35 +336,4 @@ final class WhisperModelManager {
         return reclaimable / (1024 * 1024)
     }
 
-    // MARK: - WAV Writing
-
-    private func writeWAV(samples: [Float], sampleRate: Int, to url: URL) throws {
-        let numSamples = samples.count
-        let numChannels: UInt16 = 1
-        let bitsPerSample: UInt16 = 16
-        let byteRate = UInt32(sampleRate) * UInt32(numChannels) * UInt32(bitsPerSample / 8)
-        let blockAlign = numChannels * (bitsPerSample / 8)
-        let dataSize = UInt32(numSamples * Int(bitsPerSample / 8))
-        let fileSize = 36 + dataSize
-
-        var data = Data()
-        data.append(contentsOf: "RIFF".utf8)
-        data.append(contentsOf: withUnsafeBytes(of: fileSize.littleEndian) { Array($0) })
-        data.append(contentsOf: "WAVE".utf8)
-        data.append(contentsOf: "fmt ".utf8)
-        data.append(contentsOf: withUnsafeBytes(of: UInt32(16).littleEndian) { Array($0) })
-        data.append(contentsOf: withUnsafeBytes(of: UInt16(1).littleEndian) { Array($0) })
-        data.append(contentsOf: withUnsafeBytes(of: numChannels.littleEndian) { Array($0) })
-        data.append(contentsOf: withUnsafeBytes(of: UInt32(sampleRate).littleEndian) { Array($0) })
-        data.append(contentsOf: withUnsafeBytes(of: byteRate.littleEndian) { Array($0) })
-        data.append(contentsOf: withUnsafeBytes(of: blockAlign.littleEndian) { Array($0) })
-        data.append(contentsOf: withUnsafeBytes(of: bitsPerSample.littleEndian) { Array($0) })
-        data.append(contentsOf: "data".utf8)
-        data.append(contentsOf: withUnsafeBytes(of: dataSize.littleEndian) { Array($0) })
-        for sample in samples {
-            let clamped = max(-1.0, min(1.0, sample))
-            data.append(contentsOf: withUnsafeBytes(of: Int16(clamped * 32767.0).littleEndian) { Array($0) })
-        }
-        try data.write(to: url)
-    }
 }

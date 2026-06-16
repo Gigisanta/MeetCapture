@@ -247,7 +247,8 @@ final class AppState: ObservableObject {
     // MARK: - Recording Control
     
     func startRecording() {
-        guard phase != .recording else { return }
+        // Don't start while already recording OR transcribing the previous one.
+        guard phase != .recording, phase != .transcribing else { return }
 
         hasAudioPermission = audioCapture.checkPermission()
         guard hasAudioPermission else {
@@ -256,6 +257,14 @@ final class AppState: ObservableObject {
             return
         }
 
+        // Claim the recording phase SYNCHRONOUSLY, before the async Task. The
+        // capture itself starts inside the Task (after an await), so if we only
+        // flipped the phase there, a second concurrent caller — calendar-schedule
+        // + live-call auto-start + manual button can all fire close together —
+        // would pass the guard above and start a SECOND capture, leaking the
+        // first tap/aggregate/IOProc and corrupting the output file. Claiming it
+        // here closes that window; we revert to .idle if the capture fails.
+        phase = .recording
         let outputPath = "\(transcriptDir)/recording-\(Date().timeIntervalSince1970).pcm"
         lastRecordingPath = outputPath
         beginRecordingActivity()
@@ -269,7 +278,6 @@ final class AppState: ObservableObject {
                     logger.warning("Whisper preload failed (non-fatal): \(error.localizedDescription)")
                 }
 
-                phase = .recording
                 recordingStartDate = Date()
                 startRecordingTimer()
 
