@@ -77,8 +77,10 @@ final class CallDetector: ObservableObject {
 
     private func anyCallAppCapturingInput() -> Bool {
         for proc in processObjects() {
-            guard procPID(proc) != ownPID else { continue }   // ignore our own capture
+            // Cheapest discriminator first: the vast majority of audio processes
+            // are NOT capturing input, so skip the PID/bundle reads for them.
             guard isRunningInput(proc) else { continue }
+            guard procPID(proc) != ownPID else { continue }   // ignore our own capture
             guard let bid = procBundleID(proc)?.lowercased() else { continue }
             if Self.callApps.contains(where: { bid.hasPrefix($0) }) { return true }
         }
