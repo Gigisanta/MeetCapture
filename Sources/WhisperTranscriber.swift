@@ -136,6 +136,7 @@ final class WhisperTranscriber {
             throw WhisperError.noModelLoaded
         }
         let cliPath = whisperManager.whisperCLIPathAccessor
+        let vadModel = whisperManager.vadModelPathAccessor
         // Domain prompt + carried tail from the previous chunk for continuity.
         let prompt = context.isEmpty
             ? WhisperModelManager.domainPrompt
@@ -145,7 +146,7 @@ final class WhisperTranscriber {
             DispatchQueue.global(qos: .userInitiated).async {
                 let process = Process()
                 process.executableURL = URL(fileURLWithPath: cliPath)
-                process.arguments = [
+                var args = [
                     "-m", modelPath,
                     "-f", wavURL.path,
                     "-l", "es",
@@ -153,9 +154,16 @@ final class WhisperTranscriber {
                     "-t", "\(WhisperModelManager.whisperThreads)",
                     "--prompt", prompt,
                     "--carry-initial-prompt",
+                    "--suppress-nst",      // drop non-speech tokens ("[MÚSICA]", "(chiming)")
                     "--no-timestamps",
                     "--no-prints"
                 ]
+                // Voice Activity Detection: skip silence (faster, fewer
+                // hallucinations on pauses) when a Silero model is available.
+                if let vad = vadModel {
+                    args += ["--vad", "--vad-model", vad]
+                }
+                process.arguments = args
                 let stderr = Pipe()
                 process.standardError = stderr
                 process.standardOutput = Pipe()

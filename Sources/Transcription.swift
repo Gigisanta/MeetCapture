@@ -92,6 +92,15 @@ final class WhisperModelManager {
     private let modelsDirectory: URL
     private var loadedModelPath: String?
     var loadedModelPathAccessor: String? { loadedModelPath }  // Exposed for WhisperTranscriber
+
+    /// Path to a Silero VAD ggml model if one is present (`ggml-silero-*.bin`),
+    /// else nil. Used to enable whisper-cli's `--vad` so silence is skipped —
+    /// faster, and far fewer hallucinations during meeting pauses.
+    var vadModelPathAccessor: String? {
+        let candidates = (try? FileManager.default.contentsOfDirectory(atPath: modelsDirectory.path)) ?? []
+        let silero = candidates.filter { $0.hasPrefix("ggml-silero") && $0.hasSuffix(".bin") }.sorted().last
+        return silero.map { modelsDirectory.appendingPathComponent($0).path }
+    }
     private var memoryPressureSource: DispatchSourceMemoryPressure?
     private var memoryCheckTimer: Timer?
 

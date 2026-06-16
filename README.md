@@ -173,7 +173,14 @@ clock), se lee en runtime y el transcriber resamplea a 16kHz desde la rate real
 (nada hardcodeado). **Requiere permiso de Microfono**: la app lo pide al iniciar
 y habilita Record al concederlo. Precision: modelo **medium** + initial prompt
 de dominio (nombres/jergon MaatWork) + carry de contexto entre chunks + dedup de
-repeticiones; el modelo se libera al terminar (idle ~15MB RAM).
+repeticiones + **VAD Silero** (salta silencios) + `--suppress-nst` (sin tokens de
+ruido); el modelo se libera al terminar (idle ~15MB RAM).
+
+**Robustez:** si cambia el dispositivo de audio (auriculares/AirPods/salida) en
+plena reunion, el tap dejaria de entregar audio sin error — la app escucha esos
+cambios y **reconstruye el tap+aggregate** en el mismo archivo (resampleando a la
+rate original para que quede consistente), asi la captura no muere. Verificado
+cambiando el output device mid-recording (la captura sigue sin cortes).
 
 > Nota de entorno: el process tap funciona en proceso aislado y el contrato
 > captura→transcripcion esta verificado a nivel codigo. Si el tap se cuelga al
