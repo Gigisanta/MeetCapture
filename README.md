@@ -182,6 +182,20 @@ cambios y **reconstruye el tap+aggregate** en el mismo archivo (resampleando a l
 rate original para que quede consistente), asi la captura no muere. Verificado
 cambiando el output device mid-recording (la captura sigue sin cortes).
 
+**Auto-record de llamadas en vivo (2026-06-16):** ademas del calendario, la app
+detecta llamadas **reales en curso** sondeando la lista de procesos de Core
+Audio (`kAudioProcessPropertyIsRunningInput`, macOS 14.4+): si un navegador,
+Zoom, Teams, Slack o FaceTime esta usando el microfono, hay una llamada activa →
+graba sola, y para sola cuando la llamada termina. Cubre Meets ad-hoc que nunca
+estuvieron en el calendario. Filtra por bundle ID de apps de conferencia (no se
+dispara con Dictado/Notas de voz) y excluye su propio proceso. Toggle en
+Ajustes → General. Sondeo de 4s (costo invisible).
+
+**Normalizacion de ganancia:** el process tap atenua el mix del sistema (hasta
+~-12dB con varias salidas), asi que whisper lo escucharia bajo. Cada chunk de
+30s se **normaliza al pico** (~-1dBFS) antes de pasarlo a whisper — sube el audio
+flojo sin amplificar silencio/ruido (gate de piso + tope de ganancia).
+
 > Nota de entorno: el process tap funciona en proceso aislado y el contrato
 > captura→transcripcion esta verificado a nivel codigo. Si el tap se cuelga al
 > iniciar captura tras mucho debugging de TCC/coreaudiod, reiniciar la Mac

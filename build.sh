@@ -93,6 +93,22 @@ if [ ! -f "$VAD_MODEL" ]; then
     fi
 fi
 
+# Opt-in: download large-v3-turbo (1.6GB) for max accuracy. Off by default to
+# honor the "few resources" goal; medium stays the default model. Enable with:
+#   ./build.sh --with-turbo
+for arg in "$@"; do [ "$arg" = "--with-turbo" ] && WANT_TURBO=1; done
+TURBO_MODEL="$HOME/.whisper/models/ggml-large-v3-turbo.bin"
+if [ "${WANT_TURBO:-0}" = "1" ] && [ ! -f "$TURBO_MODEL" ]; then
+    mkdir -p "$HOME/.whisper/models"
+    echo "  Downloading large-v3-turbo (1.6GB)…"
+    if curl -fSL -o "$TURBO_MODEL" \
+        "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin"; then
+        echo "  Downloaded: large-v3-turbo"
+    else
+        rm -f "$TURBO_MODEL"; echo "  turbo download failed — skipping"
+    fi
+fi
+
 # Bundle Python daemon scripts
 cp "$REPO_DIR/Daemon/server.py" "$APP_BUNDLE/Contents/Resources/"
 

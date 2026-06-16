@@ -214,13 +214,24 @@ final class WhisperTranscriber {
         captureData.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
             let floats = raw.bindMemory(to: Float.self)  // [m0, m1, m2, ...]
             guard inCount > 0 else { return }
+            // Peak-normalize this chunk. A Core Audio tap attenuates the system
+            // mix (up to ~-12dB with multiple output pairs), so the captured
+            // audio often sits well below full scale → whisper hears it quiet and
+            // accuracy drops. Boost each 30s chunk toward -1dBFS. The floor gate
+            // skips silence/noise-only chunks (don't amplify hiss); the cap keeps
+            // a near-silent chunk from blowing up. ponytail: peak (not RMS/LUFS)
+            // is enough for STT and needs no lookahead beyond the chunk we hold.
+            var peak: Float = 0
+            for i in 0..<inCount { let a = abs(floats[i]); if a > peak { peak = a } }
+            let target: Float = 0.89
+            let gain: Float = (peak > 0.02 && peak < target) ? min(8.0, target / peak) : 1.0
             for j in 0..<outCount {
                 let srcPos = Double(j) * ratio
                 let i0 = Int(srcPos)
                 let frac = Float(srcPos - Double(i0))
                 let a = floats[i0]
                 let b = (i0 + 1 < inCount) ? floats[i0 + 1] : a
-                let mono = a + (b - a) * frac
+                let mono = (a + (b - a) * frac) * gain
                 let clamped = max(-1.0, min(1.0, mono))
                 int16Samples[j] = Int16(clamped * 32767.0)
             }

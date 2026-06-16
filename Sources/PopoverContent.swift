@@ -189,7 +189,7 @@ struct PopoverContent: View {
                 Circle()
                     .fill(appState.isDaemonRunning ? Brand.successGreen : .secondary)
                     .frame(width: 5, height: 5)
-                Text("v4.2.0")
+                Text("v4.3.0")
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
             }
