@@ -261,6 +261,10 @@ class SocketServer:
     def _bind_and_listen(self) -> None:
         self._server_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # Restrict the umask BEFORE bind so the socket isn't world-accessible for
+        # the window between bind() and the explicit chmod() below — and so any
+        # other file the daemon creates (logs) is private to this user too.
+        os.umask(0o077)
         try:
             self._server_socket.bind(self.socket_path)
             self._server_socket.listen(BACKLOG)
@@ -302,6 +306,16 @@ class SocketServer:
                 if not chunk:
                     break
                 buffer += chunk
+                # Bound the buffer: the per-line MAX_CMD_LENGTH check below only
+                # fires once a newline arrives, so a peer streaming bytes with no
+                # '\n' could grow this unbounded (memory-exhaustion DoS). The hard
+                # cap sits ABOVE MAX_CMD_LENGTH so a single over-limit *command*
+                # (terminated by a newline) still gets the graceful per-line
+                # rejection on the same connection; only a newline-less flood
+                # beyond the hard cap forces the connection closed.
+                if len(buffer) > MAX_CMD_LENGTH * 4:
+                    self._send_response(client_socket, {"id": "", "success": False, "error": "Command too large", "data": None})
+                    break
                 while b"\n" in buffer:
                     line, buffer = buffer.split(b"\n", 1)
                     line = line.strip()
