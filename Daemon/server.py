@@ -20,6 +20,16 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
+sys.path.insert(0, str(Path.home() / "meetings"))
+try:
+    from meetcapture_intelligence import archive_meeting
+except Exception:  # keep socket daemon usable if helper is unavailable
+    archive_meeting = None
+try:
+    from meetcapture_transcription import transcribe_optimized
+except Exception:
+    transcribe_optimized = None
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -157,7 +167,7 @@ def _memory_rss_mb() -> float:
 
 
 def _handle_transcribe_path(payload: dict, _state: DaemonState) -> dict:
-    """Phase 5: kick off whisper-cli on a path, return result synchronously."""
+    """Transcribe and archive an audio path with the shared optimized pipeline."""
     audio_path = payload.get("audio_path")
     if not audio_path:
         return {"ok": False, "error": "audio_path missing from payload"}
@@ -165,57 +175,61 @@ def _handle_transcribe_path(payload: dict, _state: DaemonState) -> dict:
         return {"ok": False, "error": f"audio_path not found: {audio_path}"}
     if not os.path.isfile(audio_path):
         return {"ok": False, "error": f"audio_path is not a file: {audio_path}"}
-    model = payload.get("model", "base")
+    model = payload.get("model") or os.environ.get("MEETCAPTURE_WHISPER_MODEL")
     language = payload.get("language", "es")
-    return _transcribe_with_whisper(audio_path, model, language)
+    title = payload.get("meeting_title") or payload.get("title") or Path(audio_path).stem
+    metadata = payload.get("metadata") or {}
+    metadata.setdefault("audio", audio_path)
+    return _transcribe_with_whisper(audio_path, model, language, title, metadata)
 
 
-def _transcribe_with_whisper(audio_path: str, model: str, language: str) -> dict:
-    """Run whisper-cli on a single file, return text. Streaming version is
-    future work — for now this is a synchronous transcription request."""
-    candidates = [
-        "/opt/homebrew/bin/whisper-cli",
-        "/usr/local/bin/whisper-cli",
-        "/opt/homebrew/bin/whisper",
-        "/usr/local/bin/whisper",
-    ]
-    cli = next((p for p in candidates if os.path.exists(p)), None)
-    if not cli:
-        return {"ok": False, "error": "whisper-cli not found"}
-
-    home = Path.home()
-    model_path = home / ".whisper" / "models" / f"ggml-{model}.bin"
-    if not model_path.exists():
-        return {"ok": False, "error": f"model not found: {model_path}"}
-
-    out_base = f"/tmp/meetcapture-daemon-{uuid.uuid4()}"
-    cmd = [
-        cli, "-m", str(model_path), "-f", audio_path,
-        "-l", language, "-otxt", "-of", out_base,
-        "-t", "4", "--no-prints"
-    ]
+def _transcribe_with_whisper(audio_path: str, model: str | None, language: str, title: str, metadata: dict) -> dict:
+    """Run optimized local transcription and archive the transcript."""
+    if transcribe_optimized is None:
+        return {"ok": False, "error": "optimized transcription module unavailable"}
+    started = time.time()
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "error": "whisper-cli timeout (10min)"}
-    except FileNotFoundError as exc:
-        return {"ok": False, "error": f"failed to exec: {exc}"}
-
-    if result.returncode != 0:
-        return {"ok": False, "error": f"whisper-cli exit {result.returncode}: {result.stderr[:500]}"}
-
-    txt_path = out_base + ".txt"
-    if not os.path.exists(txt_path):
-        return {"ok": False, "error": "output .txt not created"}
+        res = transcribe_optimized(
+            audio_path,
+            title=title,
+            # If the app passes a model, respect it. Otherwise shared module resolves
+            # MEETCAPTURE_WHISPER_MODEL / MEETCAPTURE_TRANSCRIBE_QUALITY / fast base default.
+            model=model,
+            language=language,
+            out_dir=Path(audio_path).parent,
+            logger=logger.info,
+        )
+    except Exception as exc:
+        logger.exception("optimized transcription failed")
+        return {"ok": False, "error": f"optimized transcription failed: {exc}"}
+    if not res.ok or not res.transcript:
+        return {"ok": False, "error": res.error or "transcription failed"}
 
     try:
-        with open(txt_path, "r", encoding="utf-8") as f:
+        with open(res.transcript, "r", encoding="utf-8") as f:
             text = f.read().strip()
-        os.unlink(txt_path)
-    except OSError as exc:
-        return {"ok": False, "error": f"could not read output: {exc}"}
+        artifacts = None
+        if archive_meeting is not None:
+            metadata = dict(metadata or {})
+            metadata.setdefault("audio", audio_path)
+            metadata.setdefault("normalized_audio", res.normalized_audio)
+            metadata.setdefault("model", res.model)
+            metadata.setdefault("duration_seconds", res.duration_seconds)
+            artifacts = archive_meeting(res.transcript, title, metadata, logger=logger.info)
+    except Exception as exc:
+        return {"ok": False, "error": f"could not archive transcript: {exc}"}
 
-    return {"ok": True, "text": text, "model": model, "language": language, "duration_sec": time.time()}
+    return {
+        "ok": True,
+        "text": text,
+        "model": res.model,
+        "language": language,
+        "artifacts": artifacts,
+        "duration_seconds": res.duration_seconds,
+        "normalize_seconds": round(res.normalize_seconds, 2),
+        "whisper_seconds": round(res.whisper_seconds, 2),
+        "total_seconds": round(time.time() - started, 2),
+    }
 
 
 # ---------------------------------------------------------------------------
