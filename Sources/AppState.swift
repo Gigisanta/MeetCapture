@@ -130,9 +130,24 @@ final class AppState: ObservableObject {
         if let raw = ProcessInfo.processInfo.environment["MEETCAPTURE_SELFTEST_SECS"],
            let secs = Double(raw), secs > 0 {
             logger.warning("SELFTEST: recording \(secs)s")
-            startRecording()
-            DispatchQueue.main.asyncAfter(deadline: .now() + secs) { [weak self] in
-                self?.stopRecording()
+            Task { @MainActor in
+                self.startRecording()
+                try? await Task.sleep(nanoseconds: UInt64(secs * 1_000_000_000))
+                self.stopRecording()
+
+                // Headless harness mode: give transcription a bounded window to
+                // produce recording-*.txt, then exit so the shell script does not
+                // have to kill a still-recording menu-bar app.
+                let deadline = Date().addingTimeInterval(90)
+                while Date() < deadline {
+                    if self.phase == .done || self.phase == .idle {
+                        NSApp.terminate(nil)
+                        return
+                    }
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                }
+                self.logger.error("SELFTEST: timed out waiting for transcription")
+                NSApp.terminate(nil)
             }
         }
     }

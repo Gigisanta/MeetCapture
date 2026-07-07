@@ -48,15 +48,23 @@ cd MeetCapture
 
 ---
 
-## Step 3: Build the App
+## Step 3: Install / Update the App
 
-### Option A: Use the build script
+### Option A: Use the installer script
+
+```bash
+./install.sh
+```
+
+This builds the app, installs/updates `~/meetings/MeetCapture.app`, registers the `com.maatwork.meetcapture.daemon` socket LaunchAgent, launches the app, and runs safe daemon/app smoke checks.
+
+### Option B: Use the build script only
 
 ```bash
 ./build.sh
 ```
 
-### Option B: Manual build
+### Option C: Manual build
 
 ```bash
 # Find all Swift sources
