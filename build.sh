@@ -40,7 +40,9 @@ echo "Building $APP_NAME v4..."
 echo "  Sources:  $REPO_DIR/Sources"
 echo "  Output:   $DEST"
 
-# Create bundle structure
+# Create bundle structure from a clean staging app. Reusing /tmp/MeetCapture.app
+# after signing can leave sealed resources read-only and make cp fail.
+rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources"
 mkdir -p "$APP_BUNDLE/Contents/Library/LaunchAgents"
@@ -74,9 +76,10 @@ swiftc \
 
 echo "  Binary: $(du -h "$APP_BUNDLE/Contents/MacOS/$APP_NAME" | cut -f1)"
 
-# Copy metadata
+# Copy metadata. Keep entitlements as a signing input only; do not copy the
+# .entitlements file into Contents/ because codesign treats it as a sealed
+# special file and strict verification reports it as modified after signing.
 cp "$REPO_DIR/Resources/Info.plist" "$APP_BUNDLE/Contents/"
-cp "$REPO_DIR/Resources/MeetCapture.entitlements" "$APP_BUNDLE/Contents/"
 cp "$REPO_DIR/Resources/com.maatwork.meetcapture.daemon.plist" \
    "$APP_BUNDLE/Contents/Library/LaunchAgents/"
 
@@ -155,15 +158,17 @@ exec "$PYTHON" "$DIR/server.py"
 SCRIPT
 chmod +x "$APP_BUNDLE/Contents/Resources/meet-daemon"
 
-# Sign the app (ad-hoc, required for the Core Audio tap (mic TCC) + EventKit)
-# Set designated requirement to bundle ID (stable across builds)
-codesign --force --deep --sign - \
-    --preserve-metadata=identifier,entitlements \
-    -r='designated => identifier "com.maatwork.meetcapture"' \
-    "$APP_BUNDLE" 2>/dev/null || codesign --force --deep --sign - \
+# Sign the app (ad-hoc, required for the Core Audio tap (mic TCC) + EventKit).
+# Do not use --deep: sign any nested Mach-O explicitly, then seal the app once.
+if [ -x "$APP_BUNDLE/Contents/Resources/whisper-cli" ]; then
+    codesign --force --sign - "$APP_BUNDLE/Contents/Resources/whisper-cli" 2>/dev/null || true
+fi
+codesign --force --sign - \
     --entitlements "$REPO_DIR/Resources/MeetCapture.entitlements" \
-    "$APP_BUNDLE" 2>/dev/null
+    -r='designated => identifier "com.maatwork.meetcapture"' \
+    "$APP_BUNDLE"
 
+codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
 echo "  Signed: ad-hoc (stable bundle ID requirement)"
 
 # Install to destination
@@ -205,6 +210,28 @@ with open('$DAEMON_PLIST_DST', 'wb') as f:
 print('Plist written to $DAEMON_PLIST_DST')
 "
 
-# Load daemon
-launchctl load "$DAEMON_PLIST_DST" 2>/dev/null && echo "Daemon loaded" || echo "Daemon load deferred (will load at next app launch)"
+# Load daemon. On recent macOS versions a service can remain disabled even
+# when its plist exists; `load -w` re-enables it. Bootstrap is attempted first
+# for modern launchctl semantics, with load -w as the reliable local fallback.
+UID_NOW="$(id -u)"
+launchctl bootout "gui/$UID_NOW/com.gio.meetcapture" 2>/dev/null || true
+if [ -f "$HOME/Library/LaunchAgents/com.gio.meetcapture.plist" ]; then
+    mkdir -p "$HOME/Library/LaunchAgents.disabled"
+    mv "$HOME/Library/LaunchAgents/com.gio.meetcapture.plist" \
+       "$HOME/Library/LaunchAgents.disabled/com.gio.meetcapture.plist.disabled.$(date +%Y%m%d_%H%M%S)" 2>/dev/null || true
+fi
+launchctl bootout "gui/$UID_NOW/com.maatwork.meetcapture.daemon" 2>/dev/null || true
+launchctl bootstrap "gui/$UID_NOW" "$DAEMON_PLIST_DST" 2>/tmp/meetcapture-bootstrap.log \
+    || launchctl load -w "$DAEMON_PLIST_DST" 2>/tmp/meetcapture-load.log \
+    || echo "Daemon load deferred (will load at next app launch)"
+launchctl kickstart -k "gui/$UID_NOW/com.maatwork.meetcapture.daemon" 2>/dev/null || true
+for i in $(seq 1 60); do
+    [ -S /tmp/meetcapture.sock ] && break
+    sleep 0.25
+done
+if [ -S /tmp/meetcapture.sock ]; then
+    echo "Daemon socket live: /tmp/meetcapture.sock"
+else
+    echo "WARNING: daemon socket not live yet. Check /tmp/meetcapture-daemon.log"
+fi
 echo "Done."

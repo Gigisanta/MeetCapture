@@ -67,7 +67,7 @@ swiftc -O "$HELPER" -o "$HELPER_BIN" 2>/dev/null || { skip "could not compile au
 PREV="$( "$HELPER_BIN" )"
 [ -n "$PREV" ] || PREV="MacBook"
 
-cleanup() { "$HELPER_BIN" "$PREV" >/dev/null 2>&1 || "$HELPER_BIN" MacBook >/dev/null 2>&1; pkill -x MeetCapture 2>/dev/null; rm -f "$HELPER" "$HELPER_BIN" /tmp/mc-st-speech.aiff; }
+cleanup() { launchctl unsetenv MEETCAPTURE_SELFTEST_SECS >/dev/null 2>&1 || true; "$HELPER_BIN" "$PREV" >/dev/null 2>&1 || "$HELPER_BIN" MacBook >/dev/null 2>&1; pkill -x MeetCapture 2>/dev/null; rm -f "$TDIR"/recording-* "$HELPER" "$HELPER_BIN" /tmp/mc-st-speech.aiff; }
 trap cleanup EXIT
 
 # Require BlackHole for a silent run; otherwise skip rather than make noise.
@@ -79,11 +79,11 @@ green "Routed output → BlackHole (silent, restore → $PREV)"
 
 pkill -x MeetCapture 2>/dev/null; sleep 1
 mkdir -p "$TDIR"
-ls "$TDIR"/recording-*.txt >/dev/null 2>&1 && rm -f "$TDIR"/recording-*.txt
+ls "$TDIR"/recording-* >/dev/null 2>&1 && rm -f "$TDIR"/recording-*
 say -o /tmp/mc-st-speech.aiff "$PHRASE"
 
-MEETCAPTURE_SELFTEST_SECS="$SECS" "$BIN" >/tmp/mc-st.log 2>&1 &
-disown 2>/dev/null || true   # silence the job-control "Terminated" notice on cleanup
+launchctl setenv MEETCAPTURE_SELFTEST_SECS "$SECS"
+/usr/bin/open -n "$APP"
 sleep 3
 afplay /tmp/mc-st-speech.aiff; afplay /tmp/mc-st-speech.aiff
 sleep 2

@@ -2,6 +2,16 @@
 
 Suite de herramientas para captura y transcripcion de reuniones en macOS.
 
+## Quick install / update
+
+```bash
+git clone https://github.com/Gigisanta/MeetCapture.git
+cd MeetCapture
+./install.sh
+```
+
+The installer builds the menu bar app, installs/updates `~/meetings/MeetCapture.app`, registers the socket daemon, launches the app, and runs safe smoke checks.
+
 ---
 
 ## Estado Actual (2026-05-29)
