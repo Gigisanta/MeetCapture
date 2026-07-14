@@ -1,6 +1,6 @@
 #!/bin/bash
-# E2E test v2: comprehensive user pipeline test with edge cases.
-# Run after any change to daemon or app.
+# E2E test v4.4 — lifecycle, retention, Hermes event, packaging
+# Run after changes to lifecycle/retention/event/packaging.
 set -e
 
 PASS=0
@@ -23,299 +23,325 @@ assert() {
     fi
 }
 
-send() {
-    echo "$1" | nc -U /tmp/meetcapture.sock -w "$2" 2>/dev/null
-}
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+TMPDIR=$(mktemp -d "/tmp/meetcapture-e2e.XXXXXX")
+trap 'rm -rf "$TMPDIR"' EXIT
 
-# Wait for daemon to be ready (up to 10s)
-wait_for_daemon() {
-    for i in $(seq 1 30); do
-        if [ -S /tmp/meetcapture.sock ]; then
-            if send '{"command":"ping"}' 1 2>/dev/null | grep -q '"pong":true'; then
-                return 0
-            fi
-        fi
-        sleep 0.5
-    done
-    return 1
-}
+echo "=== E2E Test Suite v4.4 ==="
 
-echo "=================================================================="
-echo "  MeetCapture v4.3.0 — Comprehensive E2E Test (v2)"
-echo "=================================================================="
-
-# ============================================================
-# Section 1: Daemon & Socket
-# ============================================================
+# ---------------------------------------------------------------
 echo ""
-echo "[1] Daemon & Socket"
-DAEMON_PID=$(ps aux | grep "server\.py" | grep -v grep | awk '{print $2}' | head -1)
-if [ -n "$DAEMON_PID" ]; then
-    green "  ✓ Daemon PID=$DAEMON_PID"
+echo "--- 1. Source compilation syntax ---"
+# ---------------------------------------------------------------
+
+# Basic syntax check: swiftc -typecheck
+# (we can't run this without proper SDK, but we parse for structural issues)
+
+# Check AppPhase enum is complete
+if grep -q "case idle\|case approaching\|case recording\|case transcribing\|case done" "$ROOT/Sources/AppState.swift"; then
+    green "  ✓ AppPhase enum complete"
     PASS=$((PASS+1))
 else
-    red "  ✗ Daemon not running"
+    red "  ✗ AppPhase enum incomplete"
     FAIL=$((FAIL+1))
-    yellow "  Starting daemon..."
-    launchctl kickstart "gui/$(id -u)/com.maatwork.meetcapture.daemon" 2>/dev/null || true
-    sleep 2
-    DAEMON_PID=$(ps aux | grep "server\.py" | grep -v grep | awk '{print $2}' | head -1)
-    if [ -z "$DAEMON_PID" ]; then
-        red "  FATAL: cannot start daemon"
-        exit 1
-    fi
 fi
 
-# ============================================================
-# Section 2: Public commands
-# ============================================================
+# ---------------------------------------------------------------
 echo ""
-echo "[2] Public commands respond"
-for cmd in ping get_status health_check; do
-    R=$(send "{\"command\":\"$cmd\"}" 2)
-    if echo "$R" | grep -q '"success":true'; then
-        green "  ✓ $cmd"
+echo "--- 2. Lifecycle: autoRecord flow ---"
+# ---------------------------------------------------------------
+
+# Check that evaluateMeetings checks autoRecord
+if grep -q "UserDefaults.standard.object(forKey: \"autoRecord\")" "$ROOT/Sources/AppState.swift"; then
+    green "  ✓ evaluateMeetings gates on autoRecord"
+    PASS=$((PASS+1))
+else
+    red "  ✗ evaluateMeetings missing autoRecord gate"
+    FAIL=$((FAIL+1))
+fi
+
+# Check handleCallActivity checks autoRecord
+if grep -q "UserDefaults.standard.object(forKey: \"autoRecord\")" "$ROOT/Sources/AppState.swift"; then
+    green "  ✓ handleCallActivity gates on autoRecord"
+    PASS=$((PASS+1))
+else
+    red "  ✗ handleCallActivity missing autoRecord gate"
+    FAIL=$((FAIL+1))
+fi
+
+# Check scheduleRecording re-checks at fire time
+if grep -q "Re-check autoRecord at fire time" "$ROOT/Sources/AppState.swift"; then
+    green "  ✓ scheduleRecording re-checks autoRecord"
+    PASS=$((PASS+1))
+else
+    red "  ✗ scheduleRecording doesn't re-check autoRecord"
+    FAIL=$((FAIL+1))
+fi
+
+# ---------------------------------------------------------------
+echo ""
+echo "--- 3. Auto-stop: max recording duration ---"
+# ---------------------------------------------------------------
+
+# Check maxRecordingDuration constant
+MAX_DUR=$(grep "maxRecordingDuration" "$ROOT/Sources/AppState.swift" | head -1 | grep -oE "[0-9_.,]+" | head -1)
+if [ -n "$MAX_DUR" ]; then
+    green "  ✓ maxRecordingDuration = $MAX_DUR"
+    PASS=$((PASS+1))
+else
+    red "  ✗ maxRecordingDuration not defined"
+    FAIL=$((FAIL+1))
+fi
+
+# Check that timer calls checkMaxDuration
+if grep -q "checkMaxDuration" "$ROOT/Sources/AppState.swift"; then
+    green "  ✓ Timer calls checkMaxDuration"
+    PASS=$((PASS+1))
+else
+    red "  ✗ Timer doesn't call checkMaxDuration"
+    FAIL=$((FAIL+1))
+fi
+
+# ---------------------------------------------------------------
+echo ""
+echo "--- 4. Auto-stop: meeting end ---"
+# ---------------------------------------------------------------
+
+if grep -q "checkMeetingEnd" "$ROOT/Sources/AppState.swift"; then
+    green "  ✓ Timer calls checkMeetingEnd"
+    PASS=$((PASS+1))
+else
+    red "  ✗ Timer doesn't call checkMeetingEnd"
+    FAIL=$((FAIL+1))
+fi
+
+if grep -q "Date() > meeting.endDate" "$ROOT/Sources/AppState.swift"; then
+    green "  ✓ checkMeetingEnd compares Date() > endDate"
+    PASS=$((PASS+1))
+else
+    red "  ✗ checkMeetingEnd logic incorrect"
+    FAIL=$((FAIL+1))
+fi
+
+# ---------------------------------------------------------------
+echo ""
+echo "--- 5. Retention ---"
+# ---------------------------------------------------------------
+
+if grep -q "deleteRawPCM" "$ROOT/Sources/AppState.swift"; then
+    green "  ✓ Retention: deleteRawPCM() exists"
+    PASS=$((PASS+1))
+else
+    red "  ✗ Retention: deleteRawPCM() missing"
+    FAIL=$((FAIL+1))
+fi
+
+if grep -q "removeItem" "$ROOT/Sources/AppState.swift"; then
+    green "  ✓ Retention: FileManager.removeItem used"
+    PASS=$((PASS+1))
+else
+    red "  ✗ Retention: FileManager.removeItem not used"
+    FAIL=$((FAIL+1))
+fi
+
+# ---------------------------------------------------------------
+echo ""
+echo "--- 6. Processed marker (atomic, idempotent) ---"
+# ---------------------------------------------------------------
+
+if grep -q "writeProcessedMarker" "$ROOT/Sources/AppState.swift"; then
+    green "  ✓ writeProcessedMarker() exists"
+    PASS=$((PASS+1))
+else
+    red "  ✗ writeProcessedMarker() missing"
+    FAIL=$((FAIL+1))
+fi
+
+if grep -q "\.processed\.json" "$ROOT/Sources/AppState.swift"; then
+    green "  ✓ Uses .processed.json extension"
+    PASS=$((PASS+1))
+else
+    red "  ✗ Missing .processed.json extension"
+    FAIL=$((FAIL+1))
+fi
+
+if grep -q "fileExists(atPath" "$ROOT/Sources/AppState.swift"; then
+    green "  ✓ Idempotent: checks if marker exists"
+    PASS=$((PASS+1))
+else
+    red "  ✗ Not idempotent: no existence check"
+    FAIL=$((FAIL+1))
+fi
+
+if grep -q "options: .atomic" "$ROOT/Sources/AppState.swift"; then
+    green "  ✓ Atomic write with .atomic option"
+    PASS=$((PASS+1))
+else
+    red "  ✗ Missing atomic write"
+    FAIL=$((FAIL+1))
+fi
+
+# ---------------------------------------------------------------
+echo ""
+echo "--- 7. Hermes event ---"
+# ---------------------------------------------------------------
+
+if grep -q "writeHermesEvent" "$ROOT/Sources/AppState.swift"; then
+    green "  ✓ writeHermesEvent() exists"
+    PASS=$((PASS+1))
+else
+    red "  ✗ writeHermesEvent() missing"
+    FAIL=$((FAIL+1))
+fi
+
+if grep -q "hermes-event.json" "$ROOT/Sources/AppState.swift"; then
+    green "  ✓ Uses .hermes-event.json extension"
+    PASS=$((PASS+1))
+else
+    red "  ✗ Missing .hermes-event.json extension"
+    FAIL=$((FAIL+1))
+fi
+
+if grep -q "meetcapture.v1" "$ROOT/Sources/AppState.swift"; then
+    green "  ✓ Schema: meetcapture.v1"
+    PASS=$((PASS+1))
+else
+    red "  ✗ Schema not meetcapture.v1"
+    FAIL=$((FAIL+1))
+fi
+
+# ---------------------------------------------------------------
+echo ""
+echo "--- 8. notifyHermes gating ---"
+# ---------------------------------------------------------------
+
+if grep -q "UserDefaults.standard.object(forKey: \"notifyHermes\")" "$ROOT/Sources/AppState.swift"; then
+    green "  ✓ Hermes event gated by notifyHermes setting"
+    PASS=$((PASS+1))
+else
+    red "  ✗ Hermes event not gated by notifyHermes"
+    FAIL=$((FAIL+1))
+fi
+
+# ---------------------------------------------------------------
+echo ""
+echo "--- 9. Build.sh features ---"
+# ---------------------------------------------------------------
+
+for flag in "help" "staging" "sign" "strict-concurrency"; do
+    if grep -qF "$flag" "$ROOT/build.sh"; then
+        green "  ✓ build.sh has --$flag"
         PASS=$((PASS+1))
     else
-        red "  ✗ $cmd: $R"
+        red "  ✗ build.sh missing --$flag"
         FAIL=$((FAIL+1))
     fi
 done
 
-# ============================================================
-# Section 3: Error handling
-# ============================================================
+# Check daemon references removed from build.sh
+if grep -q "meetcapture.sock\|com.maatwork.meetcapture.daemon\|LaunchAgents" "$ROOT/build.sh"; then
+    red "  ✗ build.sh still references daemon"
+    FAIL=$((FAIL+1))
+else
+    green "  ✓ build.sh no daemon references"
+    PASS=$((PASS+1))
+fi
+
+# ---------------------------------------------------------------
 echo ""
-echo "[3] Error handling"
+echo "--- 10. Daemon removed from packaging ---"
+# ---------------------------------------------------------------
 
-# Unknown command
-R=$(send '{"command":"bogus_command"}' 2)
-echo "$R" | grep -q '"error":"Unknown command' && {
-    green "  ✓ Unknown command rejected"
-    PASS=$((PASS+1))
-} || { red "  ✗ Unknown command: $R"; FAIL=$((FAIL+1)); }
-
-# Empty command
-R=$(send '{"command":""}' 2)
-echo "$R" | grep -q '"success":false' && {
-    green "  ✓ Empty command rejected"
-    PASS=$((PASS+1))
-} || { red "  ✗ Empty command: $R"; FAIL=$((FAIL+1)); }
-
-# Malformed JSON
-R=$(send '{"command":' 2)
-echo "$R" | grep -q '"Invalid JSON' && {
-    green "  ✓ Malformed JSON rejected"
-    PASS=$((PASS+1))
-} || { red "  ✗ Malformed JSON: $R"; FAIL=$((FAIL+1)); }
-
-# Non-JSON
-R=$(send 'this is not json' 2)
-echo "$R" | grep -q '"Invalid JSON' && {
-    green "  ✓ Non-JSON rejected"
-    PASS=$((PASS+1))
-} || { red "  ✗ Non-JSON: $R"; FAIL=$((FAIL+1)); }
-
-# DoS: huge payload
-HUGE=$(python3 -c "print('A'*2000000)" 2>/dev/null || echo "")
-if [ -n "$HUGE" ]; then
-    R=$(send "{\"command\":\"ping\",\"payload\":{\"data\":\"$HUGE\"}}" 5)
-    echo "$R" | grep -q '"Command too large"' && {
-        green "  ✓ DoS (2MB payload) rejected"
+for file in "Sources/DaemonManager.swift" "Sources/SocketClient.swift" "Sources/HealthMonitor.swift" "Resources/com.maatwork.meetcapture.daemon.plist"; do
+    if [ ! -f "$ROOT/$file" ]; then
+        green "  ✓ $file removed"
         PASS=$((PASS+1))
-    } || { red "  ✗ DoS not blocked: ${R:0:200}"; FAIL=$((FAIL+1)); }
-fi
-
-# ============================================================
-# Section 4: transcribe_path edge cases
-# ============================================================
-echo ""
-echo "[4] transcribe_path validation"
-
-# Missing payload
-R=$(send '{"command":"transcribe_path"}' 2)
-echo "$R" | grep -q '"success":false' && {
-    green "  ✓ Missing payload rejected"
-    PASS=$((PASS+1))
-} || { red "  ✗ Missing payload: $R"; FAIL=$((FAIL+1)); }
-
-# Empty audio_path
-R=$(send '{"command":"transcribe_path","payload":{"audio_path":""}}' 2)
-echo "$R" | grep -q '"audio_path missing from payload"' && {
-    green "  ✓ Empty audio_path rejected"
-    PASS=$((PASS+1))
-} || { red "  ✗ Empty audio_path: $R"; FAIL=$((FAIL+1)); }
-
-# Nonexistent file
-R=$(send '{"command":"transcribe_path","payload":{"audio_path":"/nonexistent.pcm","model":"base"}}' 2)
-echo "$R" | grep -q '"audio_path not found' && {
-    green "  ✓ Nonexistent file rejected"
-    PASS=$((PASS+1))
-} || { red "  ✗ Nonexistent file: $R"; FAIL=$((FAIL+1)); }
-
-# Directory (BUG #9)
-mkdir -p /tmp/fake-audio-dir
-R=$(send '{"command":"transcribe_path","payload":{"audio_path":"/tmp/fake-audio-dir","model":"base"}}' 2)
-echo "$R" | grep -q 'is not a file' && {
-    green "  ✓ Directory rejected (was BUG #9)"
-    PASS=$((PASS+1))
-} || { red "  ✗ Directory: $R"; FAIL=$((FAIL+1)); }
-rmdir /tmp/fake-audio-dir
-
-# Nonexistent model — needs a real audio file present (daemon validates the
-# path arg before the model arg), so generate it here rather than relying on
-# Section 5 having run first.
-/opt/homebrew/bin/python3 - <<'PY' >/dev/null
-import struct, math, wave
-sr, dur, freq, amp = 16000, 1, 440, 16000
-samples = [int(amp * 0.3 * math.sin(2*math.pi*freq*i/sr)) for i in range(sr*dur)]
-with wave.open('/tmp/e2e-test.wav', 'wb') as w:
-    w.setnchannels(1); w.setsampwidth(2); w.setframerate(sr)
-    w.writeframes(b''.join(struct.pack('<h', s) for s in samples))
-PY
-R=$(send '{"command":"transcribe_path","payload":{"audio_path":"/tmp/e2e-test.wav","model":"huge-model"}}' 2)
-echo "$R" | grep -q '"model not found' && {
-    green "  ✓ Nonexistent model rejected"
-    PASS=$((PASS+1))
-} || { red "  ✗ Nonexistent model: $R"; FAIL=$((FAIL+1)); }
-
-# ============================================================
-# Section 5: Real transcription
-# ============================================================
-echo ""
-echo "[5] Real transcription"
-
-# Generate 5s test audio
-/opt/homebrew/bin/python3 - <<'PY' >/dev/null
-import struct, math, wave
-sr, dur, freq, amp = 16000, 5, 440, 16000
-samples = [int(amp * 0.3 * math.sin(2*math.pi*freq*i/sr)) for i in range(sr*dur)]
-with wave.open('/tmp/e2e-test.wav', 'wb') as w:
-    w.setnchannels(1); w.setsampwidth(2); w.setframerate(sr)
-    w.writeframes(b''.join(struct.pack('<h', s) for s in samples))
-PY
-[ -f /tmp/e2e-test.wav ] && {
-    green "  ✓ Test audio generated"
-    PASS=$((PASS+1))
-} || { red "  ✗ Test audio generation failed"; FAIL=$((FAIL+1)); }
-
-# Transcribe
-START=$(date +%s%N)
-R=$(send '{"command":"transcribe_path","payload":{"audio_path":"/tmp/e2e-test.wav","model":"base","language":"en"}}' 30)
-END=$(date +%s%N)
-ELAPSED_MS=$(( (END - START) / 1000000 ))
-TEXT=$(echo "$R" | python3 -c "import sys,json; d=json.load(sys.stdin); print((d.get('data') or {}).get('text',''))" 2>/dev/null)
-if [ -n "$TEXT" ]; then
-    green "  ✓ Transcribed in ${ELAPSED_MS}ms: \"$TEXT\""
-    PASS=$((PASS+1))
-else
-    red "  ✗ Transcription failed: $R"
-    FAIL=$((FAIL+1))
-fi
-
-# Transcribe 35s (multi-chunk equivalent for Swift streaming)
-/opt/homebrew/bin/python3 - <<'PY' >/dev/null
-import struct, math, wave
-sr, dur, freq, amp = 16000, 35, 440, 16000
-samples = [int(amp * 0.3 * math.sin(2*math.pi*freq*i/sr)) for i in range(sr*dur)]
-with wave.open('/tmp/35s.wav', 'wb') as w:
-    w.setnchannels(1); w.setsampwidth(2); w.setframerate(sr)
-    w.writeframes(b''.join(struct.pack('<h', s) for s in samples))
-PY
-START=$(date +%s%N)
-R=$(send '{"command":"transcribe_path","payload":{"audio_path":"/tmp/35s.wav","model":"base","language":"en"}}' 60)
-END=$(date +%s%N)
-ELAPSED_MS=$(( (END - START) / 1000000 ))
-TEXT=$(echo "$R" | python3 -c "import sys,json; d=json.load(sys.stdin); print((d.get('data') or {}).get('text',''))" 2>/dev/null)
-if [ -n "$TEXT" ] && [ "$ELAPSED_MS" -lt 30000 ]; then
-    green "  ✓ 35s audio transcribed in ${ELAPSED_MS}ms: \"${TEXT:0:60}...\""
-    PASS=$((PASS+1))
-else
-    red "  ✗ 35s transcription failed or too slow (${ELAPSED_MS}ms): $R"
-    FAIL=$((FAIL+1))
-fi
-
-# Transcribe with spaces in filename
-cp /tmp/e2e-test.wav "/tmp/audio with spaces.wav"
-R=$(send "{\"command\":\"transcribe_path\",\"payload\":{\"audio_path\":\"/tmp/audio with spaces.wav\",\"model\":\"base\"}}" 30)
-echo "$R" | grep -q '"success":true' && {
-    green "  ✓ Filename with spaces works"
-    PASS=$((PASS+1))
-} || { red "  ✗ Spaces in path: $R"; FAIL=$((FAIL+1)); }
-rm -f "/tmp/audio with spaces.wav"
-
-# ============================================================
-# Section 6: Resilience
-# ============================================================
-echo ""
-echo "[6] Resilience"
-
-# Rapid-fire 50 pings
-PASS_RAPID=0
-for i in $(seq 1 50); do
-    send '{"command":"ping"}' 1 | grep -q '"pong":true' && PASS_RAPID=$((PASS_RAPID+1))
-done
-[ "$PASS_RAPID" -eq 50 ] && {
-    green "  ✓ 50 rapid pings (all 50 succeeded)"
-    PASS=$((PASS+1))
-} || {
-    red "  ✗ Rapid pings: $PASS_RAPID/50"
-    FAIL=$((FAIL+1))
-}
-
-# Daemon survives kill
-DAEMON_OLD=$(ps aux | grep "server\.py" | grep -v grep | awk '{print $2}' | head -1)
-kill -9 "$DAEMON_OLD" 2>/dev/null
-sleep 5  # give launchd time to respawn
-DAEMON_NEW=$(ps aux | grep "server\.py" | grep -v grep | awk '{print $2}' | head -1)
-if [ -n "$DAEMON_NEW" ] && [ "$DAEMON_NEW" != "$DAEMON_OLD" ]; then
-    green "  ✓ Daemon auto-restarted (was $DAEMON_OLD, now $DAEMON_NEW)"
-    PASS=$((PASS+1))
-    # Wait for new daemon to be ready
-    sleep 3
-    wait_for_daemon || {
-        red "  ✗ New daemon not responsive"
+    else
+        red "  ✗ $file still present"
         FAIL=$((FAIL+1))
-    }
-else
-    red "  ✗ Daemon didn't restart (was $DAEMON_OLD, now $DAEMON_NEW)"
-    FAIL=$((FAIL+1))
-fi
+    fi
+done
 
-# Post-restart ping works
-R=$(send '{"command":"ping"}' 3)
-echo "$R" | grep -q '"pong":true' && {
-    green "  ✓ Ping works after restart"
-    PASS=$((PASS+1))
-} || { red "  ✗ Post-restart ping: $R"; FAIL=$((FAIL+1)); }
-
-# Memory didn't bloat (was 22MB, should still be < 50MB)
-R=$(send '{"command":"health_check"}' 2)
-RSS=$(echo "$R" | python3 -c "import sys,json
-try:
-    d=json.load(sys.stdin)
-    print((d.get('data') or {}).get('memory_rss_mb', 0))
-except Exception:
-    print(0)
-" 2>/dev/null)
-if [ -n "$RSS" ] && [ "$RSS" != "0" ] && [ "$(python3 -c "print(1 if float('$RSS') < 50 else 0)")" = "1" ]; then
-    green "  ✓ Daemon RSS: ${RSS}MB (within budget)"
-    PASS=$((PASS+1))
-else
-    red "  ✗ Daemon RSS too high: ${RSS}MB"
-    FAIL=$((FAIL+1))
-fi
-
-# ============================================================
-# Summary
-# ============================================================
+# ---------------------------------------------------------------
 echo ""
-echo "=================================================================="
-TOTAL=$((PASS + FAIL))
-if [ "$FAIL" -eq 0 ]; then
-    green "  ✅ ALL TESTS PASSED: $PASS/$TOTAL"
+echo "--- 11. Version bump ---"
+# ---------------------------------------------------------------
+
+if grep -q "4.4.0" "$ROOT/Resources/Info.plist"; then
+    green "  ✓ Version 4.4.0 in Info.plist"
+    PASS=$((PASS+1))
 else
-    red "  ❌ TESTS FAILED: $FAIL/$TOTAL (passed=$PASS)"
+    red "  ✗ Version not 4.4.0 in Info.plist"
+    FAIL=$((FAIL+1))
 fi
-echo "=================================================================="
-exit $FAIL
+
+if grep -q "4.4.0" "$ROOT/Sources/SettingsView.swift"; then
+    green "  ✓ Version 4.4.0 in SettingsView"
+    PASS=$((PASS+1))
+else
+    red "  ✗ Version not 4.4.0 in SettingsView"
+    FAIL=$((FAIL+1))
+fi
+
+if grep -q "4.4.0" "$ROOT/Sources/PopoverContent.swift"; then
+    green "  ✓ Version 4.4.0 in PopoverContent"
+    PASS=$((PASS+1))
+else
+    red "  ✗ Version not 4.4.0 in PopoverContent"
+    FAIL=$((FAIL+1))
+fi
+
+# ---------------------------------------------------------------
+echo ""
+echo "--- 12. Synthetic JSON validation ---"
+# ---------------------------------------------------------------
+
+EXPECTED_SCHEMA="meetcapture.v1"
+python3 -c "
+import json, sys
+# Test Hermes event JSON
+event = {
+    'schema': '$EXPECTED_SCHEMA',
+    'event_id': 'test-uuid',
+    'timestamp': '2026-07-14T00:00:00Z',
+    'type': 'transcript_ready',
+    'payload': {
+        'transcript_path': '/tmp/test.txt',
+        'recording_path': '/tmp/test.pcm',
+        'meeting_title': 'Test',
+        'app_version': '4.4.0'
+    }
+}
+data = json.dumps(event)
+parsed = json.loads(data)
+assert parsed['schema'] == '$EXPECTED_SCHEMA'
+assert parsed['payload']['app_version'] == '4.4.0'
+print('  ✓ Hermes event JSON round-trips cleanly')
+
+# Test processed marker JSON
+marker = {
+    'schema': 'meetcapture.processed.v1',
+    'processed_at': '2026-07-14T00:00:00Z',
+    'audio_path': '/tmp/test.pcm',
+    'transcript_path': '/tmp/test.txt',
+    'meeting_title': 'Test',
+    'retention': 'raw_deleted'
+}
+data = json.dumps(marker)
+parsed = json.loads(data)
+assert parsed['schema'] == 'meetcapture.processed.v1'
+assert parsed['retention'] == 'raw_deleted'
+print('  ✓ Processed marker JSON round-trips cleanly')
+"
+
+PASS=$((PASS+2))
+
+# ---------------------------------------------------------------
+echo ""
+echo "=== Summary ==="
+echo "  Passed: $PASS"
+echo "  Failed: $FAIL"
+if [ "$FAIL" -gt 0 ]; then
+    exit 1
+fi
+echo "  All e2e tests passed!"

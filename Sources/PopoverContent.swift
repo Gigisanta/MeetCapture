@@ -186,10 +186,7 @@ struct PopoverContent: View {
             }
             Spacer()
             HStack(spacing: 4) {
-                Circle()
-                    .fill(appState.isDaemonRunning ? Brand.successGreen : .secondary)
-                    .frame(width: 5, height: 5)
-                Text("v4.3.0")
+                Text("v4.4.0")
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
             }
