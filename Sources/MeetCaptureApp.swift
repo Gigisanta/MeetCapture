@@ -3,7 +3,6 @@
 // @main entry point with SwiftUI MenuBarExtra
 
 import SwiftUI
-import ServiceManagement
 
 @main
 struct MeetCaptureApp: App {
@@ -13,11 +12,6 @@ struct MeetCaptureApp: App {
     // so it's available via AppState.shared before any Scene body runs).
     // We hold it as @ObservedObject so SwiftUI subscribes to its @Published
     // changes and re-renders the menu bar icon / popover as state evolves.
-    //
-    // (BUG #12 fix: @StateObject was created lazily AFTER
-    //  applicationDidFinishLaunching tried to call AppState.shared?.startup(),
-    //  which was nil. The startup() task never ran, the SocketClient never
-    //  connected, the app showed up in the menu bar but was inert.)
     @ObservedObject var appState: AppState
 
     init() {
@@ -51,9 +45,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // CRITICAL: own the AppState and create it as early as possible so the
     // @main App can grab it from `init()` (NSApplicationDelegateAdaptor
     // instantiates AppDelegate synchronously before MeetCaptureApp.init runs).
-    // AppState is @MainActor-isolated (hence Sendable) and its init() is a
-    // non-isolated synchronous setup; the actual startup() call happens on the
-    // main actor in applicationDidFinishLaunching.
     static let sharedAppState = AppState()
     private let appState = AppDelegate.sharedAppState
 
@@ -61,21 +52,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Hide dock icon — menu bar only app
         NSApp.setActivationPolicy(.accessory)
 
-        // Initialize services (permissions, daemon, calendar, socket)
-        // AppState.shared is set (init() ran when sharedAppState was created)
+        // Initialize services (permissions, calendar, call detection)
         Task { @MainActor in
             await self.appState.startup()
         }
-    }
-
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        // Don't quit when settings window closes — stay in menu bar
-        return false
-    }
-
-    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        // Clean shutdown
-        self.appState.shutdown()
-        return .terminateNow
     }
 }

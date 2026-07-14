@@ -1,6 +1,6 @@
 #!/bin/bash
 # Build MeetCapture v4 — Swift native menu bar app
-# Usage: ./build.sh [--install-to ~/Applications] [--rollback]
+# Usage: ./build.sh [--help] [--staging] [--staging-dir <path>] [--install-to <path>] [--sign <identity>] [--with-turbo] [--rollback]
 set -e
 
 APP_NAME="MeetCapture"
@@ -10,17 +10,56 @@ REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 BACKUP_DIR="$HOME/meetings/.backups"
 MAX_BACKUPS=3
 
-# Determine DEST: the first arg that is NOT a flag
+# Defaults
 DEST="$HOME/meetings/MeetCapture.app"
-for arg in "$@"; do
-    case "$arg" in
-        --*) ;;  # skip flags
-        *) DEST="$arg" ;;
+SIGN_IDENTITY="-"
+STAGING=false
+STAGING_DIR=""
+
+# ---- Parse args ----
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --help)
+            echo "MeetCapture v4 Build Script"
+            echo ""
+            echo "Usage: ./build.sh [options] [<dest-path>]"
+            echo ""
+            echo "Options:"
+            echo "  --help              Show this help"
+            echo "  --staging           Build in staging mode (skip install, no launchd service)"
+            echo "  --staging-dir <path> Build to explicit staging path, never touch ~/meetings"
+            echo "  --install-to <path> Install to custom path (default: ~/meetings/MeetCapture.app)"
+            echo "  --sign <identity>   Sign with given identity (default: ad-hoc '-')"
+            echo "  --with-turbo        Download large-v3-turbo model (1.6GB)"
+            echo "  --rollback          Restore previous backup"
+            echo ""
+            echo "Examples:"
+            echo "  ./build.sh                                    # ad-hoc signed, ~/meetings/MeetCapture.app"
+            echo "  ./build.sh --staging                          # build to /tmp/MeetCapture.app, no install"
+            echo "  ./build.sh --staging-dir /tmp/custom          # explicit staging dir, no ~/meetings"
+            echo "  ./build.sh --sign \"Developer ID\"              # signed for distribution"
+            echo "  ./build.sh --install-to /Applications/MeetCapture.app"
+            exit 0
+            ;;
+        --install-to)
+            if [ -z "$2" ] || [[ "$2" =~ ^-- ]]; then echo "ERROR: --install-to requires a path argument"; exit 1; fi
+            DEST="$2"; shift 2 ;;
+        --sign)
+            if [ -z "$2" ] || [[ "$2" =~ ^-- ]]; then echo "ERROR: --sign requires an identity argument"; exit 1; fi
+            SIGN_IDENTITY="$2"; shift 2 ;;
+        --staging) STAGING=true; shift ;;
+        --staging-dir)
+            if [ -z "$2" ] || [[ "$2" =~ ^-- ]]; then echo "ERROR: --staging-dir requires a path argument"; exit 1; fi
+            STAGING=true; STAGING_DIR="$2"; shift 2 ;;
+        --with-turbo) WANT_TURBO=1; shift ;;
+        --rollback) DO_ROLLBACK=1; shift ;;
+        --*) echo "Unknown flag: $1"; exit 1 ;;
+        *) DEST="$1"; shift ;;
     esac
 done
 
-# Phase 6: rollback support
-if [ "${1:-}" = "--rollback" ] || [ "${2:-}" = "--rollback" ]; then
+# Rollback support
+if [ "${DO_ROLLBACK:-0}" = "1" ]; then
     echo "Rolling back to previous build..."
     LATEST=$(ls -dt "$BACKUP_DIR"/MeetCapture-* 2>/dev/null | head -1)
     if [ -z "$LATEST" ]; then
@@ -36,16 +75,27 @@ if [ "${1:-}" = "--rollback" ] || [ "${2:-}" = "--rollback" ]; then
     exit 0
 fi
 
+# Resolve staging output path
+if [ "$STAGING" = true ] && [ -n "$STAGING_DIR" ]; then
+    # Explicit staging dir — never touch ~/meetings
+    APP_BUNDLE="$STAGING_DIR/MeetCapture.app"
+elif [ "$STAGING" = true ]; then
+    APP_BUNDLE="/tmp/MeetCapture.app"
+fi
+
 echo "Building $APP_NAME v4..."
 echo "  Sources:  $REPO_DIR/Sources"
 echo "  Output:   $DEST"
+echo "  Staging:  $STAGING"
+if [ "$STAGING" = true ] && [ -n "$STAGING_DIR" ]; then
+    echo "  Staging dir: $STAGING_DIR"
+fi
+echo "  Sign:     $SIGN_IDENTITY"
 
-# Create bundle structure from a clean staging app. Reusing /tmp/MeetCapture.app
-# after signing can leave sealed resources read-only and make cp fail.
+# Create bundle structure from a clean staging app
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources"
-mkdir -p "$APP_BUNDLE/Contents/Library/LaunchAgents"
 
 # Find all Swift sources
 SOURCES=$(find "$REPO_DIR/Sources" -name "*.swift" | sort | tr '\n' ' ')
@@ -53,16 +103,11 @@ N_SOURCES=$(echo "$SOURCES" | wc -w | tr -d ' ')
 echo "  Compiling $N_SOURCES Swift files..."
 
 # Compile
-# Frameworks: CoreAudio + AudioToolbox are the capture core (process tap,
-# aggregate device, CallDetector); AVFoundation gates mic permission. Linked
-# explicitly so a fresh-machine build can't silently fail to resolve the tap
-# symbols via implicit autolink. ScreenCaptureKit was dropped — the app no
-# longer uses SCStream (it never delivered frames on macOS 15+/26).
 swiftc \
     -target arm64-apple-macosx14.4 \
     -sdk "$(xcrun --show-sdk-path)" \
+    -strict-concurrency=complete \
     -framework SwiftUI \
-    -framework ServiceManagement \
     -framework EventKit \
     -framework CoreAudio \
     -framework AudioToolbox \
@@ -76,16 +121,10 @@ swiftc \
 
 echo "  Binary: $(du -h "$APP_BUNDLE/Contents/MacOS/$APP_NAME" | cut -f1)"
 
-# Copy metadata. Keep entitlements as a signing input only; do not copy the
-# .entitlements file into Contents/ because codesign treats it as a sealed
-# special file and strict verification reports it as modified after signing.
+# Copy metadata
 cp "$REPO_DIR/Resources/Info.plist" "$APP_BUNDLE/Contents/"
-cp "$REPO_DIR/Resources/com.maatwork.meetcapture.daemon.plist" \
-   "$APP_BUNDLE/Contents/Library/LaunchAgents/"
 
-# Bundle whisper-cli binary. Probe PATH + both Homebrew prefixes (Apple Silicon
-# /opt/homebrew, Intel /usr/local) so this doesn't silently skip on non-default
-# installs. Warn LOUDLY if missing — without it transcription fails at runtime.
+# Bundle whisper-cli binary
 WHISPER_CLI="$(command -v whisper-cli 2>/dev/null || true)"
 if [ -z "$WHISPER_CLI" ]; then
     for p in "$(brew --prefix 2>/dev/null)/bin/whisper-cli" /opt/homebrew/bin/whisper-cli /usr/local/bin/whisper-cli; do
@@ -100,8 +139,7 @@ else
     echo "      Install it:  brew install whisper-cpp"
 fi
 
-# Ensure the Silero VAD model exists (skips silence → faster, fewer
-# hallucinations). Optional: the app runs without it, just without VAD.
+# Ensure the Silero VAD model exists
 VAD_MODEL="$HOME/.whisper/models/ggml-silero-v5.1.2.bin"
 if [ ! -f "$VAD_MODEL" ]; then
     mkdir -p "$HOME/.whisper/models"
@@ -114,10 +152,7 @@ if [ ! -f "$VAD_MODEL" ]; then
     fi
 fi
 
-# Opt-in: download large-v3-turbo (1.6GB) for max accuracy. Off by default to
-# honor the "few resources" goal; medium stays the default model. Enable with:
-#   ./build.sh --with-turbo
-for arg in "$@"; do [ "$arg" = "--with-turbo" ] && WANT_TURBO=1; done
+# Opt-in: download large-v3-turbo (1.6GB) for max accuracy
 TURBO_MODEL="$HOME/.whisper/models/ggml-large-v3-turbo.bin"
 if [ "${WANT_TURBO:-0}" = "1" ] && [ ! -f "$TURBO_MODEL" ]; then
     mkdir -p "$HOME/.whisper/models"
@@ -130,54 +165,46 @@ if [ "${WANT_TURBO:-0}" = "1" ] && [ ! -f "$TURBO_MODEL" ]; then
     fi
 fi
 
-# Bundle Python daemon scripts
-cp "$REPO_DIR/Daemon/server.py" "$APP_BUNDLE/Contents/Resources/"
-
-# Create daemon launcher script
-BUNDLE_DIR="$APP_BUNDLE"
-# Substitute __BUNDLE_DIR__ in bundled plist with absolute path so SMAppService finds it
-if [ -f "$APP_BUNDLE/Contents/Library/LaunchAgents/com.maatwork.meetcapture.daemon.plist" ]; then
-  sed -i '' "s|__BUNDLE_DIR__|$DEST|g" \
-    "$APP_BUNDLE/Contents/Library/LaunchAgents/com.maatwork.meetcapture.daemon.plist"
-fi
-cat > "$APP_BUNDLE/Contents/Resources/meet-daemon" << 'SCRIPT'
-#!/bin/bash
-# MeetCapture daemon launcher
-DIR="$(cd "$(dirname "$0")" && pwd)"
-BUNDLE="$(cd "$DIR/../.." && pwd)"
-# Try bundled Python first, then system
-if [ -x "$BUNDLE/Contents/Resources/python3" ]; then
-    PYTHON="$BUNDLE/Contents/Resources/python3"
-elif [ -x "/opt/homebrew/bin/python3" ]; then
-    PYTHON="/opt/homebrew/bin/python3"
-else
-    PYTHON="/usr/bin/python3"
-fi
-export PATH="$BUNDLE/Contents/Resources:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
-exec "$PYTHON" "$DIR/server.py"
-SCRIPT
-chmod +x "$APP_BUNDLE/Contents/Resources/meet-daemon"
-
-# Sign the app (ad-hoc, required for the Core Audio tap (mic TCC) + EventKit).
-# Do not use --deep: sign any nested Mach-O explicitly, then seal the app once.
+# Sign the app
+# Hardened runtime (-o runtime) is only applied when signing with a REAL identity,
+# not ad-hoc ('-'). Ad-hoc signed hardened runtime breaks on macOS 15+ with
+# code signing rejection even for basic entitlements.
 if [ -x "$APP_BUNDLE/Contents/Resources/whisper-cli" ]; then
-    codesign --force --sign - "$APP_BUNDLE/Contents/Resources/whisper-cli" 2>/dev/null || true
+    codesign --force --sign "$SIGN_IDENTITY" "$APP_BUNDLE/Contents/Resources/whisper-cli" 2>/dev/null || true
 fi
-codesign --force --sign - \
-    --entitlements "$REPO_DIR/Resources/MeetCapture.entitlements" \
-    -r='designated => identifier "com.maatwork.meetcapture"' \
-    "$APP_BUNDLE"
 
-codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
-echo "  Signed: ad-hoc (stable bundle ID requirement)"
+SIGN_FLAGS=(
+    --force
+    --sign "$SIGN_IDENTITY"
+    --entitlements "$REPO_DIR/Resources/MeetCapture.entitlements"
+    -r='designated => identifier "com.maatwork.meetcapture"'
+)
+
+# Only apply hardened runtime when signing with a real developer identity
+if [ "$SIGN_IDENTITY" != "-" ]; then
+    SIGN_FLAGS+=(--options runtime)
+fi
+
+codesign "${SIGN_FLAGS[@]}" "$APP_BUNDLE"
+codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE" || {
+    echo "  ⚠️  Code verification warning (non-fatal for ad-hoc)"
+}
+echo "  Signed: ${SIGN_IDENTITY} (bundle ID: com.maatwork.meetcapture)"
+
+# Staging mode: stop here, don't install or register
+if [ "$STAGING" = true ]; then
+    echo ""
+    echo "=== Staging build ready ==="
+    echo "  App bundle: $APP_BUNDLE"
+    echo "  Run with: open '$APP_BUNDLE'"
+    exit 0
+fi
 
 # Install to destination
-# Phase 6: keep last 3 backups for rollback
 if [ -d "$DEST" ]; then
     mkdir -p "$BACKUP_DIR"
     TS=$(date +%Y%m%d-%H%M%S)
     cp -R "$DEST" "$BACKUP_DIR/MeetCapture-$TS"
-    # Prune old backups
     ls -dt "$BACKUP_DIR"/MeetCapture-* 2>/dev/null | tail -n +$((MAX_BACKUPS + 1)) | xargs -r rm -rf
     echo "  Backed up previous build to $BACKUP_DIR/MeetCapture-$TS"
 fi
@@ -187,51 +214,3 @@ echo "  Installed to: $DEST"
 echo ""
 echo "Done. Run with: open '$DEST'"
 echo ""
-echo "=== Post-install: Register daemon ==="
-# Copy daemon plist to user's LaunchAgents with absolute paths
-DAEMON_PLIST_SRC="$DEST/Contents/Library/LaunchAgents/com.maatwork.meetcapture.daemon.plist"
-DAEMON_PLIST_DST="$HOME/Library/LaunchAgents/com.maatwork.meetcapture.daemon.plist"
-
-# Unload existing if present
-launchctl unload "$DAEMON_PLIST_DST" 2>/dev/null || true
-
-# Create modified plist with absolute paths
-python3 -c "
-import plistlib, os
-home = os.path.expanduser('~')
-with open('$DAEMON_PLIST_SRC', 'rb') as f:
-    plist = plistlib.load(f)
-plist.pop('BundleProgram', None)
-plist['ProgramArguments'] = ['$DEST/Contents/Resources/meet-daemon']
-plist['StandardOutPath'] = '/tmp/meetcapture-daemon.log'
-plist['StandardErrorPath'] = '/tmp/meetcapture-daemon.log'
-with open('$DAEMON_PLIST_DST', 'wb') as f:
-    plistlib.dump(plist, f)
-print('Plist written to $DAEMON_PLIST_DST')
-"
-
-# Load daemon. On recent macOS versions a service can remain disabled even
-# when its plist exists; `load -w` re-enables it. Bootstrap is attempted first
-# for modern launchctl semantics, with load -w as the reliable local fallback.
-UID_NOW="$(id -u)"
-launchctl bootout "gui/$UID_NOW/com.gio.meetcapture" 2>/dev/null || true
-if [ -f "$HOME/Library/LaunchAgents/com.gio.meetcapture.plist" ]; then
-    mkdir -p "$HOME/Library/LaunchAgents.disabled"
-    mv "$HOME/Library/LaunchAgents/com.gio.meetcapture.plist" \
-       "$HOME/Library/LaunchAgents.disabled/com.gio.meetcapture.plist.disabled.$(date +%Y%m%d_%H%M%S)" 2>/dev/null || true
-fi
-launchctl bootout "gui/$UID_NOW/com.maatwork.meetcapture.daemon" 2>/dev/null || true
-launchctl bootstrap "gui/$UID_NOW" "$DAEMON_PLIST_DST" 2>/tmp/meetcapture-bootstrap.log \
-    || launchctl load -w "$DAEMON_PLIST_DST" 2>/tmp/meetcapture-load.log \
-    || echo "Daemon load deferred (will load at next app launch)"
-launchctl kickstart -k "gui/$UID_NOW/com.maatwork.meetcapture.daemon" 2>/dev/null || true
-for i in $(seq 1 60); do
-    [ -S /tmp/meetcapture.sock ] && break
-    sleep 0.25
-done
-if [ -S /tmp/meetcapture.sock ]; then
-    echo "Daemon socket live: /tmp/meetcapture.sock"
-else
-    echo "WARNING: daemon socket not live yet. Check /tmp/meetcapture-daemon.log"
-fi
-echo "Done."

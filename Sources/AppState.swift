@@ -6,49 +6,85 @@ import Combine
 import UserNotifications
 import os
 
+// MARK: - Recording Origin
+
+/// Why this recording was started — controls auto-stop logic.
+enum RecordingOrigin: String, Codable, Equatable {
+    case manual    // User clicked Record — never auto-stopped
+    case liveCall  // CallDetector detected mic-in-use — auto-stop when call ends
+    case calendar  // Calendar meeting — auto-stop at endDate+grace, only if isCallActive
+}
+
+// MARK: - Retention Policy
+
+enum RetentionPolicy: String, CaseIterable, Codable {
+    case deleteAfterHandoff = "deleteAfterHandoff"
+    case keep24h = "24h"
+    case keep = "keep"
+
+    var label: String {
+        switch self {
+        case .deleteAfterHandoff: return "Delete after handoff"
+        case .keep24h: return "Keep 24 hours"
+        case .keep: return "Keep forever"
+        }
+    }
+}
+
+// MARK: - App Phase
+
+enum AppPhase: String, CaseIterable {
+    case idle          // Polling calendar, no meeting
+    case approaching   // Meeting in <5 min, preparing
+    case recording     // Actively capturing audio
+    case transcribing  // Meeting ended, processing
+    case done          // Transcript ready, notifying
+}
+
+// MARK: - AppState
+
 /// Central app state — single source of truth
 @MainActor
 final class AppState: ObservableObject {
     static var shared: AppState?
 
     private let logger = Logger(subsystem: "com.maatwork.meetcapture", category: "AppState")
-    
+
     // MARK: - Published State
-    
+
     @Published var phase: AppPhase = .idle
     @Published var currentMeeting: Meeting?
     @Published var errorMessage: String?
     @Published var hasCalendarAccess = false
     @Published var hasAudioPermission = false
-    @Published var isDaemonRunning = false
     @Published var recordingDuration: TimeInterval = 0
     @Published var transcriptionProgress: Double = 0
     @Published var lastTranscriptPath: String?
     @Published var liveTranscriptBuffer: String = ""
-    
+
     // MARK: - Services
-    
-    let calendarService = CalendarService()
-    let callDetector = CallDetector()
-    let audioCapture = AudioCaptureService()
-    let daemonManager = DaemonManager()
+
+    lazy var calendarService = CalendarService()
+    lazy var callDetector = CallDetector()
+    lazy var audioCapture = AudioCaptureService()
     let whisperManager = WhisperModelManager.shared
-    let socketClient = SocketClient()
-    let healthMonitor = HealthMonitor()
-    
+
     // MARK: - Private
-    
+
     private var recordingTimer: Timer?
     private var recordingStartDate: Date?
     private var cancellables = Set<AnyCancellable>()
     private let transcriptDir: String
+    private let pendingDir: String
     private var energyActivity: NSObjectProtocol?
     private var lastRecordingPath: String?
-    /// True only when the CURRENT recording was started automatically by live
-    /// call detection — so we auto-stop it when the call ends, but never
-    /// auto-stop a recording the user started by hand.
-    private var autoStartedRecording = false
-    
+    /// Why the *current* recording was started — drives auto-stop behavior.
+    private var recordingOrigin: RecordingOrigin?
+    /// Maximum recording duration in seconds (3 hours). Applied to all origins.
+    private let maxRecordingDuration: TimeInterval = 10_800
+    /// Grace period after a calendar meeting's endDate before auto-stopping (seconds).
+    private let calendarEndGrace: TimeInterval = 120  // 2 min
+
     // MARK: - Init
 
     // nonisolated because SwiftUI's @main App.init() runs before the
@@ -58,19 +94,26 @@ final class AppState: ObservableObject {
     // happen later, on the main actor.
     nonisolated init() {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
-        transcriptDir = "\(home)/.hermes/TechPartners/MaatWork/meetings/transcripts"
+        let base = "\(home)/.hermes/TechPartners/MaatWork/meetings"
+
+        // MEETCAPTURE_TEST_OUTPUT_DIR overrides all output paths for isolated testing.
+        if let testDir = ProcessInfo.processInfo.environment["MEETCAPTURE_TEST_OUTPUT_DIR"],
+           !testDir.isEmpty {
+            transcriptDir = testDir
+        } else {
+            transcriptDir = "\(base)/transcripts"
+        }
+        pendingDir = "\(base)/.pending"
 
         Task { @MainActor in
             AppState.shared = self
-            // Defer setupMethods (which are @MainActor-isolated) until
-            // the next main-actor tick.
             self.setupBindings()
             self.setupMeetingDetection()
         }
     }
-    
+
     // MARK: - Menu Bar
-    
+
     var menuBarTitle: String {
         switch phase {
         case .idle: return ""
@@ -80,7 +123,7 @@ final class AppState: ObservableObject {
         case .done: return ""
         }
     }
-    
+
     var menuBarIcon: String {
         switch phase {
         case .idle: return "mic"
@@ -90,7 +133,7 @@ final class AppState: ObservableObject {
         case .done: return "mic.badge.checkmark"
         }
     }
-    
+
     var menuBarColor: Color? {
         switch phase {
         case .recording: return .red
@@ -99,45 +142,34 @@ final class AppState: ObservableObject {
         default: return nil
         }
     }
-    
+
     // MARK: - Lifecycle
-    
+
     func startup() async {
-        let logger = Logger(subsystem: "com.maatwork.meetcapture", category: "appstate")
         logger.info("startup() called — initializing services")
 
         await requestPermissions()
         logger.info("Permissions: calendar=\(self.hasCalendarAccess) audio=\(self.hasAudioPermission)")
 
-        daemonManager.registerIfNeeded()
         requestNotificationPermission()
 
-        // Ping daemon to verify IPC and refresh status indicator
-        await refreshDaemonStatus()
-
-        healthMonitor.start(socketClient: socketClient, appState: self)
-
-        // Begin watching for live calls (auto-record). Cheap 4s poll; the
-        // auto-start path itself is gated on mic permission, so starting the
-        // watcher before the grant resolves is harmless.
+        // Begin watching for live calls
         callDetector.start()
 
         phase = .idle
 
+        // Launch cleanup for 24h retention
+        cleanupOldRecordings()
+
         // Test-only: MEETCAPTURE_SELFTEST_SECS=N records N seconds then stops
-        // (and transcribes) without any UI interaction. Never set in production;
-        // lets the harness exercise the real capture→transcript path headlessly.
         if let raw = ProcessInfo.processInfo.environment["MEETCAPTURE_SELFTEST_SECS"],
            let secs = Double(raw), secs > 0 {
             logger.warning("SELFTEST: recording \(secs)s")
             Task { @MainActor in
-                self.startRecording()
+                self.startRecording(origin: .manual)
                 try? await Task.sleep(nanoseconds: UInt64(secs * 1_000_000_000))
                 self.stopRecording()
 
-                // Headless harness mode: give transcription a bounded window to
-                // produce recording-*.txt, then exit so the shell script does not
-                // have to kill a still-recording menu-bar app.
                 let deadline = Date().addingTimeInterval(90)
                 while Date() < deadline {
                     if self.phase == .done || self.phase == .idle {
@@ -152,31 +184,6 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Ping the daemon via SocketClient. Updates `isDaemonRunning` accordingly.
-    /// Retries with backoff up to ~10s to handle the startup race where
-    /// launchctl loads the daemon AFTER the app has already started.
-    func refreshDaemonStatus() async {
-        var attempts = 0
-        let maxAttempts = 15
-        while attempts < maxAttempts {
-            do {
-                let resp = try await socketClient.send(command: "ping", timeout: 1.0)
-                if (resp["data"] as? [String: Any])?["pong"] as? Bool == true {
-                    isDaemonRunning = true
-                    return
-                }
-            } catch {
-                // ignore, will retry
-            }
-            attempts += 1
-            // 500ms, 750ms, 1s, 1.25s, ... up to 2s cap
-            let sleepMs = min(2000, 500 + attempts * 250)
-            try? await Task.sleep(nanoseconds: UInt64(sleepMs) * 1_000_000)
-        }
-        isDaemonRunning = false
-        logger.warning("Daemon not reachable after \(maxAttempts) attempts (~10s)")
-    }
-    
     func shutdown() {
         callDetector.stop()
         if phase == .recording {
@@ -184,29 +191,27 @@ final class AppState: ObservableObject {
         }
         endRecordingActivity()
     }
-    
+
     // MARK: - Permissions
-    
+
     private func requestPermissions() async {
         await calendarService.requestAccess()
         hasCalendarAccess = calendarService.isAuthorized
-        
+
         hasAudioPermission = audioCapture.checkPermission()
         if !hasAudioPermission {
-            // Update the UI once the user answers the prompt (otherwise the
-            // "Microphone access required" banner sticks until app restart).
             audioCapture.requestPermission { [weak self] granted in
                 self?.hasAudioPermission = granted
             }
         }
     }
-    
+
     private func requestNotificationPermission() {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
-    
+
     // MARK: - Meeting Detection
-    
+
     private func setupMeetingDetection() {
         calendarService.$upcomingMeetings
             .receive(on: DispatchQueue.main)
@@ -215,8 +220,6 @@ final class AppState: ObservableObject {
             }
             .store(in: &cancellables)
 
-        // Live-call detection: auto start/stop on real mic-in-use, independent of
-        // the calendar (covers ad-hoc calls). Honors the "autoRecord" setting.
         callDetector.$isCallActive
             .removeDuplicates()
             .receive(on: DispatchQueue.main)
@@ -226,22 +229,37 @@ final class AppState: ObservableObject {
             .store(in: &cancellables)
     }
 
+    /// Handle live-call detection events.
     private func handleCallActivity(_ active: Bool) {
         guard UserDefaults.standard.object(forKey: "autoRecord") as? Bool ?? true else { return }
+
         if active {
-            guard phase == .idle || phase == .approaching, hasAudioPermission else { return }
-            logger.info("Auto-starting recording — live call detected")
-            autoStartedRecording = true
-            startRecording()
-        } else if phase == .recording, autoStartedRecording {
-            logger.info("Auto-stopping recording — live call ended")
-            stopRecording()
+            // Call starting:
+            // 1. Idle → start with liveCall origin
+            // 2. Approaching with no recording yet (calendar didn't fire) → start with calendar origin
+            //    because the approaching meeting may have started. The calendar fires when isCallActive.
+            if phase == .idle {
+                guard hasAudioPermission else { return }
+                logger.info("Auto-starting recording — live call detected")
+                startRecording(origin: .liveCall)
+            } else if phase == .approaching {
+                guard hasAudioPermission else { return }
+                logger.info("Call active during approaching — starting calendar recording")
+                startRecording(origin: .calendar)
+            }
+        } else {
+            // Call ending: only stop if origin was .liveCall
+            if phase == .recording, recordingOrigin == .liveCall {
+                logger.info("Auto-stopping recording — live call ended")
+                stopRecording()
+            }
         }
     }
-    
+
     private func evaluateMeetings(_ meetings: [Meeting]) {
         guard phase == .idle || phase == .approaching else { return }
-        
+        guard UserDefaults.standard.object(forKey: "autoRecord") as? Bool ?? true else { return }
+
         if let next = meetings.first(where: { $0.timeUntilStart <= 300 && $0.timeUntilStart > -60 }) {
             if phase != .approaching {
                 phase = .approaching
@@ -250,19 +268,32 @@ final class AppState: ObservableObject {
             }
         }
     }
-    
+
     private func scheduleRecording(for meeting: Meeting) {
         let delay = max(0, meeting.timeUntilStart)
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self = self, self.phase == .approaching else { return }
-            self.startRecording()
+            // Re-check autoRecord at fire time — user may have toggled it off
+            guard UserDefaults.standard.object(forKey: "autoRecord") as? Bool ?? true else {
+                self.phase = .idle
+                self.currentMeeting = nil
+                return
+            }
+
+            // Only start recording if a call is actually active at fire time.
+            // If not, stay .approaching — handleCallActivity will start with
+            // origin .calendar when the mic goes live.
+            if self.callDetector.isCallActive {
+                self.startRecording(origin: .calendar)
+            }
+            // else: stay .approaching, handleCallActivity will promote when call starts
         }
     }
-    
+
     // MARK: - Recording Control
-    
-    func startRecording() {
-        // Don't start while already recording OR transcribing the previous one.
+
+    func startRecording(origin: RecordingOrigin = .manual) {
+        // Don't start while already recording OR transcribing
         guard phase != .recording, phase != .transcribing else { return }
 
         hasAudioPermission = audioCapture.checkPermission()
@@ -272,14 +303,9 @@ final class AppState: ObservableObject {
             return
         }
 
-        // Claim the recording phase SYNCHRONOUSLY, before the async Task. The
-        // capture itself starts inside the Task (after an await), so if we only
-        // flipped the phase there, a second concurrent caller — calendar-schedule
-        // + live-call auto-start + manual button can all fire close together —
-        // would pass the guard above and start a SECOND capture, leaking the
-        // first tap/aggregate/IOProc and corrupting the output file. Claiming it
-        // here closes that window; we revert to .idle if the capture fails.
+        // Claim the recording phase synchronously
         phase = .recording
+        recordingOrigin = origin
         let outputPath = "\(transcriptDir)/recording-\(Date().timeIntervalSince1970).pcm"
         lastRecordingPath = outputPath
         beginRecordingActivity()
@@ -295,16 +321,10 @@ final class AppState: ObservableObject {
 
                 recordingStartDate = Date()
                 startRecordingTimer()
-
-                // Tell daemon we are recording (fire-and-forget, for status/badge)
-                socketClient.sendFireAndForget(
-                    command: "start_recording",
-                    payload: ["meeting_title": currentMeeting?.title ?? "Manual recording"]
-                )
             } catch {
                 errorMessage = "Recording failed: \(error.localizedDescription)"
                 phase = .idle
-                autoStartedRecording = false   // don't leave a stale auto-stop armed
+                recordingOrigin = nil
                 endRecordingActivity()
             }
         }
@@ -313,7 +333,7 @@ final class AppState: ObservableObject {
     func stopRecording() {
         guard phase == .recording else { return }
 
-        autoStartedRecording = false   // manual or auto, this recording is done
+        recordingOrigin = nil
         phase = .transcribing
         transcriptionProgress = 0
         stopRecordingTimer()
@@ -324,7 +344,6 @@ final class AppState: ObservableObject {
             await audioCapture.stopCapture()
             endRecordingActivity()
             whisperManager.stopRecording()
-            socketClient.sendFireAndForget(command: "stop_recording")
 
             guard let recordedPath else {
                 errorMessage = "No recording path found."
@@ -332,40 +351,30 @@ final class AppState: ObservableObject {
                 return
             }
 
-            // The kill-shot fix: transcribe() was never called.
             await transcribe(audioPath: recordedPath)
         }
     }
-    
+
     // MARK: - Transcription
 
-    /// Stream-transcribe a PCM file in 30s chunks. Phase 3 fix: bounded RAM.
+    /// Stream-transcribe a PCM file in 30s chunks.
     private func transcribe(audioPath: String) async {
-        // WhisperTranscriber loads the model on demand; free it (and stop the
-        // memory-monitor timer) once we're done so an idle app doesn't sit on
-        // 150MB–1.4GB of model after every meeting.
         defer { whisperManager.stopRecording() }
         do {
             let outputPath = audioPath.replacingOccurrences(of: ".pcm", with: ".txt")
             let outputURL = URL(fileURLWithPath: outputPath)
-            let outputBase = audioPath.replacingOccurrences(of: ".pcm", with: "")
-            _ = outputBase
 
-            // Try streaming transcription first (Phase 3). Pass the actual
-            // capture rate so the transcriber resamples correctly (48k or 44.1k).
             let captureRate = audioCapture.currentSampleRate
             if let stream = WhisperTranscriber(audioPath: audioPath, sampleRate: captureRate, whisperManager: whisperManager) {
                 let progressStream = stream.progress
                 let textStream = stream.text
 
-                // Forward progress to @Published
                 Task { @MainActor in
                     for await p in progressStream {
                         self.transcriptionProgress = p
                     }
                 }
 
-                // Forward text chunks to @Published live buffer
                 Task { @MainActor in
                     for await chunk in textStream {
                         self.appendLiveTranscript(chunk)
@@ -375,15 +384,39 @@ final class AppState: ObservableObject {
                 let finalText = try await stream.run()
                 try finalText.write(to: outputURL, atomically: true, encoding: .utf8)
             } else {
-                // Fallback: file missing, log and bail
                 throw WhisperError.transcriptionFailed(reason: "Could not open \(audioPath)")
             }
 
             lastTranscriptPath = outputPath
+
+            // Read transcript content for .pending contract
+            let transcriptContent = try String(contentsOf: outputURL, encoding: .utf8)
+            let meetingTitle = currentMeeting?.title
+
+            // --- Critical path: write .pending contract (throws on failure) ---
+            // This must succeed before we delete anything.
+            try await writePendingContract(
+                transcriptPath: outputPath,
+                transcriptContent: transcriptContent,
+                meetingTitle: meetingTitle,
+                audioPath: audioPath
+            )
+
+            // --- Write processed marker (no audio path — audio may be deleted) ---
+            writeProcessedMarker(transcriptPath: outputPath, meetingTitle: meetingTitle)
+
+            // --- Apply retention after durable handoff ---
+            await applyRetention(audioPath: audioPath, transcriptPath: outputPath)
+
             liveTranscriptBuffer = ""
             transcriptionProgress = 1.0
             phase = .done
-            notifyHermes(transcriptPath: outputPath, meetingTitle: currentMeeting?.title)
+
+            // --- Local notification (gated by notifyHermes) ---
+            let showNotification = UserDefaults.standard.object(forKey: "notifyHermes") as? Bool ?? true
+            if showNotification {
+                await sendLocalNotification(title: meetingTitle ?? "Google Meet")
+            }
 
             DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
                 self?.phase = .idle
@@ -396,12 +429,35 @@ final class AppState: ObservableObject {
         }
     }
 
+    // MARK: - Max Duration Enforcement
+
+    private func checkMaxDuration() {
+        guard self.phase == .recording, let start = self.recordingStartDate else { return }
+        let elapsed = Date().timeIntervalSince(start)
+        if elapsed >= self.maxRecordingDuration {
+            self.logger.info("Max recording duration reached (\(Int(self.maxRecordingDuration))s) — auto-stopping")
+            self.stopRecording()
+        }
+    }
+
+    // MARK: - Meeting End Detection
+
+    /// Check if the current calendar meeting has ended. Only applies to .calendar origin.
+    func checkMeetingEnd() {
+        guard self.phase == .recording, self.recordingOrigin == .calendar, let meeting = self.currentMeeting else { return }
+        let graceEnd = meeting.endDate.addingTimeInterval(self.calendarEndGrace)
+        if Date() > graceEnd {
+            self.logger.info("Calendar meeting ended (grace elapsed) — auto-stopping recording")
+            self.stopRecording()
+        }
+    }
+
     /// Append incremental text from streaming whisper to the live buffer.
     func appendLiveTranscript(_ chunk: String) {
         liveTranscriptBuffer += chunk + " "
     }
-    
-    // MARK: - Energy Management (inline from EnergyManager)
+
+    // MARK: - Energy Management
 
     private func beginRecordingActivity() {
         guard energyActivity == nil else { return }
@@ -415,6 +471,156 @@ final class AppState: ObservableObject {
         if let activity = energyActivity {
             ProcessInfo.processInfo.endActivity(activity)
             energyActivity = nil
+        }
+    }
+
+    // MARK: - .pending Handoff Contract
+
+    /// Writes the canonical .pending contract consumed by HerMaatOS/scripts/meet_summary_dispatcher.py.
+    /// - Throws: on write failure — caller MUST NOT delete audio if this throws.
+    private func writePendingContract(transcriptPath: String, transcriptContent: String, meetingTitle: String?, audioPath: String) async throws {
+        let fm = FileManager.default
+        try fm.createDirectory(atPath: pendingDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+
+        // meeting_id: deterministic/idempotent — uses eventIdentifier for calendar, path hash for others
+        let meetingID: String
+        if let mid = currentMeeting?.id {
+            meetingID = "meet-\(mid)"
+        } else {
+            // Stable ID from the audio path's timestamp portion
+            let baseName = (audioPath as NSString).lastPathComponent
+                .replacingOccurrences(of: ".pcm", with: "")
+            meetingID = "rec-\(baseName)"
+        }
+
+        let created = ISO8601DateFormatter().string(from: Date())
+
+        // Canonical contract — no audio path (audio will be deleted)
+        let contract: [String: Any] = [
+            "type": "meeting.processed",
+            "state": "transcribed",
+            "meeting_id": meetingID,
+            "transcript": transcriptContent,
+            "title": meetingTitle ?? "Untitled Meeting",
+            "source": "meetcapture",
+            "created": created,
+            "metadata": [
+                "transcript_path": transcriptPath,
+                "app_version": "4.4.0"
+            ]
+        ]
+
+        let data = try JSONSerialization.data(withJSONObject: contract, options: [.prettyPrinted, .sortedKeys])
+        let pendingPath = "\(pendingDir)/\(meetingID).pending"
+        try data.write(to: URL(fileURLWithPath: pendingPath), options: .atomic)
+
+        logger.info("Pending handoff written: \(pendingPath)")
+    }
+
+    // MARK: - Retention
+
+    /// Apply the configured retention policy for the recording.
+    private func applyRetention(audioPath: String, transcriptPath: String) async {
+        let policy = UserDefaults.standard.string(forKey: "retention") ?? RetentionPolicy.deleteAfterHandoff.rawValue
+        switch policy {
+        case RetentionPolicy.deleteAfterHandoff.rawValue:
+            deleteRawPCM(at: audioPath)
+        case RetentionPolicy.keep24h.rawValue:
+            // Audio stays for now; periodic cleanup at startup handles it.
+            // We keep the audio until the next launch's cleanup pass.
+            break
+        case RetentionPolicy.keep.rawValue:
+            break
+        default:
+            deleteRawPCM(at: audioPath)
+        }
+    }
+
+    /// Deletes the raw PCM file.
+    private func deleteRawPCM(at path: String) {
+        let url = URL(fileURLWithPath: path)
+        guard FileManager.default.fileExists(atPath: path) else { return }
+        do {
+            try FileManager.default.removeItem(at: url)
+            logger.info("Deleted raw PCM (retention): \(path)")
+        } catch {
+            logger.warning("Could not delete raw PCM \(path): \(error.localizedDescription)")
+        }
+    }
+
+    /// Periodic cleanup for 24h retention: scan recording files by exact path and age at launch.
+    /// Never uses a destructive glob — iterates known files, checks age, deletes individually.
+    private func cleanupOldRecordings() {
+        let policy = UserDefaults.standard.string(forKey: "retention") ?? RetentionPolicy.deleteAfterHandoff.rawValue
+        guard policy == RetentionPolicy.keep24h.rawValue else { return }
+
+        let fm = FileManager.default
+        let cutoff = Date().addingTimeInterval(-86_400) // 24 hours ago
+
+        do {
+            let contents = try fm.contentsOfDirectory(atPath: transcriptDir)
+            for name in contents {
+                let path = "\(transcriptDir)/\(name)"
+                guard name.hasPrefix("recording-"),
+                      (name.hasSuffix(".pcm") || name.hasSuffix(".txt") || name.hasSuffix(".json")) else { continue }
+
+                var isDir: ObjCBool = false
+                guard fm.fileExists(atPath: path, isDirectory: &isDir), !isDir.boolValue else { continue }
+
+                let attrs = try fm.attributesOfItem(atPath: path)
+                if let modDate = attrs[.modificationDate] as? Date, modDate < cutoff {
+                    try fm.removeItem(atPath: path)
+                    logger.info("Cleaned up old recording (24h): \(path)")
+                }
+            }
+        } catch {
+            logger.warning("Cleanup scan failed: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Processed Marker (atomic, idempotent)
+
+    /// Writes a `.processed.json` marker BEFORE cleanup so the marker never points to a deleted file.
+    private func writeProcessedMarker(transcriptPath: String, meetingTitle: String?) {
+        let markerPath = transcriptPath.replacingOccurrences(of: ".txt", with: ".processed.json")
+        guard !FileManager.default.fileExists(atPath: markerPath) else {
+            logger.info("Processed marker already exists, skipping: \(markerPath)")
+            return
+        }
+
+        let marker: [String: Any] = [
+            "schema": "meetcapture.processed.v1",
+            "processed_at": ISO8601DateFormatter().string(from: Date()),
+            "transcript_path": transcriptPath,
+            "meeting_title": meetingTitle ?? "Untitled Meeting",
+            "retention": "handoff_complete"
+        ]
+
+        do {
+            let data = try JSONSerialization.data(withJSONObject: marker, options: [.prettyPrinted, .sortedKeys])
+            try data.write(to: URL(fileURLWithPath: markerPath), options: .atomic)
+            logger.info("Processed marker written: \(markerPath)")
+        } catch {
+            logger.error("Failed to write processed marker: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Local Notification
+
+    private func sendLocalNotification(title: String) async {
+        let content = UNMutableNotificationContent()
+        content.title = "MeetCapture"
+        content.body = "Meeting transcript ready: \(title)"
+        content.sound = UNNotificationSound.default
+        let request = UNNotificationRequest(
+            identifier: UUID().uuidString,
+            content: content,
+            trigger: nil
+        )
+        do {
+            try await UNUserNotificationCenter.current().add(request)
+        } catch {
+            logger.warning("Failed to show notification: \(error.localizedDescription)")
         }
     }
 
@@ -436,6 +642,8 @@ final class AppState: ObservableObject {
             Task { @MainActor in
                 guard let self = self, let start = self.recordingStartDate else { return }
                 self.recordingDuration = Date().timeIntervalSince(start)
+                self.checkMaxDuration()
+                self.checkMeetingEnd()
             }
         }
     }
@@ -444,31 +652,4 @@ final class AppState: ObservableObject {
         recordingTimer?.invalidate()
         recordingTimer = nil
     }
-
-    private func notifyHermes(transcriptPath: String, meetingTitle: String?) {
-        let title = meetingTitle ?? "Google Meet"
-        let notificationText = "Meeting transcript ready: \(title)"
-
-        let content = UNMutableNotificationContent()
-        content.title = "MeetCapture"
-        content.body = notificationText
-        content.sound = UNNotificationSound.default
-
-        let request = UNNotificationRequest(
-            identifier: UUID().uuidString,
-            content: content,
-            trigger: nil
-        )
-        UNUserNotificationCenter.current().add(request)
-    }
-}
-
-// MARK: - App Phase
-
-enum AppPhase: String, CaseIterable {
-    case idle          // Polling calendar, no meeting
-    case approaching   // Meeting in <5 min, preparing
-    case recording     // Actively capturing audio
-    case transcribing  // Meeting ended, processing
-    case done          // Transcript ready, notifying
 }

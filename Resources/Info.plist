@@ -11,9 +11,9 @@
     <key>CFBundleDisplayName</key>
     <string>MeetCapture</string>
     <key>CFBundleVersion</key>
-    <string>4.3.0</string>
+    <string>4.4.0</string>
     <key>CFBundleShortVersionString</key>
-    <string>4.3.0</string>
+    <string>4.4.0</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleExecutable</key>
@@ -50,16 +50,6 @@
 
     <key>NSCalendarsFullAccessUsageDescription</key>
     <string>MeetCapture needs calendar access to detect upcoming meetings with external attendees.</string>
-
-    <!-- Sparkle update feed (when enabled) -->
-    <!--
-    <key>SUPublicEDKey</key>
-    <string>YOUR_EDDSA_PUBLIC_KEY_HERE</string>
-    <key>SUFeedURL</key>
-    <string>https://Gigisanta.github.io/MeetCapture/appcast.xml</string>
-    <key>SUScheduledCheckInterval</key>
-    <integer>86400</integer>
-    -->
 
     <!-- High resolution support -->
     <key>NSHighResolutionCapable</key>
