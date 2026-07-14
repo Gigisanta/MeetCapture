@@ -75,13 +75,16 @@ final class AppState: ObservableObject {
     private var recordingStartDate: Date?
     private var cancellables = Set<AnyCancellable>()
     private let transcriptDir: String
-    private let pendingDir: String
+    private let pendingPath: String
     private var energyActivity: NSObjectProtocol?
     private var lastRecordingPath: String?
     /// Why the *current* recording was started — drives auto-stop behavior.
     private var recordingOrigin: RecordingOrigin?
-    /// Maximum recording duration in seconds (3 hours). Applied to all origins.
-    private let maxRecordingDuration: TimeInterval = 10_800
+    /// Safety limit for every recording origin. User-configurable, clamped to 30m…8h.
+    private var maxRecordingDuration: TimeInterval {
+        let configured = UserDefaults.standard.double(forKey: "maxRecordingDuration")
+        return min(max(configured > 0 ? configured : 10_800, 1_800), 28_800)
+    }
     /// Grace period after a calendar meeting's endDate before auto-stopping (seconds).
     private let calendarEndGrace: TimeInterval = 120  // 2 min
 
@@ -100,10 +103,11 @@ final class AppState: ObservableObject {
         if let testDir = ProcessInfo.processInfo.environment["MEETCAPTURE_TEST_OUTPUT_DIR"],
            !testDir.isEmpty {
             transcriptDir = testDir
+            pendingPath = "\(testDir)/.pending"
         } else {
             transcriptDir = "\(base)/transcripts"
+            pendingPath = "\(base)/.pending"
         }
-        pendingDir = "\(base)/.pending"
 
         Task { @MainActor in
             AppState.shared = self
@@ -154,6 +158,7 @@ final class AppState: ObservableObject {
         requestNotificationPermission()
 
         // Begin watching for live calls
+        audioCapture.callDetector = callDetector
         callDetector.start()
 
         phase = .idle
@@ -201,7 +206,7 @@ final class AppState: ObservableObject {
         hasAudioPermission = audioCapture.checkPermission()
         if !hasAudioPermission {
             audioCapture.requestPermission { [weak self] granted in
-                self?.hasAudioPermission = granted
+                Task { @MainActor in self?.hasAudioPermission = granted }
             }
         }
     }
@@ -480,7 +485,12 @@ final class AppState: ObservableObject {
     /// - Throws: on write failure — caller MUST NOT delete audio if this throws.
     private func writePendingContract(transcriptPath: String, transcriptContent: String, meetingTitle: String?, audioPath: String) async throws {
         let fm = FileManager.default
-        try fm.createDirectory(atPath: pendingDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let pendingURL = URL(fileURLWithPath: pendingPath)
+        try fm.createDirectory(
+            at: pendingURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
 
         // meeting_id: deterministic/idempotent — uses eventIdentifier for calendar, path hash for others
         let meetingID: String
@@ -500,21 +510,21 @@ final class AppState: ObservableObject {
             "type": "meeting.processed",
             "state": "transcribed",
             "meeting_id": meetingID,
-            "transcript": transcriptContent,
+            "transcript": transcriptPath,
             "title": meetingTitle ?? "Untitled Meeting",
             "source": "meetcapture",
             "created": created,
             "metadata": [
                 "transcript_path": transcriptPath,
-                "app_version": "4.4.0"
+                "transcript_characters": transcriptContent.count,
+                "app_version": "5.0.0"
             ]
         ]
 
         let data = try JSONSerialization.data(withJSONObject: contract, options: [.prettyPrinted, .sortedKeys])
-        let pendingPath = "\(pendingDir)/\(meetingID).pending"
-        try data.write(to: URL(fileURLWithPath: pendingPath), options: .atomic)
+        try data.write(to: pendingURL, options: .atomic)
 
-        logger.info("Pending handoff written: \(pendingPath)")
+        logger.info("Pending handoff written: \(self.pendingPath)")
     }
 
     // MARK: - Retention
@@ -536,15 +546,16 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Deletes the raw PCM file.
+    /// Deletes only the exact raw PCM and its exact format sidecar.
     private func deleteRawPCM(at path: String) {
-        let url = URL(fileURLWithPath: path)
-        guard FileManager.default.fileExists(atPath: path) else { return }
-        do {
-            try FileManager.default.removeItem(at: url)
-            logger.info("Deleted raw PCM (retention): \(path)")
-        } catch {
-            logger.warning("Could not delete raw PCM \(path): \(error.localizedDescription)")
+        for candidate in [path, path + ".format.json"] {
+            guard FileManager.default.fileExists(atPath: candidate) else { continue }
+            do {
+                try FileManager.default.removeItem(atPath: candidate)
+                logger.info("Deleted raw audio artifact (retention): \(candidate)")
+            } catch {
+                logger.warning("Could not delete raw artifact \(candidate): \(error.localizedDescription)")
+            }
         }
     }
 
@@ -562,7 +573,7 @@ final class AppState: ObservableObject {
             for name in contents {
                 let path = "\(transcriptDir)/\(name)"
                 guard name.hasPrefix("recording-"),
-                      (name.hasSuffix(".pcm") || name.hasSuffix(".txt") || name.hasSuffix(".json")) else { continue }
+                      (name.hasSuffix(".pcm") || name.hasSuffix(".pcm.format.json")) else { continue }
 
                 var isDir: ObjCBool = false
                 guard fm.fileExists(atPath: path, isDirectory: &isDir), !isDir.boolValue else { continue }

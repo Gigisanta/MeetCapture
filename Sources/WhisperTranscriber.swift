@@ -209,9 +209,11 @@ final class WhisperTranscriber: @unchecked Sendable {
     progressContinuation.yield(1.0)
 
     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-    if !trimmed.isEmpty {
-      textContinuation.yield(trimmed)
+    guard !trimmed.isEmpty else {
+      throw WhisperError.transcriptionFailed(
+        reason: "No speech was recognized; raw audio was preserved for retry")
     }
+    textContinuation.yield(trimmed)
     return Self.dedupRepeats(trimmed)
   }
 
@@ -227,141 +229,128 @@ final class WhisperTranscriber: @unchecked Sendable {
     defer { try? handle.close() }
 
     let fileSize = try FileManager.default.attributesOfItem(atPath: inputPath)[.size] as? Int ?? 0
+    let inFrameBytes = inputFormat == .float32Mono ? 4 : inputChannels * 2
+    let audioDurationSec =
+      inputSampleRate > 0 ? Double(fileSize / inFrameBytes) / Double(inputSampleRate) : 0
 
-    // Compute output WAV sample count
-    let inFrameBytes: Int
-    let outSampleCount: Int
-    switch inputFormat {
-    case .float32Mono:
-      inFrameBytes = 4
-      let inFrames = fileSize / inFrameBytes
-      let ratio = Double(inputSampleRate) / Double(Self.targetSampleRate)
-      outSampleCount = ratio > 0 ? Int(Double(inFrames) / ratio) : 0
-    case .int16Stereo:
-      inFrameBytes = inputChannels * 2
-      let inFrames = fileSize / inFrameBytes
-      // Int16 stereo at 16kHz → mono 16kHz: same frame count
-      outSampleCount = inFrames
+    func wavHeader(dataSize: UInt32) -> Data {
+      let byteRate = UInt32(Self.targetSampleRate) * 2
+      let chunkSize = 36 + dataSize
+      var header = Data()
+      header.append("RIFF".data(using: .ascii)!)
+      header.append(contentsOf: withUnsafeBytes(of: chunkSize.littleEndian) { Data($0) })
+      header.append("WAVEfmt ".data(using: .ascii)!)
+      header.append(contentsOf: withUnsafeBytes(of: UInt32(16).littleEndian) { Data($0) })
+      header.append(contentsOf: withUnsafeBytes(of: UInt16(1).littleEndian) { Data($0) })
+      header.append(contentsOf: withUnsafeBytes(of: UInt16(1).littleEndian) { Data($0) })
+      header.append(
+        contentsOf: withUnsafeBytes(of: UInt32(Self.targetSampleRate).littleEndian) { Data($0) })
+      header.append(contentsOf: withUnsafeBytes(of: byteRate.littleEndian) { Data($0) })
+      header.append(contentsOf: withUnsafeBytes(of: UInt16(2).littleEndian) { Data($0) })
+      header.append(contentsOf: withUnsafeBytes(of: UInt16(16).littleEndian) { Data($0) })
+      header.append("data".data(using: .ascii)!)
+      header.append(contentsOf: withUnsafeBytes(of: dataSize.littleEndian) { Data($0) })
+      return header
     }
 
-    // Pre-compute duration for timeout calculation
-    let audioDurationSec: Double =
-      inputSampleRate > 0
-      ? Double(fileSize / inFrameBytes) / Double(inputSampleRate)
-      : 0
+    func writeSamples(_ samples: [Int16], to output: FileHandle) throws {
+      guard !samples.isEmpty else { return }
+      let data = samples.withUnsafeBytes { Data($0) }
+      try output.write(contentsOf: data)
+    }
 
-    // Open output file and write WAV header (with known data size)
+    // Header is finalized after streaming so its data length always matches bytes written.
     FileManager.default.createFile(atPath: outputURL.path, contents: nil)
     let outHandle = try FileHandle(forWritingTo: outputURL)
     defer { try? outHandle.close() }
+    try outHandle.write(contentsOf: wavHeader(dataSize: 0))
 
-    // Write 16-bit mono WAV header
-    let byteRate = UInt32(Self.targetSampleRate) * 2  // 16-bit mono = 2 B/sample
-    let dataSize = UInt32(outSampleCount * 2)
-    let chunkSize = 36 + dataSize
-
-    var header = Data()
-    header.append("RIFF".data(using: .ascii)!)
-    header.append(contentsOf: withUnsafeBytes(of: chunkSize.littleEndian) { Data($0) })
-    header.append("WAVE".data(using: .ascii)!)
-    header.append("fmt ".data(using: .ascii)!)
-    header.append(contentsOf: withUnsafeBytes(of: UInt32(16).littleEndian) { Data($0) })
-    header.append(contentsOf: withUnsafeBytes(of: UInt16(1).littleEndian) { Data($0) })  // PCM
-    header.append(contentsOf: withUnsafeBytes(of: UInt16(1).littleEndian) { Data($0) })  // mono
-    header.append(
-      contentsOf: withUnsafeBytes(of: UInt32(Self.targetSampleRate).littleEndian) { Data($0) })
-    header.append(contentsOf: withUnsafeBytes(of: byteRate.littleEndian) { Data($0) })
-    header.append(contentsOf: withUnsafeBytes(of: UInt16(2).littleEndian) { Data($0) })  // block align
-    header.append(contentsOf: withUnsafeBytes(of: UInt16(16).littleEndian) { Data($0) })  // bits per sample
-    header.append("data".data(using: .ascii)!)
-    header.append(contentsOf: withUnsafeBytes(of: dataSize.littleEndian) { Data($0) })
-    try outHandle.write(contentsOf: header)
-
-    // Stream through file in chunks, convert, append to WAV
-    let chunkBytes = 64 * 1024  // 64 KB per iteration
-    var sampleBuf = [Int16](repeating: 0, count: outSampleCount)
+    let chunkBytes = 64 * 1024
     var samplesWritten = 0
 
     switch inputFormat {
     case .float32Mono:
       let ratio = Double(inputSampleRate) / Double(Self.targetSampleRate)
-      var globalPos: Double = 0
+      guard ratio > 0 else {
+        throw WhisperError.transcriptionFailed(reason: "Invalid input sample rate")
+      }
+      var pending: [Float] = []
+      var sourcePosition = 0.0
 
       while true {
         try Task.checkCancellation()
         let chunk = try handle.read(upToCount: chunkBytes) ?? Data()
         if chunk.isEmpty { break }
-
-        let inFrames = chunk.count / 4
-        chunk.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
-          let floats = raw.bindMemory(to: Float.self)
-          for i in 0..<inFrames {
-            let srcGlobal = globalPos + Double(i)
-            let outIdx = Int(srcGlobal / ratio)
-            if outIdx >= outSampleCount { break }
-            // Linear interpolation on global positions
-            let p = Double(i) + globalPos
-            let i0 = Int(p)
-            let frac = Float(p - Double(i0))
-            let a = floats[min(i0, inFrames - 1)]
-            let b = floats[min(i0 + 1, inFrames - 1)]
-            let v = a + (b - a) * frac
-            let clamped = max(-1.0, min(1.0, v))
-            sampleBuf[outIdx] = Int16(clamped * 32767.0)
+        let decoded: [Float] = chunk.withUnsafeBytes { raw in
+          let count = raw.count / 4
+          return (0..<count).map { index in
+            let bits = UInt32(littleEndian: raw.loadUnaligned(fromByteOffset: index * 4, as: UInt32.self))
+            return Float(bitPattern: bits)
           }
         }
-        globalPos += Double(inFrames)
+        pending.append(contentsOf: decoded)
+        var output: [Int16] = []
+        output.reserveCapacity(Int(Double(decoded.count) / ratio) + 2)
 
-        // Flush completed samples to disk every chunk
-        let completedSamples = min(Int(globalPos / ratio), outSampleCount)
-        if completedSamples > samplesWritten {
-          let slice = Data(
-            bytes: &sampleBuf[samplesWritten],
-            count: (completedSamples - samplesWritten) * 2)
-          try outHandle.write(contentsOf: slice)
-          samplesWritten = completedSamples
+        while sourcePosition + 1 < Double(pending.count) {
+          let lower = Int(sourcePosition)
+          let fraction = Float(sourcePosition - Double(lower))
+          let value = pending[lower] + (pending[lower + 1] - pending[lower]) * fraction
+          output.append(Int16(max(-1, min(1, value)) * 32767))
+          sourcePosition += ratio
         }
+
+        let consumed = min(Int(sourcePosition), max(0, pending.count - 1))
+        if consumed > 0 {
+          pending.removeFirst(consumed)
+          sourcePosition -= Double(consumed)
+        }
+        try writeSamples(output, to: outHandle)
+        samplesWritten += output.count
       }
 
     case .int16Stereo:
-      // Int16 stereo 16kHz → mono 16kHz: just average pairs
+      var remainder = Data()
       while true {
         try Task.checkCancellation()
-        let chunk = try handle.read(upToCount: chunkBytes) ?? Data()
-        if chunk.isEmpty { break }
-
-        let frames = chunk.count / (inputChannels * 2)
-        chunk.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
-          let samples = raw.bindMemory(to: Int16.self)
-          for i in 0..<frames {
-            let idx = samplesWritten + i
-            if idx >= outSampleCount { break }
-            let l = Int32(samples[i * inputChannels])
-            let r = inputChannels > 1 ? Int32(samples[i * inputChannels + 1]) : l
-            sampleBuf[idx] = Int16(clamping: (l + r) / 2)
+        let next = try handle.read(upToCount: chunkBytes) ?? Data()
+        if next.isEmpty && remainder.isEmpty { break }
+        remainder.append(next)
+        let frameBytes = inputChannels * 2
+        let frames = remainder.count / frameBytes
+        var output = [Int16]()
+        output.reserveCapacity(frames)
+        remainder.withUnsafeBytes { raw in
+          for frame in 0..<frames {
+            let offset = frame * frameBytes
+            let left = Int32(Int16(littleEndian: raw.loadUnaligned(fromByteOffset: offset, as: Int16.self)))
+            let right: Int32
+            if inputChannels > 1 {
+              right = Int32(
+                Int16(littleEndian: raw.loadUnaligned(fromByteOffset: offset + 2, as: Int16.self)))
+            } else {
+              right = left
+            }
+            output.append(Int16(clamping: (left + right) / 2))
           }
         }
-
-        if samplesWritten + frames <= outSampleCount {
-          let slice = Data(
-            bytes: &sampleBuf[samplesWritten],
-            count: frames * 2)
-          try outHandle.write(contentsOf: slice)
-          samplesWritten += frames
-        }
+        try writeSamples(output, to: outHandle)
+        samplesWritten += output.count
+        remainder.removeFirst(frames * frameBytes)
+        if next.isEmpty { break }
       }
     }
 
-    // Write any remaining samples
-    if samplesWritten < outSampleCount {
-      let remaining = outSampleCount - samplesWritten
-      let slice = Data(bytes: &sampleBuf[samplesWritten], count: remaining * 2)
-      try outHandle.write(contentsOf: slice)
+    guard samplesWritten <= Int(UInt32.max / 2) else {
+      throw WhisperError.transcriptionFailed(reason: "Audio exceeds WAV size limit")
     }
-
+    let dataSize = UInt32(samplesWritten * 2)
+    try outHandle.seek(toOffset: 0)
+    try outHandle.write(contentsOf: wavHeader(dataSize: dataSize))
+    try outHandle.truncate(atOffset: UInt64(44) + UInt64(dataSize))
     try outHandle.synchronize()
     logger.debug(
-      "Streamed WAV: \(outSampleCount) samples, \(audioDurationSec, privacy: .public)s audio")
+      "Streamed WAV: \(samplesWritten) samples, \(audioDurationSec, privacy: .public)s audio")
   }
 
   // MARK: - Chunked Mode (legacy)

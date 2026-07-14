@@ -10,6 +10,7 @@ struct SettingsView: View {
     @AppStorage("notifyHermes") private var notifyHermes = true
     @AppStorage("transcriptDir") private var transcriptDir = ""
     @AppStorage("retention") private var retention = RetentionPolicy.deleteAfterHandoff.rawValue
+    @AppStorage("maxRecordingDuration") private var maxRecordingDuration = 10_800.0
 
     var body: some View {
         TabView {
@@ -49,6 +50,14 @@ struct SettingsView: View {
             Text("Controls how long raw audio is kept after transcription. 'Delete after handoff' removes it immediately. 'Keep 24h' defers cleanup to the next launch. 'Keep forever' preserves everything.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+
+            Picker("Maximum recording", selection: $maxRecordingDuration) {
+                Text("1 hour").tag(3_600.0)
+                Text("2 hours").tag(7_200.0)
+                Text("3 hours").tag(10_800.0)
+                Text("4 hours").tag(14_400.0)
+                Text("8 hours").tag(28_800.0)
+            }
         }
         .padding()
     }
@@ -61,10 +70,10 @@ struct SettingsView: View {
                 Text("tiny (75MB, fastest)").tag("tiny")
                 Text("base (142MB, fast — safe on 8GB)").tag("base")
                 Text("small (461MB, balanced)").tag("small")
-                Text("medium (1.4GB, high accuracy)").tag("medium")
+                Text("medium Q5 (527MB, recommended Spanish)").tag("medium")
                 Text("large-v3-turbo (1.6GB, best)").tag("large-v3-turbo")
             }
-            Text("Auto-downgrades if free RAM is low. Undownloaded models fall back to the best available.")
+            Text("Prefers local Q5 quantized models for lower memory and equal practical quality; falls back safely when unavailable.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
 
@@ -81,7 +90,7 @@ struct SettingsView: View {
             if !appState.hasAudioPermission {
                 Button("Grant Permission") {
                     appState.audioCapture.requestPermission { granted in
-                        appState.hasAudioPermission = granted
+                        Task { @MainActor in appState.hasAudioPermission = granted }
                     }
                 }
             }
@@ -133,7 +142,7 @@ struct SettingsView: View {
             Text("MeetCapture")
                 .font(.title2)
 
-            Text("v4.4.0")
+            Text("v5.0.0")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 

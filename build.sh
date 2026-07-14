@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build MeetCapture v4 — Swift native menu bar app
+# Build MeetCapture v5 — Swift native menu bar app
 # Usage: ./build.sh [--help] [--staging] [--staging-dir <path>] [--install-to <path>] [--sign <identity>] [--with-turbo] [--rollback]
 set -e
 
@@ -20,7 +20,7 @@ STAGING_DIR=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --help)
-            echo "MeetCapture v4 Build Script"
+            echo "MeetCapture v5 Build Script"
             echo ""
             echo "Usage: ./build.sh [options] [<dest-path>]"
             echo ""
@@ -83,7 +83,7 @@ elif [ "$STAGING" = true ]; then
     APP_BUNDLE="/tmp/MeetCapture.app"
 fi
 
-echo "Building $APP_NAME v4..."
+echo "Building $APP_NAME v5..."
 echo "  Sources:  $REPO_DIR/Sources"
 echo "  Output:   $DEST"
 echo "  Staging:  $STAGING"
