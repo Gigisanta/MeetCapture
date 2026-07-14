@@ -8,6 +8,29 @@ import AppKit
 
 // MARK: - Whisper Model Size
 
+// MARK: - Quantization Level
+
+/// Whisper.cpp model quantization variants.
+/// Q5 (5-bit) offers near-identical accuracy to f16 at ~50% smaller footprint.
+enum WhisperQuant: String, CaseIterable {
+    /// Float16 — reference quality, largest file
+    case f16    = "f16"
+    /// Q5_1 — 5-bit asymmetric quantisation, recommended variant
+    case q5_1   = "q5_1"
+    /// Q5_0 — 5-bit symmetric quantisation, slightly lower quality
+    case q5_0   = "q5_0"
+
+    var filenameSuffix: String {
+        switch self {
+        case .f16:  return ".bin"
+        case .q5_1: return "-q5_1.bin"
+        case .q5_0: return "-q5_0.bin"
+        }
+    }
+}
+
+// MARK: - Whisper Model Size
+
 enum WhisperModelSize: String, CaseIterable, Identifiable {
     case tiny    = "tiny"
     case base    = "base"
@@ -29,11 +52,22 @@ enum WhisperModelSize: String, CaseIterable, Identifiable {
         }
     }
 
-    var filename: String {
+    /// Base filename stem (no quantization suffix).
+    var filenameStem: String {
         switch self {
-        case .largeV3Turbo: return "ggml-large-v3-turbo.bin"
-        default:            return "ggml-\(rawValue).bin"
+        case .largeV3Turbo: return "ggml-large-v3-turbo"
+        default:            return "ggml-\(rawValue)"
         }
+    }
+
+    /// Default filename (f16 / no quant suffix).
+    var filename: String {
+        filenameStem + ".bin"
+    }
+
+    /// Path for a specific quantization variant.
+    func filename(quant: WhisperQuant) -> String {
+        filenameStem + quant.filenameSuffix
     }
 }
 
@@ -197,10 +231,27 @@ final class WhisperModelManager {
     // MARK: - Model Management
 
     func isModelDownloaded(_ model: WhisperModelSize) -> Bool {
-        let path = modelsDirectory.appendingPathComponent(model.filename).path
-        return FileManager.default.fileExists(atPath: path)
+        let q5Path1 = modelsDirectory.appendingPathComponent(model.filename(quant: .q5_1)).path
+        let q5Path0 = modelsDirectory.appendingPathComponent(model.filename(quant: .q5_0)).path
+        let f16Path = modelsDirectory.appendingPathComponent(model.filename).path
+        return FileManager.default.fileExists(atPath: q5Path1)
+            || FileManager.default.fileExists(atPath: q5Path0)
+            || FileManager.default.fileExists(atPath: f16Path)
     }
 
+    /// Returns the path to the best available variant of `model`.
+    /// Preference: Q5_1 > Q5_0 > Float16 (vanilla).
+    func bestModelURL(for model: WhisperModelSize) -> URL {
+        let q5_1Path = modelsDirectory.appendingPathComponent(model.filename(quant: .q5_1))
+        let q5_0Path = modelsDirectory.appendingPathComponent(model.filename(quant: .q5_0))
+        let f16Path  = modelsDirectory.appendingPathComponent(model.filename)
+        if FileManager.default.fileExists(atPath: q5_1Path.path) { return q5_1Path }
+        if FileManager.default.fileExists(atPath: q5_0Path.path) { return q5_0Path }
+        return f16Path
+    }
+
+    /// Legacy: returns the f16 URL unconditionally (backward compat for callers
+    /// that specifically want the reference variant).
     func modelURL(for model: WhisperModelSize) -> URL {
         return modelsDirectory.appendingPathComponent(model.filename)
     }
@@ -210,7 +261,7 @@ final class WhisperModelManager {
     }
 
     private func loadModel(_ model: WhisperModelSize) throws {
-        let path = modelURL(for: model).path
+        let path = bestModelURL(for: model).path
         guard FileManager.default.fileExists(atPath: path) else {
             throw WhisperError.modelLoadFailed(path: path)
         }
@@ -219,7 +270,7 @@ final class WhisperModelManager {
         }
         loadedModelPath = path
         activeModel = model
-        logger.info("Model loaded: \(model.rawValue)")
+        logger.info("Model loaded: \(model.rawValue) (\(URL(fileURLWithPath: path).lastPathComponent))")
     }
 
     private func unloadModel() {
