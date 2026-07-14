@@ -1,6 +1,6 @@
 #!/bin/bash
 # app-smoke-test.sh — Verify MeetCapture app launches and records.
-# v4.4.0: daemon removed, app runs standalone.
+# v5.0.0: daemon removed, app runs standalone.
 set -euo pipefail
 
 red() { printf '\033[31m%s\033[0m\n' "$*"; }
@@ -41,7 +41,7 @@ echo ""
 echo "[2] Info.plist version"
 if [ -f "$APP_BUNDLE/Contents/Info.plist" ]; then
     VER=$(plutil -p "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null | grep CFBundleShortVersionString | awk -F'"' '{print $4}')
-    if [ -n "$VER" ]; then
+    if [ "$VER" = "5.0.0" ]; then
         green "  ✅ Version: $VER"
         PASS=$((PASS + 1))
     else
@@ -64,7 +64,7 @@ else
     FAIL=$((FAIL + 1))
 fi
 
-# 4. No daemon plist (removed in v4.4)
+# 4. No daemon plist (removed in v5)
 echo ""
 echo "[4] Daemon removal"
 if [ ! -f "$APP_BUNDLE/Contents/Library/LaunchAgents/com.maatwork.meetcapture.daemon.plist" ]; then
@@ -94,6 +94,28 @@ if codesign --verify --strict "$APP_BUNDLE" 2>/dev/null; then
     PASS=$((PASS + 1))
 else
     red "  ✗ Signing verification failed"
+    FAIL=$((FAIL + 1))
+fi
+
+# 7. Runtime process
+echo ""
+echo "[7] Runtime process"
+if pgrep -x MeetCapture >/dev/null; then
+    green "  ✅ MeetCapture process is running"
+    PASS=$((PASS + 1))
+else
+    red "  ✗ MeetCapture process is not running"
+    FAIL=$((FAIL + 1))
+fi
+
+# 8. Recommended local Spanish model
+echo ""
+echo "[8] Whisper model"
+if [ -s "$HOME/.whisper/models/ggml-medium-q5_0.bin" ]; then
+    green "  ✅ medium Q5 model available"
+    PASS=$((PASS + 1))
+else
+    red "  ✗ medium Q5 model missing"
     FAIL=$((FAIL + 1))
 fi
 

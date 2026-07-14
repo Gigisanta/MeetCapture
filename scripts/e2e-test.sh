@@ -1,5 +1,5 @@
 #!/bin/bash
-# E2E test v4.4 — lifecycle, retention, Hermes event, packaging
+# E2E test v5 — lifecycle, retention, atomic handoff, packaging
 # Run after changes to lifecycle/retention/event/packaging.
 set -e
 
@@ -27,7 +27,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TMPDIR=$(mktemp -d "/tmp/meetcapture-e2e.XXXXXX")
 trap 'rm -rf "$TMPDIR"' EXIT
 
-echo "=== E2E Test Suite v4.4 ==="
+echo "=== E2E Test Suite v5.0 ==="
 
 # ---------------------------------------------------------------
 echo ""
@@ -83,10 +83,10 @@ echo ""
 echo "--- 3. Auto-stop: max recording duration ---"
 # ---------------------------------------------------------------
 
-# Check maxRecordingDuration constant
-MAX_DUR=$(grep "maxRecordingDuration" "$ROOT/Sources/AppState.swift" | head -1 | grep -oE "[0-9_.,]+" | head -1)
-if [ -n "$MAX_DUR" ]; then
-    green "  ✓ maxRecordingDuration = $MAX_DUR"
+# Check configurable, clamped max duration
+if grep -q "private var maxRecordingDuration: TimeInterval" "$ROOT/Sources/AppState.swift" && \
+   grep -q 'forKey: "maxRecordingDuration"' "$ROOT/Sources/AppState.swift"; then
+    green "  ✓ maxRecordingDuration is configurable and typed"
     PASS=$((PASS+1))
 else
     red "  ✗ maxRecordingDuration not defined"
@@ -115,8 +115,9 @@ else
     FAIL=$((FAIL+1))
 fi
 
-if grep -q "Date() > meeting.endDate" "$ROOT/Sources/AppState.swift"; then
-    green "  ✓ checkMeetingEnd compares Date() > endDate"
+if grep -q "meeting.endDate.addingTimeInterval" "$ROOT/Sources/AppState.swift" && \
+   grep -q "Date() > graceEnd" "$ROOT/Sources/AppState.swift"; then
+    green "  ✓ checkMeetingEnd applies the configured grace interval"
     PASS=$((PASS+1))
 else
     red "  ✗ checkMeetingEnd logic incorrect"
@@ -183,43 +184,43 @@ fi
 
 # ---------------------------------------------------------------
 echo ""
-echo "--- 7. Hermes event ---"
+echo "--- 7. Atomic Hermes handoff ---"
 # ---------------------------------------------------------------
 
-if grep -q "writeHermesEvent" "$ROOT/Sources/AppState.swift"; then
-    green "  ✓ writeHermesEvent() exists"
+if grep -q "writePendingContract" "$ROOT/Sources/AppState.swift"; then
+    green "  ✓ writePendingContract() exists"
     PASS=$((PASS+1))
 else
-    red "  ✗ writeHermesEvent() missing"
+    red "  ✗ writePendingContract() missing"
     FAIL=$((FAIL+1))
 fi
 
-if grep -q "hermes-event.json" "$ROOT/Sources/AppState.swift"; then
-    green "  ✓ Uses .hermes-event.json extension"
+if grep -q 'pendingPath = "\\(base)/.pending"' "$ROOT/Sources/AppState.swift"; then
+    green "  ✓ Uses the canonical single .pending marker"
     PASS=$((PASS+1))
 else
-    red "  ✗ Missing .hermes-event.json extension"
+    red "  ✗ Missing canonical .pending marker"
     FAIL=$((FAIL+1))
 fi
 
-if grep -q "meetcapture.v1" "$ROOT/Sources/AppState.swift"; then
-    green "  ✓ Schema: meetcapture.v1"
+if grep -q '"type": "meeting.processed"' "$ROOT/Sources/AppState.swift"; then
+    green "  ✓ Handoff type: meeting.processed"
     PASS=$((PASS+1))
 else
-    red "  ✗ Schema not meetcapture.v1"
+    red "  ✗ Handoff type is not meeting.processed"
     FAIL=$((FAIL+1))
 fi
 
 # ---------------------------------------------------------------
 echo ""
-echo "--- 8. notifyHermes gating ---"
+echo "--- 8. Notification gating ---"
 # ---------------------------------------------------------------
 
 if grep -q "UserDefaults.standard.object(forKey: \"notifyHermes\")" "$ROOT/Sources/AppState.swift"; then
-    green "  ✓ Hermes event gated by notifyHermes setting"
+    green "  ✓ User notification gated by notifyHermes setting"
     PASS=$((PASS+1))
 else
-    red "  ✗ Hermes event not gated by notifyHermes"
+    red "  ✗ User notification not gated by notifyHermes"
     FAIL=$((FAIL+1))
 fi
 
@@ -267,27 +268,27 @@ echo ""
 echo "--- 11. Version bump ---"
 # ---------------------------------------------------------------
 
-if grep -q "4.4.0" "$ROOT/Resources/Info.plist"; then
-    green "  ✓ Version 4.4.0 in Info.plist"
+if grep -q "5.0.0" "$ROOT/Resources/Info.plist"; then
+    green "  ✓ Version 5.0.0 in Info.plist"
     PASS=$((PASS+1))
 else
-    red "  ✗ Version not 4.4.0 in Info.plist"
+    red "  ✗ Version not 5.0.0 in Info.plist"
     FAIL=$((FAIL+1))
 fi
 
-if grep -q "4.4.0" "$ROOT/Sources/SettingsView.swift"; then
-    green "  ✓ Version 4.4.0 in SettingsView"
+if grep -q "5.0.0" "$ROOT/Sources/SettingsView.swift"; then
+    green "  ✓ Version 5.0.0 in SettingsView"
     PASS=$((PASS+1))
 else
-    red "  ✗ Version not 4.4.0 in SettingsView"
+    red "  ✗ Version not 5.0.0 in SettingsView"
     FAIL=$((FAIL+1))
 fi
 
-if grep -q "4.4.0" "$ROOT/Sources/PopoverContent.swift"; then
-    green "  ✓ Version 4.4.0 in PopoverContent"
+if grep -q "5.0.0" "$ROOT/Sources/PopoverContent.swift"; then
+    green "  ✓ Version 5.0.0 in PopoverContent"
     PASS=$((PASS+1))
 else
-    red "  ✗ Version not 4.4.0 in PopoverContent"
+    red "  ✗ Version not 5.0.0 in PopoverContent"
     FAIL=$((FAIL+1))
 fi
 
@@ -296,41 +297,38 @@ echo ""
 echo "--- 12. Synthetic JSON validation ---"
 # ---------------------------------------------------------------
 
-EXPECTED_SCHEMA="meetcapture.v1"
 python3 -c "
-import json, sys
-# Test Hermes event JSON
-event = {
-    'schema': '$EXPECTED_SCHEMA',
-    'event_id': 'test-uuid',
-    'timestamp': '2026-07-14T00:00:00Z',
-    'type': 'transcript_ready',
-    'payload': {
-        'transcript_path': '/tmp/test.txt',
-        'recording_path': '/tmp/test.pcm',
-        'meeting_title': 'Test',
-        'app_version': '4.4.0'
-    }
+import json
+# Test canonical single-file handoff
+handoff = {
+    'type': 'meeting.processed',
+    'state': 'transcribed',
+    'meeting_id': 'rec-test',
+    'transcript': '/tmp/test.txt',
+    'title': 'Test',
+    'source': 'meetcapture',
+    'created': '2026-07-14T00:00:00Z',
+    'metadata': {'transcript_path': '/tmp/test.txt', 'app_version': '5.0.0'}
 }
-data = json.dumps(event)
+data = json.dumps(handoff)
 parsed = json.loads(data)
-assert parsed['schema'] == '$EXPECTED_SCHEMA'
-assert parsed['payload']['app_version'] == '4.4.0'
-print('  ✓ Hermes event JSON round-trips cleanly')
+assert parsed['type'] == 'meeting.processed'
+assert parsed['transcript'] == '/tmp/test.txt'
+assert 'audio_path' not in parsed.get('metadata', {})
+print('  ✓ Atomic handoff JSON round-trips cleanly')
 
 # Test processed marker JSON
 marker = {
     'schema': 'meetcapture.processed.v1',
     'processed_at': '2026-07-14T00:00:00Z',
-    'audio_path': '/tmp/test.pcm',
     'transcript_path': '/tmp/test.txt',
     'meeting_title': 'Test',
-    'retention': 'raw_deleted'
+    'retention': 'handoff_complete'
 }
 data = json.dumps(marker)
 parsed = json.loads(data)
 assert parsed['schema'] == 'meetcapture.processed.v1'
-assert parsed['retention'] == 'raw_deleted'
+assert parsed['retention'] == 'handoff_complete'
 print('  ✓ Processed marker JSON round-trips cleanly')
 "
 

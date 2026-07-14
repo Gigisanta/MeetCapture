@@ -1,5 +1,5 @@
 #!/bin/bash
-# Lifecycle, retention, Hermes event, and packaging test for MeetCapture v4.4.0
+# Lifecycle, retention, Hermes event, and packaging test for MeetCapture v5.0.0
 # Run: ./scripts/lifecycle-test.sh
 # Validates source code patterns, JSON schemas, and build script flags.
 # Uses precise structural checks (AST-like pattern matching) and JSON schema
@@ -195,7 +195,7 @@ contract = {
     'created': '2026-07-14T12:00:00Z',
     'metadata': {
         'transcript_path': '/tmp/recording-test.txt',
-        'app_version': '4.4.0'
+        'app_version': '5.0.0'
     }
 }
 
@@ -424,8 +424,8 @@ fi
 echo "=== 10. Info.plist version ==="
 # ---------------------------------------------------------------
 
-if grep -q "4.4.0" "$ROOT/Resources/Info.plist" 2>/dev/null; then
-    pass "Info.plist version bumped to 4.4.0"
+if grep -q "5.0.0" "$ROOT/Resources/Info.plist" 2>/dev/null; then
+    pass "Info.plist version bumped to 5.0.0"
 else
     fail "Info.plist version not updated"
 fi

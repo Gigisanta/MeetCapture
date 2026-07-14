@@ -727,20 +727,10 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
     guard state == .recording else { return }
     removeDeviceListeners()
     rebuildQueue.sync { teardownCoreAudio() }
-    // Drain queued chunks, then flush both converters on their owning queue.
+    // Drain every accepted chunk before closing. AVAudioConverter may retain only
+    // sub-frame state; resetting is safer than an end-of-stream flush while Core
+    // Audio is tearing down and loses less than one output packet.
     writeQueue.sync {
-      let systemTail = systemResampler?.flush() ?? []
-      let micTail = micResampler?.flush() ?? []
-      let frames = min(systemTail.count, micTail.count)
-      if frames > 0 {
-        var stereo = [Int16](repeating: 0, count: frames * 2)
-        for frame in 0..<frames {
-          stereo[frame * 2] = systemTail[frame]
-          stereo[frame * 2 + 1] = micTail[frame]
-        }
-        try? fileHandle?.write(
-          contentsOf: Data(bytes: stereo, count: stereo.count * MemoryLayout<Int16>.size))
-      }
       systemResampler?.reset()
       micResampler?.reset()
     }

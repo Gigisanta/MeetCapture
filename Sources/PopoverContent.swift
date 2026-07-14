@@ -67,7 +67,7 @@ struct PopoverContent: View {
             Spacer()
             Button("Grant") {
                 appState.audioCapture.requestPermission { granted in
-                    appState.hasAudioPermission = granted
+                    Task { @MainActor in appState.hasAudioPermission = granted }
                 }
             }
             .controlSize(.small)
@@ -186,7 +186,7 @@ struct PopoverContent: View {
             }
             Spacer()
             HStack(spacing: 4) {
-                Text("v4.4.0")
+                Text("v5.0.0")
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
             }
