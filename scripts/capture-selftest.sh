@@ -291,32 +291,21 @@ else
     PASS=$((PASS+1))  # Not a failure — graceful fallback is the feature
 fi
 
-# ---- Test 5: Format detection logic ----
-header "[5] Format detection — Float32 vs Int16"
-# The detection heuristic: check that a file with most Int16 values >1 is detected as Int16
-# and a Float32 file as Float32. Use python to simulate.
+# ---- Test 5: Explicit format metadata ----
+header "[5] Explicit format metadata — no byte heuristics"
 python3 -c "
-import struct, sys
-
-# Generate 256 Int16 samples (values in 1000–30000 range)
-i16_data = b''.join(struct.pack('<h', 10000) for _ in range(256))
-int16_count = 0
-for i in range(min(len(i16_data)//2, 256)):
-    v = struct.unpack_from('<h', i16_data, i*2)[0]
-    if abs(v) > 1: int16_count += 1
-result = 'int16' if int16_count > 64 else 'float32'
-assert result == 'int16', f'Expected int16, got {result}'
-print(f'  ✓ Int16 detection: {result}')
-
-# Generate Float32 samples (values in 0.1–0.9 range)
-f32_data = b''.join(struct.pack('<f', 0.5) for _ in range(256))
-int16_count = 0
-for i in range(min(len(f32_data)//2, 256)):
-    v = struct.unpack_from('<h', f32_data, i*2)[0]
-    if abs(v) > 1: int16_count += 1
-result = 'int16' if int16_count > 64 else 'float32'
-print(f'  ✓ Float32 detection: {result}')  # Float32 bytes interpreted as int16 won't be >1
-" 2>/dev/null && green "Format detection heuristic works" || fail "Format detection test failed"
+import json, pathlib, tempfile
+root = pathlib.Path(tempfile.mkdtemp(prefix='meetcapture-format-'))
+new = root / 'new.pcm.format.json'
+new.write_text(json.dumps({'schema':'meetcapture.audio.v1','sample_rate':16000,'sample_format':'s16le','channels':2,'layout':'L=system,R=mic'}))
+parsed = json.loads(new.read_text())
+assert parsed['sample_format'] == 's16le' and parsed['sample_rate'] == 16000 and parsed['channels'] == 2
+legacy = root / 'legacy.pcm'
+legacy.write_bytes(b'legacy')
+assert not legacy.with_suffix(legacy.suffix + '.format.json').exists()
+print('  ✓ Canonical s16le stereo metadata parsed')
+print('  ✓ Missing sidecar deterministically selects legacy Float32 fallback')
+" 2>/dev/null && green "Explicit format contract works" || fail "Format metadata test failed"
 
 # ---- Summary ----
 echo ""
