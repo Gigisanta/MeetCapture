@@ -1,0 +1,38 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-macos:
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install whisper-cpp
+        run: brew install whisper-cpp
+
+      - name: Build (staging)
+        run: ./build.sh --staging-dir /tmp/mc-stage
+
+      - name: Verify signature
+        run: codesign --verify --deep --strict /tmp/mc-stage/MeetCapture.app
+
+      - name: Smoke test
+        run: |
+          cp -R /tmp/mc-stage/MeetCapture.app /tmp/MeetCapture.app
+          bash scripts/app-smoke-test.sh
+
+      - name: Lifecycle test
+        run: bash scripts/lifecycle-test.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MeetCapture.app
+          path: /tmp/mc-stage/MeetCapture.app
+          if-no-files-found: error

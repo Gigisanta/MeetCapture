@@ -408,13 +408,15 @@ echo "=== 9. Install.sh cleanup ==="
 
 INSTALLSCRIPT="$ROOT/install.sh"
 
-if ! grep -q "meetcapture.sock" "$INSTALLSCRIPT" 2>/dev/null; then
+# Legacy cleanup (retired Python daemon + old socket) is allowed and required
+# for v4→v5+ upgrades; anything BEYOND that cleanup is a regression.
+if ! grep -q "meetcapture.sock" <(grep -v 'rm -f .*meetcapture.sock' "$INSTALLSCRIPT") 2>/dev/null; then
     pass "install.sh no socket verification"
 else
     fail "install.sh still checks socket"
 fi
 
-if ! grep -q "daemon" "$INSTALLSCRIPT" 2>/dev/null; then
+if ! grep -q "daemon" <(grep -vE 'retired Python daemon|com\.maatwork\.meetcapture\.daemon' "$INSTALLSCRIPT") 2>/dev/null; then
     pass "install.sh no daemon references"
 else
     fail "install.sh still references daemon"
@@ -424,8 +426,8 @@ fi
 echo "=== 10. Info.plist version ==="
 # ---------------------------------------------------------------
 
-if grep -q "5.0.0" "$ROOT/Resources/Info.plist" 2>/dev/null; then
-    pass "Info.plist version bumped to 5.0.0"
+if grep -q "6.0.0" "$ROOT/Resources/Info.plist" 2>/dev/null; then
+    pass "Info.plist version bumped to 6.0.0"
 else
     fail "Info.plist version not updated"
 fi

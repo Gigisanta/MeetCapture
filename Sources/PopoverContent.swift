@@ -1,35 +1,39 @@
 // PopoverContent.swift
-// MeetCapture v4 — minimal, native popover.
-// Compact and content-sized: a status line, one primary action that toggles
-// Record/Stop, and a thin footer. Uses system materials instead of a heavy
-// custom gradient so it reads as a native macOS menu-bar popover.
+// MeetCapture v5.1 — native popover with live transcript (timestamps +
+// speakers + Copy), Import & Enhance, and SQLite-backed history/search.
 
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 struct PopoverContent: View {
     @ObservedObject var appState: AppState
     @State private var now: Date = Date()
+    @State private var searchText = ""
     private let tick = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
-    private static let width: CGFloat = 300
+    private static let width: CGFloat = 360
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            header
-            if !appState.hasAudioPermission { permissionRow }
-            statusRow
-            if appState.phase == .transcribing || !appState.liveTranscriptBuffer.isEmpty {
-                liveTranscript
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                header
+                if !appState.hasAudioPermission { permissionRow }
+                statusRow
+                if appState.phase == .transcribing || !appState.liveTranscriptBuffer.isEmpty || !appState.lastSegments.isEmpty {
+                    liveTranscript
+                }
+                if let next = appState.calendarService.nextMeeting, appState.phase != .recording {
+                    upcomingRow(next)
+                }
+                primaryButton
+                Divider()
+                historySection
+                Divider()
+                footer
             }
-            if let next = appState.calendarService.nextMeeting, appState.phase != .recording {
-                upcomingRow(next)
-            }
-            primaryButton
-            Divider()
-            footer
+            .padding(14)
         }
-        .padding(14)
         .frame(width: Self.width)
         .background(.regularMaterial)
         .onReceive(tick) { now = $0 }
@@ -106,11 +110,23 @@ struct PopoverContent: View {
 
     private var liveTranscript: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(appState.liveTranscriptBuffer.isEmpty ? "Listening…" : appState.liveTranscriptBuffer)
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-                .lineLimit(3)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            HStack {
+                Text(appState.phase == .transcribing ? "Transcribing…" : "Transcript")
+                    .font(.system(size: 11, weight: .semibold))
+                Spacer()
+                if !transcriptDisplay.isEmpty {
+                    Button("Copy") { copyTranscript() }
+                        .controlSize(.small)
+                        .help("Copy full transcript to clipboard")
+                }
+            }
+            ScrollView {
+                Text(transcriptDisplay)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxHeight: 150)
             if appState.phase == .transcribing {
                 ProgressView(value: appState.transcriptionProgress)
                     .controlSize(.small)
@@ -118,6 +134,43 @@ struct PopoverContent: View {
         }
         .padding(8)
         .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    /// Segments with [mm:ss] timestamps + [Speaker] prefix when present;
+    /// falls back to the raw live buffer while streaming.
+    private var transcriptDisplay: String {
+        if !appState.lastSegments.isEmpty {
+            return appState.lastSegments.map { seg in
+                var line = "[\(formatTimestamp(seg.start))]"
+                if let speaker = seg.speaker, !speaker.isEmpty {
+                    line += " [\(speaker)]:"
+                }
+                line += " " + seg.text
+                return line
+            }.joined(separator: "\n")
+        }
+        return appState.liveTranscriptBuffer
+    }
+
+    private func copyTranscript() {
+        let text: String
+        if let path = appState.lastTranscriptPath,
+           let content = try? String(contentsOfFile: path, encoding: .utf8),
+           !content.isEmpty {
+            text = content
+        } else {
+            text = transcriptDisplay
+        }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(text, forType: .string)
+    }
+
+    private func formatTimestamp(_ seconds: Double) -> String {
+        let total = Int(seconds)
+        let h = total / 3600, m = (total % 3600) / 60, s = total % 60
+        if h > 0 { return String(format: "%d:%02d:%02d", h, m, s) }
+        return String(format: "%02d:%02d", m, s)
     }
 
     // MARK: - Upcoming
@@ -171,10 +224,82 @@ struct PopoverContent: View {
         }
     }
 
+    // MARK: - History (SQLite)
+
+    private var historySection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("History")
+                    .font(.system(size: 11, weight: .semibold))
+                Spacer()
+                if appState.lastAudioPath != nil {
+                    Button("Re-transcribe") {
+                        Task { await appState.retranscribeLastAudio() }
+                    }
+                    .controlSize(.small)
+                    .help("Re-run transcription of the last saved audio with current settings")
+                }
+            }
+            TextField("Search meetings…", text: $searchText)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 11))
+                .onChange(of: searchText) { _, newValue in
+                    appState.searchHistory(newValue)
+                }
+            if appState.history.isEmpty {
+                Text("No meetings yet")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(appState.history) { record in
+                            historyRow(record)
+                        }
+                    }
+                }
+                .frame(maxHeight: 130)
+            }
+        }
+    }
+
+    private func historyRow(_ record: MeetingRecord) -> some View {
+        HStack(spacing: 6) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(record.title)
+                    .font(.system(size: 11, weight: .medium))
+                    .lineLimit(1)
+                Text("\(record.startedAt.formatted(date: .abbreviated, time: .shortened)) · \(record.engine)\(record.speakerCount > 0 ? " · \(record.speakerCount) speakers" : "")")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer()
+            Button {
+                NSWorkspace.shared.activateFileViewerSelecting(
+                    [URL(fileURLWithPath: record.transcriptPath)])
+            } label: {
+                Image(systemName: "doc.text")
+            }
+            .buttonStyle(.plain)
+            .help(record.transcriptPath)
+        }
+        .padding(4)
+        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 6))
+    }
+
     // MARK: - Footer
 
     private var footer: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 10) {
+            Button {
+                importAudio()
+            } label: {
+                Label("Import audio…", systemImage: "square.and.arrow.down")
+                    .font(.system(size: 11))
+            }
+            .buttonStyle(.link)
+            .help("Transcribe an audio file (wav, m4a, aiff, caf, pcm)")
             if let path = appState.lastTranscriptPath {
                 Button {
                     NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
@@ -186,7 +311,7 @@ struct PopoverContent: View {
             }
             Spacer()
             HStack(spacing: 4) {
-                Text("v5.0.0")
+                Text("v6.0.0")
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
             }
@@ -205,6 +330,21 @@ struct PopoverContent: View {
             .help("Quit (⌘Q)")
         }
         .foregroundStyle(.secondary)
+    }
+
+    // MARK: - Import
+
+    private func importAudio() {
+        let panel = NSOpenPanel()
+        panel.title = "Import audio to transcribe"
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        let extra = ["caf", "pcm"].compactMap { UTType(filenameExtension: $0) }
+        panel.allowedContentTypes = [.wav, .mpeg4Audio, .aiff] + extra
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        Task { @MainActor in
+            await appState.importAudio(url: url)
+        }
     }
 
     // MARK: - Derived

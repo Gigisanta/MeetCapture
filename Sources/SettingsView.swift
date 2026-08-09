@@ -1,16 +1,30 @@
 // SettingsView.swift
-// MeetCapture v4 — Preferences window
+// MeetCapture v5.1 — Preferences window with General / Audio / ASR / IA /
+// Calendar / About tabs. ASR + IA settings persist to UserDefaults and are
+// read at transcription time by the pipeline.
 
 import SwiftUI
 
 struct SettingsView: View {
     @ObservedObject var appState: AppState
     @AppStorage("autoRecord") private var autoRecord = true
-    @AppStorage("whisperModel") private var whisperModel = "medium"
     @AppStorage("notifyHermes") private var notifyHermes = true
     @AppStorage("transcriptDir") private var transcriptDir = ""
     @AppStorage("retention") private var retention = RetentionPolicy.deleteAfterHandoff.rawValue
     @AppStorage("maxRecordingDuration") private var maxRecordingDuration = 10_800.0
+
+    // ASR
+    @AppStorage("engine") private var engine = ASREngine.whisper.rawValue
+    @AppStorage("asrModel") private var asrModel = "medium-q5_0"
+    @AppStorage("asrLanguage") private var asrLanguage = "es"
+    @AppStorage("diarize") private var diarize = true
+    @AppStorage("sherpaPythonPath") private var sherpaPythonPath = "/Users/gigi/HerMaatOS/venvs/venv-meet/bin/python3"
+    @AppStorage("scriptsDir") private var scriptsDir = "/Users/gigi/HerMaatOS/work/meetcapture/scripts"
+
+    // IA (summary endpoint — consumed by the external summary dispatcher)
+    @AppStorage("aiEndpoint") private var aiEndpoint = "http://127.0.0.1:8083/v1"
+    @AppStorage("aiModel") private var aiModel = ""
+    @AppStorage("aiApiKey") private var aiApiKey = "mlx-local"
 
     var body: some View {
         TabView {
@@ -20,13 +34,19 @@ struct SettingsView: View {
             audioSettings
                 .tabItem { Label("Audio", systemImage: "speaker.wave.3") }
 
+            asrSettings
+                .tabItem { Label("ASR", systemImage: "waveform.badge.mic") }
+
+            iaSettings
+                .tabItem { Label("IA", systemImage: "brain.head.profile") }
+
             calendarSettings
                 .tabItem { Label("Calendar", systemImage: "calendar") }
 
             aboutView
                 .tabItem { Label("About", systemImage: "info.circle") }
         }
-        .frame(width: 450, height: 350)
+        .frame(width: 470, height: 380)
     }
 
     // MARK: - General
@@ -66,14 +86,7 @@ struct SettingsView: View {
 
     private var audioSettings: some View {
         Form {
-            Picker("Whisper Model", selection: $whisperModel) {
-                Text("tiny (75MB, fastest)").tag("tiny")
-                Text("base (142MB, fast — safe on 8GB)").tag("base")
-                Text("small (461MB, balanced)").tag("small")
-                Text("medium Q5 (527MB, recommended Spanish)").tag("medium")
-                Text("large-v3-turbo (1.6GB, best)").tag("large-v3-turbo")
-            }
-            Text("Prefers local Q5 quantized models for lower memory and equal practical quality; falls back safely when unavailable.")
+            Text("Capture writes a 16kHz Int16 stereo PCM file (L = system audio, R = mic). Model and engine selection live in the ASR tab.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
 
@@ -94,6 +107,64 @@ struct SettingsView: View {
                     }
                 }
             }
+        }
+        .padding()
+    }
+
+    // MARK: - ASR
+
+    private var asrSettings: some View {
+        Form {
+            Picker("Engine", selection: $engine) {
+                Text("Whisper (whisper.cpp, local)").tag(ASREngine.whisper.rawValue)
+                Text("Sherpa (transcribe_sherpa.py, whole-file)").tag(ASREngine.sherpa.rawValue)
+            }
+            Text("Sherpa runs after the recording finishes. If the sherpa script is missing or fails, the app falls back to Whisper automatically.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
+            TextField("Model", text: $asrModel)
+            Text("Whisper: tiny/base/small/medium/large-v3-turbo (medium-q5_0 recommended for Spanish). Sherpa: parakeet or zipformer-es.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
+            Picker("Language", selection: $asrLanguage) {
+                Text("Spanish (es)").tag("es")
+                Text("Auto-detect").tag("auto")
+            }
+
+            Toggle("Speaker diarization (post-transcription)", isOn: $diarize)
+            Text("Runs scripts/speaker_diarize.py after transcribing; labels each segment with its speaker. Falls back to no labels if the script is unavailable.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
+            Divider()
+
+            TextField("Sherpa Python", text: $sherpaPythonPath)
+            TextField("Scripts directory", text: $scriptsDir)
+                .font(.caption2)
+        }
+        .padding()
+    }
+
+    // MARK: - IA
+
+    private var iaSettings: some View {
+        Form {
+            TextField("Endpoint URL", text: $aiEndpoint)
+            Text("OpenAI-compatible endpoint used by the summary dispatcher. Default: local MLX server.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
+            TextField("Summary model", text: $aiModel)
+            Text("Empty = auto (server default).")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
+            SecureField("API key", text: $aiApiKey)
+            Text("Default 'mlx-local' for the local MLX stack.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
         }
         .padding()
     }
@@ -142,7 +213,7 @@ struct SettingsView: View {
             Text("MeetCapture")
                 .font(.title2)
 
-            Text("v5.0.0")
+            Text("v6.0.0")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 

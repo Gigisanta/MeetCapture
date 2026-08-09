@@ -115,6 +115,7 @@ swiftc \
     -framework Combine \
     -framework UserNotifications \
     -framework AppKit \
+    -lsqlite3 \
     -parse-as-library \
     $SOURCES \
     -o "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
