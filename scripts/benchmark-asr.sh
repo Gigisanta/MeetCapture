@@ -53,10 +53,11 @@ EOF
 
 run_timed() { # run_timed <label> <cmd...> ; setea ELAPSED
   local t0 t1
+  shift # descartar la etiqueta: "$@" debe arrancar en el comando real
   t0=$("$VENV_PY" -c 'import time; print(time.time())')
   "$@" >/dev/null 2>&1
   t1=$("$VENV_PY" -c 'import time; print(time.time())')
-  ELAPSED=$("$VENV_PY" -c "print(f'{$t1 - $t0:.2f}')")
+  ELAPSED=$("$VENV_PY" -c "print('{:.2f}'.format($t1 - $t0))")
 }
 
 printf "%-28s %-34s %7s %8s\n" "engine" "model" "WER%" "RTF"
@@ -72,7 +73,7 @@ segs = json.load(open(sys.argv[1]))["segments"]
 open(sys.argv[2], "w").write("\n".join(s["text"] for s in segs))
 EOF
 SHERPA_WER=$(wer "$SHERPA_TXT" "$REF")
-SHERPA_RTF=$("$VENV_PY" -c "print(f'{$ELAPSED / $DUR:.2f}')")
+SHERPA_RTF=$("$VENV_PY" -c "print('{:.2f}'.format($ELAPSED / $DUR))")
 printf "%-28s %-34s %6s%% %7s\n" "sherpa-onnx (streaming+VAD)" "zipformer-es-kroko" "$SHERPA_WER" "$SHERPA_RTF"
 
 # --- whisper.cpp ---
@@ -83,7 +84,7 @@ if [ -n "$WHISPER_CLI" ] && [ -f "$WHISPER_MODEL" ]; then
   [ -f "$TMP/whisper_out.txt" ] && mv "$TMP/whisper_out.txt" "$WHISPER_TXT"
   if [ -f "$WHISPER_TXT" ]; then
     WHISPER_WER=$(wer "$WHISPER_TXT" "$REF")
-    WHISPER_RTF=$("$VENV_PY" -c "print(f'{$ELAPSED / $DUR:.2f}')")
+    WHISPER_RTF=$("$VENV_PY" -c "print('{:.2f}'.format($ELAPSED / $DUR))")
     printf "%-28s %-34s %6s%% %7s\n" "whisper.cpp (offline)" "ggml-medium-q5_0" "$WHISPER_WER" "$WHISPER_RTF"
   else
     echo "whisper: no produjo salida (revisar flags) — se omite"

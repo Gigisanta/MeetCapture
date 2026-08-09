@@ -180,15 +180,15 @@ def main():
         fed += len(chunk)
         vad.accept_waveform(chunk)
     # 2) Drenar segmentos de voz completos (patrón oficial sherpa-onnx:
-    #    empty() es MÉTODO en 1.13.x; front = utterance finalizada de la cola;
-    #    is_speech_detected() NO aplica acá — mira el segmento actual, no la cola)
+    #    empty() es MÉTODO en 1.13.x; front = utterance finalizada de la cola,
+    #    FIFO cronológica; is_speech_detected() NO aplica acá)
     vad.flush()
-    cursor = fed / 16000.0  # final del audio; retrocede por cada utterance
+    cursor = 0.0  # la cola es cronológica: timestamps hacia adelante
     while not vad.empty():
         seg = vad.front
         samples_len = len(seg.samples)
-        seg_end = cursor
-        seg_start = max(0.0, seg_end - samples_len / 16000.0)
+        seg_start = cursor
+        seg_end = cursor + samples_len / 16000.0
         # ¡pop() VACÍA el buffer zero-copy de seg.samples! Copiar antes de pop.
         seg_data = list(seg.samples)
         vad.pop()
@@ -201,7 +201,7 @@ def main():
             segments.append(
                 {"start": round(seg_start, 3), "end": round(seg_end, 3), "text": text}
             )
-        cursor = seg_start
+        cursor = seg_end
     # 3) Cola final (tras flush debería estar vacía; por seguridad)
     while not vad.empty():
         vad.pop()
