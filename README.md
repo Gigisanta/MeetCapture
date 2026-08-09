@@ -1,4 +1,4 @@
-# MeetCapture v5
+# MeetCapture v6
 
 Native macOS menu-bar app for private, local meeting capture and Spanish transcription.
 
@@ -8,9 +8,12 @@ Native macOS menu-bar app for private, local meeting capture and Spanish transcr
 - Core Audio process tap targets active call processes and falls back to a global tap only when needed.
 - Audio is written as 16 kHz signed Int16 stereo PCM: left = system, right = microphone.
 - Every recording has an explicit `<recording>.pcm.format.json` sidecar; byte heuristics are forbidden.
-- `whisper.cpp` runs locally with the quantized `medium Q5_0` model by default.
-- Long recordings are converted and transcribed as bounded sequential chunks with persistent context.
-- A single atomic `.pending` handoff wakes the deterministic HerMaat summary dispatcher.
+- **Two ASR engines** (Settings → ASR): `whisper.cpp` (default, `medium Q5_0`) or **sherpa-onnx streaming** (`zipformer-es-kroko`, RTF ~0.04 — ~25× realtime, ~3.5× faster than medium whisper) with Silero VAD segmentation.
+- **Speaker diarization** (sherpa-onnx pyannote segmentation + eres2net embeddings): post-hoc labels A/B/C mapped onto transcript segments; transcripts get `[Speaker A]:` prefixes; speaker count goes into the handoff.
+- **`.pending` v2 atomic handoff** (version, meetingId, segments with timestamps+speakers, engine, model, checksum) wakes the summary dispatcher.
+- **Summary engine**: `HerMaatOS/bin/meetcapture_summary_dispatcher.py` (launchd `com.maatwork.meetcapture-summary`, WatchPaths) calls any OpenAI-compatible endpoint — default the local MLX gateway (`:8083`, qwen3.5-4b) — and writes `summary.json` + self-contained `summary.html` (resumen, action items, decisiones, asistentes), then acks `.pending → .done` and applies retention.
+- **SQLite history** (`~/meetings/meetcapture.db`): meetings indexed (title, dates, engine, model, speakers, paths, full transcript) with search in the popover.
+- **Import & Enhance**: import any audio file (wav/m4a/aiff/caf/pcm) to transcribe it, or re-transcribe an existing recording with a different engine/model.
 - Raw audio is deleted only after transcript creation and durable handoff; retention is configurable.
 
 No meeting audio or transcript is sent over the network by MeetCapture.
@@ -21,6 +24,7 @@ No meeting audio or transcript is sent over the network by MeetCapture.
 - Microphone, Screen & System Audio, Calendar, and Notification permissions as desired
 - `whisper-cli` from `brew install whisper-cpp`
 - local model: `~/.whisper/models/ggml-medium-q5_0.bin`
+- sherpa-onnx engine (optional): venv `HerMaatOS/venvs/venv-meet` with `sherpa-onnx`, models under `~/.whisper/models/sherpa/` (see `scripts/README`), helper scripts in `scripts/` (`transcribe_sherpa.py`, `speaker_diarize.py`).
 
 ## Install or update
 
@@ -51,48 +55,8 @@ Local builds use ad-hoc signing. Developer ID signing and notarization are requi
 ## Tests
 
 ```bash
-bash scripts/lifecycle-test.sh
-bash tests/test-asr-pipeline.sh
-python3 scripts/test_legacy_privacy_migration.py
-
-swiftc \
-  -framework AppKit -framework CoreAudio -framework AudioToolbox \
-  -framework AVFoundation -framework Combine \
-  Sources/AudioCapture.swift Sources/CallDetector.swift \
-  Tests/AudioResamplerIntegrationTests.swift \
-  -o /tmp/audio-resampler-tests
-/tmp/audio-resampler-tests
-
-swiftc Tests/CallDetectorTests.swift -o /tmp/call-detector-tests
-/tmp/call-detector-tests
+bash scripts/app-smoke-test.sh    # bundle + runtime checks (8/8)
+bash scripts/lifecycle-test.sh    # architecture + contract checks (34/34)
+bash scripts/benchmark-asr.sh     # A/B whisper vs sherpa (WER/RTF) on generated corpus
+bash scripts/gen_test_corpus.sh   # 2-speaker Spanish corpus via macOS `say`
 ```
-
-Full strict-concurrency typecheck:
-
-```bash
-swiftc -typecheck -strict-concurrency=complete -warn-concurrency \
-  -framework AppKit -framework SwiftUI -framework CoreAudio \
-  -framework AudioToolbox -framework AVFoundation -framework EventKit \
-  -framework UserNotifications Sources/*.swift
-```
-
-Expected result: zero errors and zero warnings.
-
-## Runtime data
-
-```text
-~/meetings/MeetCapture.app
-~/.whisper/models/ggml-medium-q5_0.bin
-~/.hermes/TechPartners/MaatWork/meetings/transcripts/
-~/.hermes/TechPartners/MaatWork/meetings/.pending
-```
-
-Directories and meeting artifacts use owner-only permissions. The legacy migration tool defaults to dry-run and never deletes recordings.
-
-## Recovery
-
-```bash
-./build.sh --rollback
-```
-
-If a production install fails its smoke checks, `install.sh` performs this rollback automatically.

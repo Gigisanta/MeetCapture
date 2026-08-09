@@ -4,6 +4,7 @@
 import SwiftUI
 import Combine
 import UserNotifications
+import CryptoKit
 import os
 
 // MARK: - Recording Origin
@@ -61,6 +62,12 @@ final class AppState: ObservableObject {
     @Published var transcriptionProgress: Double = 0
     @Published var lastTranscriptPath: String?
     @Published var liveTranscriptBuffer: String = ""
+    /// Timed segments of the latest transcription (timestamps + speakers).
+    @Published var lastSegments: [Segment] = []
+    /// Durable audio of the latest transcription (for Re-transcribir).
+    @Published var lastAudioPath: String?
+    /// Recent meetings from the SQLite store.
+    @Published var history: [MeetingRecord] = []
 
     // MARK: - Services
 
@@ -68,6 +75,7 @@ final class AppState: ObservableObject {
     lazy var callDetector = CallDetector()
     lazy var audioCapture = AudioCaptureService()
     let whisperManager = WhisperModelManager.shared
+    let store = MeetingStore.shared
 
     // MARK: - Private
 
@@ -165,6 +173,9 @@ final class AppState: ObservableObject {
 
         // Launch cleanup for 24h retention
         cleanupOldRecordings()
+
+        // Load recent meetings from SQLite store
+        refreshHistory()
 
         // Test-only: MEETCAPTURE_SELFTEST_SECS=N records N seconds then stops
         if let raw = ProcessInfo.processInfo.environment["MEETCAPTURE_SELFTEST_SECS"],
@@ -362,56 +373,120 @@ final class AppState: ObservableObject {
 
     // MARK: - Transcription
 
-    /// Stream-transcribe a PCM file in 30s chunks.
+    /// Stream-transcribe a PCM file and run the full post-processing chain:
+    /// segments → .txt → .pending v2 → retention → SQLite → notification.
     private func transcribe(audioPath: String) async {
+        let outputPath = audioPath.replacingOccurrences(of: ".pcm", with: ".txt")
+        await runTranscriptionPipeline(
+            audioPath: audioPath,
+            sampleRate: audioCapture.currentSampleRate,
+            title: currentMeeting?.title,
+            outputPath: outputPath,
+            shouldApplyRetention: true,
+            durableAudioPath: audioPath
+        )
+    }
+
+    /// Shared transcription pipeline used by recordings, imports and
+    /// re-transcriptions. Engine (whisper/sherpa with fallback), language,
+    /// diarization and model all come from the current Settings.
+    private func runTranscriptionPipeline(
+        audioPath: String,
+        sampleRate: Double,
+        title: String?,
+        outputPath: String,
+        shouldApplyRetention: Bool,
+        durableAudioPath: String
+    ) async {
+        phase = .transcribing
+        transcriptionProgress = 0
+        liveTranscriptBuffer = ""
         defer { whisperManager.stopRecording() }
+
         do {
-            let outputPath = audioPath.replacingOccurrences(of: ".pcm", with: ".txt")
-            let outputURL = URL(fileURLWithPath: outputPath)
+            let engine = ASREngine.current()
+            let diarize = UserDefaults.standard.object(forKey: "diarize") as? Bool ?? true
 
-            let captureRate = audioCapture.currentSampleRate
-            if let stream = WhisperTranscriber(audioPath: audioPath, sampleRate: captureRate, whisperManager: whisperManager) {
-                let progressStream = stream.progress
-                let textStream = stream.text
-
-                Task { @MainActor in
-                    for await p in progressStream {
-                        self.transcriptionProgress = p
-                    }
-                }
-
-                Task { @MainActor in
-                    for await chunk in textStream {
-                        self.appendLiveTranscript(chunk)
-                    }
-                }
-
-                let finalText = try await stream.run()
-                try finalText.write(to: outputURL, atomically: true, encoding: .utf8)
-            } else {
+            guard let stream = WhisperTranscriber(
+                audioPath: audioPath,
+                sampleRate: sampleRate,
+                whisperManager: whisperManager
+            ) else {
                 throw WhisperError.transcriptionFailed(reason: "Could not open \(audioPath)")
             }
 
+            let progressStream = stream.progress
+            let textStream = stream.text
+
+            Task { @MainActor in
+                for await p in progressStream {
+                    self.transcriptionProgress = p
+                }
+            }
+
+            Task { @MainActor in
+                for await chunk in textStream {
+                    self.appendLiveTranscript(chunk)
+                }
+            }
+
+            let segments = try await stream.runWithSegments(engine: engine, diarize: diarize)
+
+            // Final .txt: one line per segment, "[Speaker X]: text" prefix
+            // when a speaker label exists.
+            let lines = segments.map { seg -> String in
+                let text = seg.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard let speaker = seg.speaker, !speaker.isEmpty else { return text }
+                return "[\(speaker)]: \(text)"
+            }
+            let finalText = lines.joined(separator: "\n")
+            let outputURL = URL(fileURLWithPath: outputPath)
+            try finalText.write(to: outputURL, atomically: true, encoding: .utf8)
+
             lastTranscriptPath = outputPath
+            lastSegments = segments
+            lastAudioPath = durableAudioPath
 
-            // Read transcript content for .pending contract
-            let transcriptContent = try String(contentsOf: outputURL, encoding: .utf8)
-            let meetingTitle = currentMeeting?.title
-
-            // --- Critical path: write .pending contract (throws on failure) ---
-            // This must succeed before we delete anything.
-            try await writePendingContract(
+            // --- Critical path: .pending v2 contract (throws on failure) ---
+            let speakerCount = Set(segments.compactMap(\.speaker)).count
+            try await writePendingContractV2(
                 transcriptPath: outputPath,
-                transcriptContent: transcriptContent,
-                meetingTitle: meetingTitle,
-                audioPath: audioPath
+                transcriptContent: finalText,
+                meetingTitle: title,
+                audioPath: durableAudioPath,
+                segments: segments,
+                engine: engine,
+                speakerCount: speakerCount
             )
 
-            // --- Write processed marker (no audio path — audio may be deleted) ---
-            writeProcessedMarker(transcriptPath: outputPath, meetingTitle: meetingTitle)
+            // --- Processed marker (no audio path — audio may be deleted) ---
+            writeProcessedMarker(transcriptPath: outputPath, meetingTitle: title)
 
-            // --- Apply retention after durable handoff ---
-            await applyRetention(audioPath: audioPath, transcriptPath: outputPath)
+            // --- Retention only for fresh recordings (never imports) ---
+            if shouldApplyRetention {
+                await applyRetention(audioPath: audioPath, transcriptPath: outputPath)
+            }
+
+            // --- SQLite history ---
+            let model = Self.currentModelString(engine: engine)
+            let language = UserDefaults.standard.string(forKey: "asrLanguage") ?? "es"
+            let started = recordingStartDate ?? Date()
+            let ended = Date()
+            store.insert(MeetingRecord(
+                id: "meet-\(Int64(started.timeIntervalSince1970))",
+                title: title ?? "Untitled Meeting",
+                startedAt: started,
+                endedAt: ended,
+                durationSec: ended.timeIntervalSince(started),
+                engine: engine.rawValue,
+                model: model,
+                language: language,
+                transcriptPath: outputPath,
+                summaryPath: nil,
+                speakerCount: speakerCount,
+                transcriptText: finalText
+            ))
+            refreshHistory()
 
             liveTranscriptBuffer = ""
             transcriptionProgress = 1.0
@@ -420,7 +495,7 @@ final class AppState: ObservableObject {
             // --- Local notification (gated by notifyHermes) ---
             let showNotification = UserDefaults.standard.object(forKey: "notifyHermes") as? Bool ?? true
             if showNotification {
-                await sendLocalNotification(title: meetingTitle ?? "Google Meet")
+                await sendLocalNotification(title: title ?? "Google Meet")
             }
 
             DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
@@ -432,6 +507,170 @@ final class AppState: ObservableObject {
             errorMessage = "Transcription failed: \(error.localizedDescription)"
             phase = .idle
         }
+    }
+
+    // MARK: - Import & Enhance
+
+    /// Import an audio file (wav/m4a/aiff/caf/pcm), normalize to 16kHz mono
+    /// WAV, transcribe with the configured engine/model, save the transcript
+    /// to ~/meetings/imports/ and write a .pending so the summary flow
+    /// picks it up exactly like a live recording.
+    func importAudio(url: URL) async {
+        phase = .transcribing
+        transcriptionProgress = 0
+        do {
+            let workPath: String
+            var durableAudio: String
+
+            if url.pathExtension.lowercased() == "pcm" {
+                // Raw PCM without container — assume MeetCapture v5 on-disk
+                // format (Int16 stereo 16kHz) and provide a format.json
+                // sidecar so the transcriber can decode it.
+                let tmpDir = FileManager.default.temporaryDirectory
+                let tmpPCM = tmpDir.appendingPathComponent("import-\(UUID().uuidString).pcm")
+                try FileManager.default.copyItem(at: url, to: tmpPCM)
+                let sidecar: [String: Any] = [
+                    "schema": "meetcapture.audio.v5",
+                    "sample_rate": 16000,
+                    "sample_format": "int16",
+                    "channels": 2,
+                    "layout": "interleaved",
+                    "tap_strategy": "import",
+                    "tap_info": "",
+                ]
+                try JSONSerialization.data(withJSONObject: sidecar)
+                    .write(to: tmpPCM.appendingPathExtension("format.json"))
+                workPath = tmpPCM.path
+                durableAudio = url.path
+            } else if WhisperTranscriber.is16kMonoWAV(url.path) {
+                // Already normalized — use directly, keep the original.
+                workPath = url.path
+                durableAudio = url.path
+            } else {
+                // Normalize via afconvert (wav/m4a/aiff/caf → 16k mono WAV).
+                let tmpWAV = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("import-\(UUID().uuidString).wav")
+                try await convertWithAfconvert(input: url.path, output: tmpWAV.path)
+                workPath = tmpWAV.path
+                durableAudio = tmpWAV.path
+            }
+
+            // Destination: ~/meetings/imports/<fecha>-<nombre>.txt (+ .wav)
+            let importsDir = importsDirectory()
+            try FileManager.default.createDirectory(
+                atPath: importsDir, withIntermediateDirectories: true)
+            let base = "\(importsDir)/\(importStamp(for: url))"
+            let outputPath = base + ".txt"
+
+            // Keep a durable copy of the normalized WAV next to the
+            // transcript so Re-transcribir can re-run it later.
+            if workPath != url.path, workPath.hasSuffix(".wav") {
+                try? FileManager.default.copyItem(atPath: workPath, toPath: base + ".wav")
+                durableAudio = base + ".wav"
+            }
+
+            let title = url.deletingPathExtension().lastPathComponent
+            await runTranscriptionPipeline(
+                audioPath: workPath,
+                sampleRate: audioCapture.currentSampleRate,
+                title: title,
+                outputPath: outputPath,
+                shouldApplyRetention: false,
+                durableAudioPath: durableAudio
+            )
+        } catch {
+            logger.error("Import failed: \(error.localizedDescription)")
+            errorMessage = "Import failed: \(error.localizedDescription)"
+            phase = .idle
+        }
+    }
+
+    /// Re-run transcription of the last saved audio with the current
+    /// settings (engine/model/language/diarization).
+    func retranscribeLastAudio() async {
+        guard let audio = lastAudioPath else {
+            errorMessage = "No saved audio to re-transcribe."
+            return
+        }
+        guard FileManager.default.fileExists(atPath: audio) else {
+            errorMessage = "Saved audio no longer exists (retention policy deleted it)."
+            return
+        }
+        let outputPath = (audio as NSString).deletingPathExtension + "-retranscribed.txt"
+        await runTranscriptionPipeline(
+            audioPath: audio,
+            sampleRate: audioCapture.currentSampleRate,
+            title: currentMeeting?.title ?? "Re-transcripción",
+            outputPath: outputPath,
+            shouldApplyRetention: false,
+            durableAudioPath: audio
+        )
+    }
+
+    // MARK: - History
+
+    /// Reload recent meetings from the store (respects current search).
+    func searchHistory(_ query: String) {
+        history = store.search(query)
+    }
+
+    private func refreshHistory() {
+        history = store.recent(limit: 20)
+    }
+
+    private func importsDirectory() -> String {
+        if let testDir = ProcessInfo.processInfo.environment["MEETCAPTURE_TEST_OUTPUT_DIR"],
+           !testDir.isEmpty {
+            return "\(testDir)/imports"
+        }
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        return "\(home)/meetings/imports"
+    }
+
+    private func importStamp(for url: URL) -> String {
+        let df = DateFormatter()
+        df.dateFormat = "yyyyMMdd-HHmm"
+        let stamp = df.string(from: Date())
+        let name = url.deletingPathExtension().lastPathComponent
+            .replacingOccurrences(of: "[^A-Za-z0-9._-]", with: "-", options: .regularExpression)
+        return "\(stamp)-\(name)"
+    }
+
+    private func convertWithAfconvert(input: String, output: String) async throws {
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/afconvert")
+            process.arguments = ["-f", "WAVE", "-d", "LEI16@16000", "-c", "1", input, output]
+            process.standardOutput = Pipe()
+            process.standardError = Pipe()
+            do {
+                try process.run()
+                process.waitUntilExit()
+            } catch {
+                cont.resume(throwing: error)
+                return
+            }
+            guard process.terminationStatus == 0 else {
+                cont.resume(throwing: WhisperError.transcriptionFailed(
+                    reason: "afconvert failed (\(process.terminationStatus)) for \(input)"))
+                return
+            }
+            cont.resume(returning: ())
+        }
+    }
+
+    /// Model string reported in .pending / SQLite: the asrModel setting
+    /// as-is ("medium-q5_0" for whisper, "parakeet"/"zipformer-es" for
+    /// sherpa), with a sane default when unset.
+    static func currentModelString(engine: ASREngine) -> String {
+        let setting = UserDefaults.standard.string(forKey: "asrModel")
+            ?? UserDefaults.standard.string(forKey: "whisperModel")
+            ?? ""
+        let trimmed = setting.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return engine == .sherpa ? "parakeet" : "medium-q5_0"
+        }
+        return trimmed
     }
 
     // MARK: - Max Duration Enforcement
@@ -479,11 +718,21 @@ final class AppState: ObservableObject {
         }
     }
 
-    // MARK: - .pending Handoff Contract
+    // MARK: - .pending Handoff Contract (v2)
 
-    /// Writes the canonical .pending contract consumed by HerMaatOS/scripts/meet_summary_dispatcher.py.
-    /// - Throws: on write failure — caller MUST NOT delete audio if this throws.
-    private func writePendingContract(transcriptPath: String, transcriptContent: String, meetingTitle: String?, audioPath: String) async throws {
+    /// Writes the v2 .pending contract consumed by
+    /// HerMaatOS/bin/meetcapture_summary_dispatcher.py (external).
+    /// Atomic write: tmp file + rename. Throws on failure — caller MUST
+    /// NOT delete audio if this throws.
+    private func writePendingContractV2(
+        transcriptPath: String,
+        transcriptContent: String,
+        meetingTitle: String?,
+        audioPath: String,
+        segments: [Segment],
+        engine: ASREngine,
+        speakerCount: Int
+    ) async throws {
         let fm = FileManager.default
         let pendingURL = URL(fileURLWithPath: pendingPath)
         try fm.createDirectory(
@@ -492,39 +741,56 @@ final class AppState: ObservableObject {
             attributes: [.posixPermissions: 0o700]
         )
 
-        // meeting_id: deterministic/idempotent — uses eventIdentifier for calendar, path hash for others
-        let meetingID: String
-        if let mid = currentMeeting?.id {
-            meetingID = "meet-\(mid)"
-        } else {
-            // Stable ID from the audio path's timestamp portion
-            let baseName = (audioPath as NSString).lastPathComponent
-                .replacingOccurrences(of: ".pcm", with: "")
-            meetingID = "rec-\(baseName)"
+        let iso = ISO8601DateFormatter()
+        let started = recordingStartDate ?? Date()
+        let ended = Date()
+        let epoch = Int64(started.timeIntervalSince1970)
+
+        var segmentDicts: [[String: Any]] = []
+        segmentDicts.reserveCapacity(segments.count)
+        for s in segments {
+            var d: [String: Any] = ["start": s.start, "end": s.end, "text": s.text]
+            if let speaker = s.speaker, !speaker.isEmpty {
+                d["speaker"] = speaker
+            }
+            segmentDicts.append(d)
         }
 
-        let created = ISO8601DateFormatter().string(from: Date())
+        let audioExists = fm.fileExists(atPath: audioPath)
 
-        // Canonical contract — no audio path (audio will be deleted)
+        // Canonical v2 contract — exact schema.
         let contract: [String: Any] = [
-            "type": "meeting.processed",
-            "state": "transcribed",
-            "meeting_id": meetingID,
-            "transcript": transcriptPath,
+            "version": 2,
+            "meetingId": "meet-\(epoch)",
             "title": meetingTitle ?? "Untitled Meeting",
-            "source": "meetcapture",
-            "created": created,
-            "metadata": [
-                "transcript_path": transcriptPath,
-                "transcript_characters": transcriptContent.count,
-                "app_version": "5.0.0"
-            ]
+            "startedAt": iso.string(from: started),
+            "endedAt": iso.string(from: ended),
+            "durationSec": ended.timeIntervalSince(started),
+            "transcriptPath": transcriptPath,
+            "audioPath": audioExists ? audioPath : NSNull(),
+            "engine": engine.rawValue,
+            "model": Self.currentModelString(engine: engine),
+            "language": UserDefaults.standard.string(forKey: "asrLanguage") ?? "es",
+            "segments": segmentDicts,
+            "speakerCount": speakerCount,
+            "checksum": Self.sha256Hex(transcriptContent),
         ]
 
         let data = try JSONSerialization.data(withJSONObject: contract, options: [.prettyPrinted, .sortedKeys])
-        try data.write(to: pendingURL, options: .atomic)
 
-        logger.info("Pending handoff written: \(self.pendingPath)")
+        // Atomic: write tmp, then rename over the destination.
+        let tmpURL = pendingURL.appendingPathExtension("tmp-\(UUID().uuidString)")
+        try data.write(to: tmpURL, options: .atomic)
+        _ = try? fm.removeItem(at: pendingURL)
+        try fm.moveItem(at: tmpURL, to: pendingURL)
+
+        logger.info("Pending handoff v2 written: \(self.pendingPath)")
+    }
+
+    /// SHA-256 hex digest of the transcript text (CryptoKit).
+    static func sha256Hex(_ text: String) -> String {
+        let digest = SHA256.hash(data: Data(text.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 
     // MARK: - Retention

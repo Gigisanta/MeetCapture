@@ -23,6 +23,32 @@ import Foundation
 import os
 import os.lock
 
+/// ASR engine selected via Settings → ASR (UserDefaults "engine").
+/// whisper = whisper.cpp CLI (default). sherpa = transcribe_sherpa.py
+/// (whole-file, post-recording). Sherpa streaming in live is the upgrade
+/// path; today sherpa always runs on the finished file.
+enum ASREngine: String, CaseIterable {
+  case whisper = "whisper"
+  case sherpa = "sherpa"
+
+  /// UserDefaults key read at runtime (defensive: unknown → whisper).
+  static func current() -> ASREngine {
+    guard let raw = UserDefaults.standard.string(forKey: "engine"),
+      let engine = ASREngine(rawValue: raw)
+    else { return .whisper }
+    return engine
+  }
+}
+
+/// One timed transcript segment. `speaker` is filled by post-diarization
+/// (nil when diarization is off or unavailable).
+struct Segment: Codable, Equatable {
+  var start: Double
+  var end: Double
+  var text: String
+  var speaker: String?
+}
+
 /// Processing mode for WhisperTranscriber.
 enum TranscriberMode {
   /// Process the entire audio in one shot (ideal for < 60s clips).
@@ -180,27 +206,8 @@ final class WhisperTranscriber: @unchecked Sendable {
   /// Convert the entire PCM to a temp WAV via streaming (bounded memory),
   /// then run whisper once.
   private func runWholeFile() async throws -> String {
-    // Resolve format once
-    let (inputFormat, channels, fileSampleRate) = resolveFormat()
-    let wm = "Whole-file: fmt=\(inputFormat) ch=\(channels) sr=\(fileSampleRate)"
-    logger.debug("\(wm, privacy: .public)")
-
-    // Make sure a model is loaded
-    if !whisperManager.isModelLoaded {
-      try whisperManager.startRecording()
-    }
-
-    let wavURL = FileManager.default.temporaryDirectory
-      .appendingPathComponent("meetcapture-whole-\(UUID().uuidString).wav")
-    defer { try? FileManager.default.removeItem(at: wavURL) }
-
-    try streamConvertToWAV(
-      inputPath: audioPath,
-      outputURL: wavURL,
-      inputFormat: inputFormat,
-      inputChannels: channels,
-      inputSampleRate: fileSampleRate)
-
+    let wavURL = try convertWholeFileToWAV()
+    defer { Self.cleanupTempWAV(wavURL, original: audioPath) }
     progressContinuation.yield(0.3)  // conversion done
 
     try Task.checkCancellation()
@@ -215,6 +222,86 @@ final class WhisperTranscriber: @unchecked Sendable {
     }
     textContinuation.yield(trimmed)
     return Self.dedupRepeats(trimmed)
+  }
+
+  /// Convert (or reuse) the input audio as a 16kHz mono int16 WAV.
+  /// - Already-a-WAV inputs (imports normalized by afconvert) pass through.
+  /// - Raw PCM inputs are stream-converted exactly like runWholeFile did.
+  private func convertWholeFileToWAV() throws -> URL {
+    if Self.is16kMonoWAV(audioPath) {
+      return URL(fileURLWithPath: audioPath)
+    }
+    let wavURL = FileManager.default.temporaryDirectory
+      .appendingPathComponent("meetcapture-whole-\\(UUID().uuidString).wav")
+    let (inputFormat, channels, fileSampleRate) = resolveFormat()
+    try streamConvertToWAV(
+      inputPath: audioPath,
+      outputURL: wavURL,
+      inputFormat: inputFormat,
+      inputChannels: channels,
+      inputSampleRate: fileSampleRate)
+    return wavURL
+  }
+
+  /// True if the file is already a 16kHz mono int16 WAV (RIFF header,
+  /// PCM fmt, 1 channel, 16000 Hz) — passthrough without re-encoding.
+  static func is16kMonoWAV(_ path: String) -> Bool {
+    guard let handle = try? FileHandle(forReadingFrom: URL(fileURLWithPath: path)) else {
+      return false
+    }
+    defer { try? handle.close() }
+    guard let head = try? handle.read(upToCount: 44), head.count >= 44 else { return false }
+    let bytes = [UInt8](head)
+    guard bytes[0] == 0x52, bytes[1] == 0x49, bytes[2] == 0x46, bytes[3] == 0x46 else { return false }  // "RIFF"
+    guard bytes[8] == 0x57, bytes[9] == 0x41, bytes[10] == 0x56, bytes[11] == 0x45 else { return false }  // "WAVE"
+    let fmtTag = UInt16(bytes[20]) | UInt16(bytes[21]) << 8
+    let channels = UInt16(bytes[22]) | UInt16(bytes[23]) << 8
+    let sampleRate = UInt32(bytes[24]) | UInt32(bytes[25]) << 8 | UInt32(bytes[26]) << 16 | UInt32(bytes[27]) << 24
+    return fmtTag == 1 && channels == 1 && sampleRate == 16_000
+  }
+
+  /// Engine-aware whole-file transcription returning timed segments.
+  /// - engine == .sherpa: try transcribe_sherpa.py; on ANY failure
+  ///   (missing script, bad JSON, nonzero exit) log and fall back to whisper.
+  /// - diarize: run speaker_diarize.py post-hoc; failure keeps segments
+  ///   unchanged (never throws for diarization).
+  func runWithSegments(engine: ASREngine, diarize: Bool) async throws -> [Segment] {
+    defer { finishStreams(nil) }  // close on any exit
+
+    if !whisperManager.isModelLoaded {
+      try whisperManager.startRecording()
+    }
+
+    let wavURL = try convertWholeFileToWAV()
+    defer { Self.cleanupTempWAV(wavURL, original: audioPath) }
+    progressContinuation.yield(0.3)  // conversion done
+    try Task.checkCancellation()
+
+    var segments: [Segment]
+    if engine == .sherpa {
+      if let sherpaSegments = await Self.runSherpaScript(wavURL: wavURL) {
+        logger.notice("Sherpa produced \\(sherpaSegments.count) segments")
+        segments = sherpaSegments
+      } else {
+        logger.warning("Sherpa unavailable or failed — falling back to whisper")
+        segments = try await runWhisperJSON(on: wavURL)
+      }
+    } else {
+      segments = try await runWhisperJSON(on: wavURL)
+    }
+
+    if diarize {
+      segments = await Self.diarizeSegments(wavURL: wavURL, segments: segments)
+    }
+
+    let cleaned = segments.map { seg in
+      Segment(start: seg.start, end: seg.end, text: seg.text.trimmingCharacters(in: .whitespacesAndNewlines), speaker: seg.speaker)
+    }.filter { !$0.text.isEmpty }
+
+    let text = cleaned.map(\.text).joined(separator: " ")
+    if !text.isEmpty { textContinuation.yield(text) }
+    progressContinuation.yield(1.0)
+    return cleaned
   }
 
   /// Stream-read raw PCM, convert to 16-bit mono WAV, writing directly
@@ -564,6 +651,347 @@ final class WhisperTranscriber: @unchecked Sendable {
         }
       }
     }
+  }
+
+  // MARK: - Segmented whisper invocation (JSON output)
+
+  /// Run whisper-cli once with `-oj` JSON output and parse timed segments.
+  private func runWhisperJSON(on wavURL: URL) async throws -> [Segment] {
+    guard let modelPath = whisperManager.loadedModelPathAccessor else {
+      finishStreams(WhisperError.noModelLoaded)
+      throw WhisperError.noModelLoaded
+    }
+    let cliPath = whisperManager.whisperCLIPathAccessor
+    let vadModel = whisperManager.vadModelPathAccessor
+    let language = UserDefaults.standard.string(forKey: "asrLanguage") ?? "es"
+    let prompt = WhisperModelManager.domainPrompt
+
+    let audioDurationSec: Double = {
+      let attrs = try? FileManager.default.attributesOfItem(atPath: wavURL.path)
+      let size = (attrs?[.size] as? Int) ?? 0
+      let dataBytes = max(0, size - 44)
+      return Double(dataBytes) / 2.0 / Double(Self.targetSampleRate)
+    }()
+    let timeoutSec = computeTimeout(audioDurationSec: audioDurationSec)
+
+    return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<[Segment], Error>) in
+      let queue = DispatchQueue.global(qos: .userInitiated)
+
+      queue.async {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: cliPath)
+        var args = [
+          "-m", modelPath,
+          "-f", wavURL.path,
+          "-l", language,
+          "-oj", "-of", wavURL.deletingPathExtension().path,
+          "-t", "\(WhisperModelManager.whisperThreads)",
+          "--prompt", prompt,
+          "--carry-initial-prompt",
+          "--suppress-nst",
+          "--no-prints",
+        ]
+        if let vad = vadModel {
+          args += ["--vad", "--vad-model", vad]
+        }
+        process.arguments = args
+
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        process.standardOutput = outPipe
+        process.standardError = errPipe
+
+        let stderrCollector = StderrCollector()
+        let errHandle = errPipe.fileHandleForReading
+        errHandle.readabilityHandler = { handle in
+          let d = handle.availableData
+          if !d.isEmpty {
+            stderrCollector.append(d)
+          }
+        }
+
+        let timerSource = DispatchSource.makeTimerSource(queue: queue)
+        timerSource.schedule(deadline: .now() + .seconds(timeoutSec))
+        timerSource.setEventHandler {
+          if process.isRunning {
+            process.interrupt()  // SIGTERM
+            DispatchQueue.global().asyncAfter(deadline: .now() + 5) {
+              if process.isRunning { process.terminate() }
+            }
+          }
+        }
+        timerSource.resume()
+
+        do {
+          try process.run()
+          process.waitUntilExit()
+        } catch {
+          timerSource.cancel()
+          errHandle.readabilityHandler = nil
+          cont.resume(
+            throwing: WhisperError.processError(
+              exitCode: -1,
+              stderr: "\(error)"))
+          return
+        }
+
+        timerSource.cancel()
+        errHandle.readabilityHandler = nil
+        let capturedStderr = stderrCollector.snapshot()
+
+        let exit = process.terminationStatus
+        if exit == 15 || exit == 9 {
+          cont.resume(
+            throwing: WhisperError.processError(
+              exitCode: exit,
+              stderr: "Timed out after \(timeoutSec)s"))
+          return
+        }
+        guard exit == 0 else {
+          let err = String(data: capturedStderr, encoding: .utf8) ?? ""
+          cont.resume(
+            throwing: WhisperError.processError(
+              exitCode: exit,
+              stderr: err))
+          return
+        }
+
+        let jsonPath = wavURL.deletingPathExtension().path + ".json"
+        guard FileManager.default.fileExists(atPath: jsonPath) else {
+          cont.resume(
+            throwing: WhisperError.transcriptionFailed(
+              reason: "JSON output not created at \(jsonPath)"))
+          return
+        }
+        do {
+          let data = try Data(contentsOf: URL(fileURLWithPath: jsonPath))
+          try? FileManager.default.removeItem(atPath: jsonPath)
+          let segments = Self.parseWhisperJSON(data)
+          guard !segments.isEmpty else {
+            cont.resume(
+              throwing: WhisperError.transcriptionFailed(
+                reason: "No speech was recognized"))
+            return
+          }
+          cont.resume(returning: segments)
+        } catch {
+          cont.resume(
+            throwing: WhisperError.transcriptionFailed(
+              reason: "\(error)"))
+        }
+      }
+    }
+  }
+
+  /// Tolerant parser for whisper-cli JSON output. Accepts both the
+  /// classic schema ({"segments":[{start,end,text}]}) and the newer one
+  /// ({"transcription":[{offsets:{from,to},text}]}, offsets in ms).
+  static func parseWhisperJSON(_ data: Data) -> [Segment] {
+    guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+      return []
+    }
+    var segments: [Segment] = []
+
+    if let items = root["transcription"] as? [[String: Any]] {
+      for item in items {
+        let text = (item["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { continue }
+        var start = 0.0, end = 0.0
+        if let offsets = item["offsets"] as? [String: Any] {
+          start = (offsets["from"] as? Double ?? Double(offsets["from"] as? Int ?? 0)) / 1000.0
+          end = (offsets["to"] as? Double ?? Double(offsets["to"] as? Int ?? 0)) / 1000.0
+        }
+        segments.append(Segment(start: start, end: end, text: text, speaker: nil))
+      }
+    }
+
+    if let items = root["segments"] as? [[String: Any]] {
+      for item in items {
+        let text = (item["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { continue }
+        let start = item["start"] as? Double ?? 0.0
+        let end = item["end"] as? Double ?? start
+        segments.append(Segment(start: start, end: end, text: text, speaker: nil))
+      }
+    }
+
+    return segments
+  }
+
+  // MARK: - Sherpa engine (whole-file, post-recording)
+
+  /// Run scripts/transcribe_sherpa.py --audio <wav> --out <json> with the
+  /// configured venv python. Returns nil on ANY failure (missing script,
+  /// missing python, nonzero exit, unparseable output) — callers fall back
+  /// to whisper. Never throws.
+  static func runSherpaScript(wavURL: URL) async -> [Segment]? {
+    let defaults = UserDefaults.standard
+    let python = defaults.string(forKey: "sherpaPythonPath")
+      ?? "/Users/gigi/HerMaatOS/venvs/venv-meet/bin/python3"
+    let scriptsDir = defaults.string(forKey: "scriptsDir")
+      ?? "/Users/gigi/HerMaatOS/work/meetcapture/scripts"
+    let script = "\(scriptsDir)/transcribe_sherpa.py"
+
+    guard FileManager.default.fileExists(atPath: python),
+      FileManager.default.fileExists(atPath: script)
+    else { return nil }
+
+    let outPath = FileManager.default.temporaryDirectory
+      .appendingPathComponent("sherpa-out-\(UUID().uuidString).json").path
+
+    return await withCheckedContinuation { (cont: CheckedContinuation<[Segment]?, Never>) in
+      DispatchQueue.global(qos: .userInitiated).async {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: python)
+        process.arguments = [script, "--audio", wavURL.path, "--out", outPath]
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        do {
+          try process.run()
+          process.waitUntilExit()
+        } catch {
+          cont.resume(returning: nil)
+          return
+        }
+        guard process.terminationStatus == 0,
+          let data = try? Data(contentsOf: URL(fileURLWithPath: outPath))
+        else {
+          try? FileManager.default.removeItem(atPath: outPath)
+          cont.resume(returning: nil)
+          return
+        }
+        try? FileManager.default.removeItem(atPath: outPath)
+        cont.resume(returning: Self.parseSherpaJSON(data))
+      }
+    }
+  }
+
+  /// Tolerant parser for speaker_diarize.py / transcribe_sherpa.py output:
+  /// array of {start,end,text,speaker}, or {segments:[...]} wrapper.
+  static func parseSherpaJSON(_ data: Data) -> [Segment]? {
+    guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+      let items = (root["segments"] as? [[String: Any]]) ?? (root["transcription"] as? [[String: Any]])
+    else { return nil }
+    var out: [Segment] = []
+    for item in items {
+      guard let text = item["text"] as? String, !text.isEmpty else { continue }
+      let start = item["start"] as? Double ?? item["from"] as? Double ?? 0.0
+      let end = item["end"] as? Double ?? item["to"] as? Double ?? start
+      let speaker = item["speaker"] as? String
+      out.append(Segment(start: start, end: end, text: text, speaker: speaker))
+    }
+    return out.isEmpty ? nil : out
+  }
+
+  // MARK: - Speaker diarization (post-transcription)
+
+  /// Run scripts/speaker_diarize.py --audio <wav> --segments <json> --out <diar.json>
+  /// and merge speaker labels into segments by time overlap. Defensive:
+  /// missing script / failure / empty output → segments unchanged.
+  static func diarizeSegments(wavURL: URL, segments: [Segment]) async -> [Segment] {
+    guard !segments.isEmpty else { return segments }
+    let defaults = UserDefaults.standard
+    let python = defaults.string(forKey: "sherpaPythonPath")
+      ?? "/Users/gigi/HerMaatOS/venvs/venv-meet/bin/python3"
+    let scriptsDir = defaults.string(forKey: "scriptsDir")
+      ?? "/Users/gigi/HerMaatOS/work/meetcapture/scripts"
+    let script = "\(scriptsDir)/speaker_diarize.py"
+    guard FileManager.default.fileExists(atPath: python),
+      FileManager.default.fileExists(atPath: script)
+    else { return segments }
+
+    let segmentsPath = FileManager.default.temporaryDirectory
+      .appendingPathComponent("segments-\(UUID().uuidString).json").path
+    let outPath = FileManager.default.temporaryDirectory
+      .appendingPathComponent("diar-\(UUID().uuidString).json").path
+
+    // Serialize segments to JSON (reuse Segment's Codable).
+    let encoder = JSONEncoder()
+    guard let segmentsData = try? encoder.encode(segments) else { return segments }
+    do {
+      try segmentsData.write(to: URL(fileURLWithPath: segmentsPath))
+    } catch { return segments }
+
+    let labeled = await withCheckedContinuation { (cont: CheckedContinuation<[(start: Double, end: Double, speaker: String)]?, Never>) in
+      DispatchQueue.global(qos: .userInitiated).async {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: python)
+        process.arguments = [
+          script, "--audio", wavURL.path,
+          "--segments", segmentsPath,
+          "--out", outPath,
+        ]
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        do {
+          try process.run()
+          process.waitUntilExit()
+        } catch {
+          cont.resume(returning: nil)
+          return
+        }
+        guard process.terminationStatus == 0,
+          let data = try? Data(contentsOf: URL(fileURLWithPath: outPath))
+        else {
+          try? FileManager.default.removeItem(atPath: outPath)
+          cont.resume(returning: nil)
+          return
+        }
+        try? FileManager.default.removeItem(atPath: outPath)
+        cont.resume(returning: Self.parseDiarization(data))
+      }
+    }
+    try? FileManager.default.removeItem(atPath: segmentsPath)
+
+    guard let labeled else { return segments }
+    var merged = segments
+    for i in merged.indices {
+      let mid = (merged[i].start + merged[i].end) / 2.0
+      if let match = labeled.first(where: {
+        mid >= $0.start - 0.5 && mid <= $0.end + 0.5
+      }) {
+        merged[i].speaker = match.speaker
+      }
+    }
+    return merged
+  }
+
+  /// Tolerant parser for speaker_diarize.py output. Accepts:
+  ///  - [{"start":..,"end":..,"speaker":"Speaker A"}]
+  ///  - [{"speaker":"A","segments":[{"start":..,"end":..},...]}]
+  ///  - {"segments":[...]} wrapper
+  static func parseDiarization(_ data: Data) -> [(start: Double, end: Double, speaker: String)]? {
+    guard let obj = try? JSONSerialization.jsonObject(with: data) else { return nil }
+    var items: [[String: Any]] = []
+    if let arr = obj as? [[String: Any]] {
+      items = arr
+    } else if let dict = obj as? [String: Any], let arr = dict["segments"] as? [[String: Any]] {
+      items = arr
+    }
+    guard !items.isEmpty else { return nil }
+
+    var out: [(start: Double, end: Double, speaker: String)] = []
+    for item in items {
+      if let speaker = item["speaker"] as? String, !speaker.isEmpty {
+        if let start = item["start"] as? Double, let end = item["end"] as? Double {
+          out.append((start, end, speaker))
+        } else if let subs = item["segments"] as? [[String: Any]] {
+          for sub in subs {
+            if let start = sub["start"] as? Double,
+              let end = sub["end"] as? Double {
+              out.append((start, end, speaker))
+            }
+          }
+        }
+      }
+    }
+    return out.isEmpty ? nil : out
+  }
+
+  /// Remove a temp WAV unless it IS the original input (passthrough).
+  static func cleanupTempWAV(_ wavURL: URL, original: String) {
+    guard wavURL.path != original else { return }
+    try? FileManager.default.removeItem(at: wavURL)
   }
 
   // MARK: - WAV Writer (multi-format)

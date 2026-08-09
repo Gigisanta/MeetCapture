@@ -69,6 +69,19 @@ enum WhisperModelSize: String, CaseIterable, Identifiable {
   func filename(quant: WhisperQuant) -> String {
     filenameStem + quant.filenameSuffix
   }
+
+  /// Parse a user setting like "medium", "medium-q5_0" or "large-v3-turbo"
+  /// into a model size. Strips quant suffixes; unknown values → nil.
+  static func normalized(from setting: String) -> WhisperModelSize? {
+    var base = setting
+    for suffix in ["-q5_0", "-q5_1", "-q8_0", "-f16"] {
+      if base.hasSuffix(suffix) {
+        base = String(base.dropLast(suffix.count))
+        break
+      }
+    }
+    return WhisperModelSize(rawValue: base)
+  }
 }
 
 // MARK: - WhisperError
@@ -242,13 +255,13 @@ final class WhisperModelManager: @unchecked Sendable {
   func startRecording() throws {
     guard !isRecording else { return }
     isRecording = true
-    // Honor the user's model choice from Settings (@AppStorage "whisperModel").
-    // selectBestModel still downgrades if there isn't enough free RAM, so an
-    // over-ambitious choice can't freeze the machine. Falls back to the
-    // init default (.base) when the setting is unset.
-    if let saved = UserDefaults.standard.string(forKey: "whisperModel"),
-      let chosen = WhisperModelSize(rawValue: saved)
-    {
+    // Honor the user's model choice from Settings (ASR tab, @AppStorage
+    // "asrModel"; legacy "whisperModel" honored as fallback). Values like
+    // "medium-q5_0" (whisper variant) normalize to the base size — the
+    // loader already prefers the best available quantized file.
+    let setting = UserDefaults.standard.string(forKey: "asrModel")
+      ?? UserDefaults.standard.string(forKey: "whisperModel")
+    if let saved = setting, let chosen = WhisperModelSize.normalized(from: saved) {
       preferredModel = chosen
     }
     let model = selectBestModel(for: preferredModel)

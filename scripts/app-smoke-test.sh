@@ -41,7 +41,7 @@ echo ""
 echo "[2] Info.plist version"
 if [ -f "$APP_BUNDLE/Contents/Info.plist" ]; then
     VER=$(plutil -p "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null | grep CFBundleShortVersionString | awk -F'"' '{print $4}')
-    if [ "$VER" = "5.0.0" ]; then
+    if [ "$VER" = "6.0.0" ]; then
         green "  ✅ Version: $VER"
         PASS=$((PASS + 1))
     else
