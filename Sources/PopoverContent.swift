@@ -311,7 +311,7 @@ struct PopoverContent: View {
             }
             Spacer()
             HStack(spacing: 4) {
-                Text("v6.0.0")
+                Text("v6.0.1")
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
             }
