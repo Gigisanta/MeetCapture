@@ -81,4 +81,4 @@ if ! scripts/app-smoke-test.sh; then
   exit 1
 fi
 
-printf '%s\n' "MeetCapture v6.0.0 installed, launched, and verified."
+printf '%s\n' "MeetCapture v6.0.1 installed, launched, and verified."

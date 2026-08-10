@@ -83,7 +83,14 @@ final class AppState: ObservableObject {
     private var recordingStartDate: Date?
     private var cancellables = Set<AnyCancellable>()
     private let transcriptDir: String
-    private let pendingPath: String
+    private let meetingsDir: String
+    /// Handoff .pending POR REUNIÓN: meet-<epoch>.pending (contrato v2 del
+    /// dispatcher: un archivo por reunión, nombre = meetingId). Ruta canónica
+    /// ~/meetings, la misma que vigila launchd (com.maatwork.meetcapture-summary).
+    private var pendingPath: String {
+        let epoch = Int64((recordingStartDate ?? Date()).timeIntervalSince1970)
+        return "\(meetingsDir)/meet-\(epoch).pending"
+    }
     private var energyActivity: NSObjectProtocol?
     private var lastRecordingPath: String?
     /// Why the *current* recording was started — drives auto-stop behavior.
@@ -105,16 +112,20 @@ final class AppState: ObservableObject {
     // happen later, on the main actor.
     nonisolated init() {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let base = "\(home)/.hermes/TechPartners/MaatWork/meetings"
+        // Ruta canónica: ~/meetings — la misma que vigila el launchd
+        // (com.maatwork.meetcapture-summary, WatchPaths). La ruta legacy
+        // ~/.hermes/TechPartners/MaatWork/meetings ya NO existe: los .pending
+        // escritos ahí jamás los vería el dispatcher (bug corregido en v6.0.1).
+        let base = "\(home)/meetings"
 
         // MEETCAPTURE_TEST_OUTPUT_DIR overrides all output paths for isolated testing.
         if let testDir = ProcessInfo.processInfo.environment["MEETCAPTURE_TEST_OUTPUT_DIR"],
            !testDir.isEmpty {
             transcriptDir = testDir
-            pendingPath = "\(testDir)/.pending"
+            meetingsDir = testDir
         } else {
             transcriptDir = "\(base)/transcripts"
-            pendingPath = "\(base)/.pending"
+            meetingsDir = base
         }
 
         Task { @MainActor in

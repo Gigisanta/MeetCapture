@@ -195,19 +195,24 @@ else
     FAIL=$((FAIL+1))
 fi
 
-if grep -q 'pendingPath = "\\(base)/.pending"' "$ROOT/Sources/AppState.swift"; then
-    green "  ✓ Uses the canonical single .pending marker"
+# v6.0.1: handoff POR REUNIÓN (meet-<epoch>.pending) — el marker único v5
+# sobreescribía reuniones sin procesar; el dispatcher v2 requiere un archivo
+# por reunión (nombre = meetingId).
+if grep -q 'meet-.*\.pending' "$ROOT/Sources/AppState.swift"; then
+    green "  ✓ Uses per-meeting .pending marker (meet-<epoch>.pending)"
     PASS=$((PASS+1))
 else
-    red "  ✗ Missing canonical .pending marker"
+    red "  ✗ Missing per-meeting .pending marker"
     FAIL=$((FAIL+1))
 fi
 
-if grep -q '"type": "meeting.processed"' "$ROOT/Sources/AppState.swift"; then
-    green "  ✓ Handoff type: meeting.processed"
+# v6.0.1: contrato v2 (version + meetingId) — el "type": "meeting.processed"
+# era del contrato v1 legacy.
+if grep -q '"version": 2' "$ROOT/Sources/AppState.swift"; then
+    green "  ✓ Handoff contract: version 2"
     PASS=$((PASS+1))
 else
-    red "  ✗ Handoff type is not meeting.processed"
+    red "  ✗ Handoff contract is not version 2"
     FAIL=$((FAIL+1))
 fi
 
@@ -268,27 +273,27 @@ echo ""
 echo "--- 11. Version bump ---"
 # ---------------------------------------------------------------
 
-if grep -q "5.0.0" "$ROOT/Resources/Info.plist"; then
-    green "  ✓ Version 5.0.0 in Info.plist"
+if grep -q "6.0.1" "$ROOT/Resources/Info.plist"; then
+    green "  ✓ Version 6.0.1 in Info.plist"
     PASS=$((PASS+1))
 else
-    red "  ✗ Version not 5.0.0 in Info.plist"
+    red "  ✗ Version not 6.0.1 in Info.plist"
     FAIL=$((FAIL+1))
 fi
 
-if grep -q "5.0.0" "$ROOT/Sources/SettingsView.swift"; then
-    green "  ✓ Version 5.0.0 in SettingsView"
+if grep -q "6.0.1" "$ROOT/Sources/SettingsView.swift"; then
+    green "  ✓ Version 6.0.1 in SettingsView"
     PASS=$((PASS+1))
 else
-    red "  ✗ Version not 5.0.0 in SettingsView"
+    red "  ✗ Version not 6.0.1 in SettingsView"
     FAIL=$((FAIL+1))
 fi
 
-if grep -q "5.0.0" "$ROOT/Sources/PopoverContent.swift"; then
-    green "  ✓ Version 5.0.0 in PopoverContent"
+if grep -q "6.0.1" "$ROOT/Sources/PopoverContent.swift"; then
+    green "  ✓ Version 6.0.1 in PopoverContent"
     PASS=$((PASS+1))
 else
-    red "  ✗ Version not 5.0.0 in PopoverContent"
+    red "  ✗ Version not 6.0.1 in PopoverContent"
     FAIL=$((FAIL+1))
 fi
 
@@ -308,7 +313,7 @@ handoff = {
     'title': 'Test',
     'source': 'meetcapture',
     'created': '2026-07-14T00:00:00Z',
-    'metadata': {'transcript_path': '/tmp/test.txt', 'app_version': '5.0.0'}
+    'metadata': {'transcript_path': '/tmp/test.txt', 'app_version': '6.0.1'}
 }
 data = json.dumps(handoff)
 parsed = json.loads(data)
