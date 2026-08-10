@@ -64,7 +64,9 @@ def init_diarization(num_speakers, threshold):
                 model=SEG_MODEL
             )
         ),
-        embedding=sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=EMB_MODEL),
+        embedding=sherpa_onnx.SpeakerEmbeddingExtractorConfig(
+            model=EMB_MODEL, num_threads=8, provider="cpu"
+        ),
         clustering=sherpa_onnx.FastClusteringConfig(
             num_clusters=num_speakers, threshold=threshold
         ),
