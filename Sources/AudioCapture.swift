@@ -695,7 +695,7 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
       try buildCoreAudio()
     } catch {
       logger.error("Rebuild falló: \(error.localizedDescription)")
-      lastError = "Audio device changed and capture could not be restarted."
+      DispatchQueue.main.async { self.lastError = "Audio device changed and capture could not be restarted." }
     }
   }
 
@@ -726,7 +726,7 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
   func stopCapture() async {
     guard state == .recording else { return }
     removeDeviceListeners()
-    rebuildQueue.sync { teardownCoreAudio() }
+    rebuildQueue.async { [weak self] in self?.teardownCoreAudio() } // async: sync bloquearía el main actor si buildCoreAudio está en curso
     // Drain every accepted chunk before closing. AVAudioConverter may retain only
     // sub-frame state; resetting is safer than an end-of-stream flush while Core
     // Audio is tearing down and loses less than one output packet.
