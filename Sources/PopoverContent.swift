@@ -35,6 +35,7 @@ struct PopoverContent: View {
             .padding(14)
         }
         .frame(width: Self.width)
+        .frame(minHeight: 320) // macOS 26: .window style con ScrollView implícito puede colapsar sin altura mínima
         .background(.regularMaterial)
         .onReceive(tick) { now = $0 }
     }

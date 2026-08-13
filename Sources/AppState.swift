@@ -153,7 +153,7 @@ final class AppState: ObservableObject {
         case .approaching: return "mic.badge.plus"
         case .recording: return "mic.fill"
         case .transcribing: return "waveform"
-        case .done: return "mic.badge.checkmark"
+        case .done: return "checkmark.circle.fill" // mic.badge.checkmark NO existe en macOS 26 -> glifo invisible
         }
     }
 
