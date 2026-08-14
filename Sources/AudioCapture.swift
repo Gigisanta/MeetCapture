@@ -270,6 +270,28 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
   private var micResampler: AudioResampler?
   private var liveInputRate: Double = 48_000
 
+  // MARK: - Live feed sink
+
+  private let liveSinkLock = NSLock()
+  private var _liveSink: (@Sendable ([Int16]) -> Void)?
+
+  /// Optional consumer of the live 16 kHz mono mix (system + mic averaged),
+  /// used by the in-call streaming ASR preview (LiveASRService). Called on
+  /// the serial writeQueue; set/cleared from the main actor. Never blocks
+  /// the capture/write path — the consumer must enqueue and return.
+  var liveSink: (@Sendable ([Int16]) -> Void)? {
+    get {
+      liveSinkLock.lock()
+      defer { liveSinkLock.unlock() }
+      return _liveSink
+    }
+    set {
+      liveSinkLock.lock()
+      defer { liveSinkLock.unlock() }
+      _liveSink = newValue
+    }
+  }
+
   // MARK: - Sample rate
 
   /// Returns the on-disk output sample rate (always 16000).
@@ -347,6 +369,7 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
   private func setupCapture(outputPath: String) throws {
     lastError = nil
     _tapStrategy = "unknown"
+    print("TIMING setupCapture begin \(Date().timeIntervalSince1970)")
 
     // Ensure directory (0700) and create output file (0600)
     let dir = (outputPath as NSString).deletingLastPathComponent
@@ -444,6 +467,7 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
       "Core Audio: live=\(self.liveInputRate)Hz target=\(kTargetSampleRate)Hz mic=\(subDeviceList.count>0) strategy=\(self._tapStrategy)"
     )
 
+    print("TIMING buildCoreAudio: tap=\(self._tapStrategy) agg=\(aggregateID != kAudioObjectUnknown) after \(Date().timeIntervalSince1970)")
     // 3. IOProc — minimal copy + semaphore + dispatch to utility queue
     let inputRate = liveInputRate
     let outRate = kTargetSampleRate
@@ -523,6 +547,7 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
 
     err = AudioDeviceStart(agg, proc)
     guard err == noErr else { throw CaptureError.deviceStartFailed(err) }
+    print("TIMING AudioDeviceStart done \(Date().timeIntervalSince1970)")
   }
 
   // MARK: - Process & Write (utility queue)
@@ -581,6 +606,19 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
     for frame in 0..<outputFrames {
       out16[frame * 2] = system16[frame]
       out16[frame * 2 + 1] = microphone16[frame]
+    }
+
+    // 4b. Live streaming feed: mono mix of system + mic at 16 kHz, handed
+    // to the in-call ASR preview. Averaging keeps both remote participants
+    // (system tap) and the user's own voice (mic) audible in the live text.
+    if let sink = liveSink {
+      var mix = [Int16](repeating: 0, count: outputFrames)
+      for i in 0..<outputFrames {
+        let l = Int32(system16[i])
+        let r = Int32(microphone16[i])
+        mix[i] = Int16((l + r) / 2)
+      }
+      sink(mix)
     }
 
     // 5. Write to file

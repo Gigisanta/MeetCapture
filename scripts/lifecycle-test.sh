@@ -426,7 +426,7 @@ fi
 echo "=== 10. Info.plist version ==="
 # ---------------------------------------------------------------
 
-if grep -q "6.0.1" "$ROOT/Resources/Info.plist" 2>/dev/null; then
+if grep -q "6.1.0" "$ROOT/Resources/Info.plist" 2>/dev/null; then
     pass "Info.plist version bumped to 6.0.0"
 else
     fail "Info.plist version not updated"

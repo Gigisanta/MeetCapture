@@ -62,6 +62,13 @@ final class AppState: ObservableObject {
     @Published var transcriptionProgress: Double = 0
     @Published var lastTranscriptPath: String?
     @Published var liveTranscriptBuffer: String = ""
+    /// Live in-call streaming ASR (sherpa online): current partial text.
+    @Published var livePartialText: String = ""
+    /// Sentences finalized by the streaming recognizer while recording.
+    @Published var liveSegments: [LiveASRSegment] = []
+    /// Human-readable live-ASR status shown in the popover while recording
+    /// ("" = live transcription disabled).
+    @Published var liveTranscribeStatus: String = ""
     /// Timed segments of the latest transcription (timestamps + speakers).
     @Published var lastSegments: [Segment] = []
     /// Durable audio of the latest transcription (for Re-transcribir).
@@ -93,6 +100,8 @@ final class AppState: ObservableObject {
     }
     private var energyActivity: NSObjectProtocol?
     private var lastRecordingPath: String?
+    /// In-call streaming ASR preview (best-effort; nil when disabled/failed).
+    private var liveASR: LiveASRService?
     /// Why the *current* recording was started — drives auto-stop behavior.
     private var recordingOrigin: RecordingOrigin?
     /// Safety limit for every recording origin. User-configurable, clamped to 30m…8h.
@@ -111,6 +120,7 @@ final class AppState: ObservableObject {
     // any actor-isolated state. All mutations to @Published properties
     // happen later, on the main actor.
     nonisolated init() {
+        setvbuf(stdout, nil, _IONBF, 0)  // timing prints survive pipe redirection
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         // Ruta canónica: ~/meetings — la misma que vigila el launchd
         // (com.maatwork.meetcapture-summary, WatchPaths). La ruta legacy
@@ -179,6 +189,10 @@ final class AppState: ObservableObject {
         // Begin watching for live calls
         audioCapture.callDetector = callDetector
         callDetector.start()
+
+        // Preload the live streaming ASR process (model load takes seconds;
+        // with warmup the recognizer is ready the moment a call starts).
+        setupLiveASR()
 
         phase = .idle
 
@@ -339,7 +353,12 @@ final class AppState: ObservableObject {
 
         Task {
             do {
+                let t0 = Date()
                 try await audioCapture.startCapture(outputPath: outputPath)
+                print("TIMING startCapture took \(Date().timeIntervalSince(t0))s")
+                let t1 = Date()
+                startLiveTranscription()
+                print("TIMING startLiveTranscription took \(Date().timeIntervalSince(t1))s")
                 do {
                     try whisperManager.startRecording()
                 } catch {
@@ -369,6 +388,10 @@ final class AppState: ObservableObject {
 
         Task {
             await audioCapture.stopCapture()
+            audioCapture.liveSink = nil
+            liveASR?.stop()
+            liveASR = nil
+            livePartialText = ""
             endRecordingActivity()
             whisperManager.stopRecording()
 
@@ -380,6 +403,60 @@ final class AppState: ObservableObject {
 
             await transcribe(audioPath: recordedPath)
         }
+    }
+
+    // MARK: - Live Transcription (streaming, in-call)
+
+    /// Create the persistent LiveASRService, wire its callbacks and warm the
+    /// recognizer at app startup so the live preview is ready instantly when
+    /// a call starts. Any failure only disables the preview.
+    private func setupLiveASR() {
+        let enabled = UserDefaults.standard.object(forKey: "liveTranscribe") as? Bool ?? true
+        liveASR = nil
+        guard enabled else { return }
+        let svc = LiveASRService()
+        svc.onPartial = { [weak appState = self] text in
+            let owner = appState
+            DispatchQueue.main.async { owner?.livePartialText = text }
+        }
+        svc.onFinal = { [weak appState = self] seg in
+            let owner = appState
+            DispatchQueue.main.async {
+                guard let owner else { return }
+                owner.liveSegments.append(seg)
+                owner.livePartialText = ""
+            }
+        }
+        svc.onFailure = { [weak appState = self] msg in
+            let owner = appState
+            DispatchQueue.main.async {
+                guard let owner else { return }
+                owner.liveTranscribeStatus = "En vivo no disponible"
+                owner.logger.warning("Live ASR failure: \(msg)")
+            }
+        }
+        liveASR = svc
+        let model = UserDefaults.standard.string(forKey: "liveModel") ?? "zipformer-es"
+        svc.warmup(model: model)
+        logger.info("Live ASR warmup scheduled (\(model))")
+    }
+
+    /// Start the in-call streaming ASR preview (best-effort): feeds the
+    /// 16 kHz mono mix from AudioCapture to the (warm) sherpa recognizer and
+    /// surfaces partial/final text in the popover while the call runs.
+    private func startLiveTranscription() {
+        let enabled = UserDefaults.standard.object(forKey: "liveTranscribe") as? Bool ?? true
+        liveSegments = []
+        livePartialText = ""
+        guard enabled, let svc = liveASR else {
+            liveTranscribeStatus = enabled ? "En vivo no disponible" : ""
+            return
+        }
+        let model = UserDefaults.standard.string(forKey: "liveModel") ?? "zipformer-es"
+        svc.start(model: model)  // reuses the warm process
+        audioCapture.liveSink = { [weak svc] samples in svc?.feed(samples) }
+        liveTranscribeStatus = "En vivo · \(model)"
+        logger.info("Live transcription started (\(model))")
     }
 
     // MARK: - Transcription
@@ -500,6 +577,8 @@ final class AppState: ObservableObject {
             refreshHistory()
 
             liveTranscriptBuffer = ""
+            liveSegments = []
+            livePartialText = ""
             transcriptionProgress = 1.0
             phase = .done
 
