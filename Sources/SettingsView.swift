@@ -252,7 +252,7 @@ struct SettingsView: View {
             Text("MeetCapture")
                 .font(.title2)
 
-            Text("v6.1.0")
+            Text("v6.2.0")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
