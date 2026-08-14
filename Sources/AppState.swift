@@ -69,6 +69,8 @@ final class AppState: ObservableObject {
     /// Human-readable live-ASR status shown in the popover while recording
     /// ("" = live transcription disabled).
     @Published var liveTranscribeStatus: String = ""
+    /// True once the live recognizer is warmed up (idle hint in the popover).
+    @Published var liveTranscribeReady = false
     /// Timed segments of the latest transcription (timestamps + speakers).
     @Published var lastSegments: [Segment] = []
     /// Durable audio of the latest transcription (for Re-transcribir).
@@ -415,6 +417,7 @@ final class AppState: ObservableObject {
         liveASR = nil
         guard enabled else { return }
         let svc = LiveASRService()
+        liveTranscribeReady = true
         svc.onPartial = { [weak appState = self] text in
             let owner = appState
             DispatchQueue.main.async { owner?.livePartialText = text }
