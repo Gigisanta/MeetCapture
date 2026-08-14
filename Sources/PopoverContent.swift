@@ -317,7 +317,7 @@ struct PopoverContent: View {
                     .foregroundStyle(.secondary)
             }
             Button {
-                NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+                openSettingsWindow()
             } label: {
                 Image(systemName: "gearshape")
             }
@@ -393,4 +393,31 @@ struct PopoverContent: View {
         if m >= 60 { return "in \(m / 60)h \(m % 60)m" }
         return "in \(m)m"
     }
+
+    // MARK: - Settings
+
+    private func openSettingsWindow() {
+        NSApp.activate(ignoringOtherApps: true)
+        // Ruta nativa (macOS 13+): el Settings scene responde cuando la app está activa
+        if NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil) {
+            return
+        }
+        // Fallback robusto para menu-bar apps (sin responder chain): ventana propia
+        if let w = Self.settingsWindow {
+            w.makeKeyAndOrderFront(nil)
+            return
+        }
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 620, height: 520),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered, defer: false)
+        window.title = "MeetCapture Settings"
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: SettingsView(appState: appState))
+        window.center()
+        Self.settingsWindow = window
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    private static var settingsWindow: NSWindow?
 }
