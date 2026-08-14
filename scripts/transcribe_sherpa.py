@@ -89,7 +89,7 @@ def resolve_model(model_arg, language):
     mid = model_arg if model_arg else LANG_TO_MODEL.get(language, "zipformer-es")
     if mid not in MODEL_REGISTRY:
         sys.exit(f"modelo desconocido: {mid}. Opciones: {list(MODEL_REGISTRY)}")
-    rel, lang = MODEL_REGISTRY[mid]
+    rel, lang, _lic = MODEL_REGISTRY[mid]  # 3-tuple: (dir, lang, license)
     d = os.path.join(MODELS_DIR, rel)
     if not os.path.isdir(d):
         sys.exit(f"no existe el modelo en {d}")
