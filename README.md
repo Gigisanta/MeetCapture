@@ -1,6 +1,7 @@
-# MeetCapture v6
+# MeetCapture v6.1
 
-Native macOS menu-bar app for private, local meeting capture and Spanish transcription.
+Native macOS menu-bar app for private, local meeting capture, **live in-call
+transcription** and Spanish/English transcription.
 
 ## Production architecture
 
@@ -9,6 +10,7 @@ Native macOS menu-bar app for private, local meeting capture and Spanish transcr
 - Audio is written as 16 kHz signed Int16 stereo PCM: left = system, right = microphone.
 - Every recording has an explicit `<recording>.pcm.format.json` sidecar; byte heuristics are forbidden.
 - **Two ASR engines** (Settings → ASR): `whisper.cpp` (default, `medium Q5_0`) or **sherpa-onnx streaming** (`zipformer-es-kroko`, RTF ~0.04 — ~25× realtime, ~3.5× faster than medium whisper) with Silero VAD segmentation.
+- **Live in-call transcription (v6.1)**: while recording, the 16 kHz mono mix (system + mic) streams to a sherpa-onnx **online recognizer** (`scripts/meetcapture_stream_asr.py` — zipformer es-kroko, ~0.13 RTF ≈ 7.7× realtime) and the popover shows the meeting text **as it is spoken** (partial + endpoint-segmented sentences). The recognizer is pre-warmed at app startup so the preview starts instantly; the authoritative transcript still comes from the whole-file engine (more accurate + diarized). Toggle in Settings → ASR (live model: es / en).
 - **Speaker diarization** (sherpa-onnx pyannote segmentation + eres2net embeddings): post-hoc labels A/B/C mapped onto transcript segments; transcripts get `[Speaker A]:` prefixes; speaker count goes into the handoff.
 - **`.pending` v2 atomic handoff** (version, meetingId, segments with timestamps+speakers, engine, model, checksum) wakes the summary dispatcher.
 - **Summary engine**: `HerMaatOS/bin/meetcapture_summary_dispatcher.py` (launchd `com.maatwork.meetcapture-summary`, WatchPaths) calls any OpenAI-compatible endpoint — default the local MLX gateway (`:8083`, qwen3.5-4b) — and writes `summary.json` + self-contained `summary.html` (resumen, action items, decisiones, asistentes), then acks `.pending → .done` and applies retention.
@@ -24,7 +26,7 @@ No meeting audio or transcript is sent over the network by MeetCapture.
 - Microphone, Screen & System Audio, Calendar, and Notification permissions as desired
 - `whisper-cli` from `brew install whisper-cpp`
 - local model: `~/.whisper/models/ggml-medium-q5_0.bin`
-- sherpa-onnx engine (optional): venv `HerMaatOS/venvs/venv-meet` with `sherpa-onnx`, models under `~/.whisper/models/sherpa/` (see `scripts/README`), helper scripts in `scripts/` (`transcribe_sherpa.py`, `speaker_diarize.py`).
+- sherpa-onnx engine (optional): venv `HerMaatOS/venvs/venv-meet` with `sherpa-onnx` + `numpy`, models under `~/.whisper/models/sherpa/` (see `scripts/README`), helper scripts in `scripts/` (`transcribe_sherpa.py`, `speaker_diarize.py`, `meetcapture_stream_asr.py`).
 
 ## Install or update
 
@@ -56,7 +58,12 @@ Local builds use ad-hoc signing. Developer ID signing and notarization are requi
 
 ```bash
 bash scripts/app-smoke-test.sh    # bundle + runtime checks (8/8)
-bash scripts/lifecycle-test.sh    # architecture + contract checks (34/34)
+bash scripts/e2e-test.sh          # lifecycle/retention/handoff/version checks (32/32)
+bash scripts/lifecycle-test.sh    # architecture + contract checks
 bash scripts/benchmark-asr.sh     # A/B whisper vs sherpa (WER/RTF) on generated corpus
+
+# Live streaming ASR (standalone): feeds 16 kHz mono Int16 PCM on stdin,
+# JSONL events on stdout
+ffmpeg -i meeting.wav -ar 16000 -ac 1 -f s16le - |   "$HOME/HerMaatOS/venvs/venv-meet/bin/python3" -B scripts/meetcapture_stream_asr.py --model zipformer-es
 bash scripts/gen_test_corpus.sh   # 2-speaker Spanish corpus via macOS `say`
 ```

@@ -20,6 +20,9 @@ struct PopoverContent: View {
                 header
                 if !appState.hasAudioPermission { permissionRow }
                 statusRow
+                if appState.phase == .recording && !appState.liveTranscribeStatus.isEmpty {
+                    liveRecordingSection
+                }
                 if appState.phase == .transcribing || !appState.liveTranscriptBuffer.isEmpty || !appState.lastSegments.isEmpty {
                     liveTranscript
                 }
@@ -105,6 +108,42 @@ struct PopoverContent: View {
                     .monospacedDigit()
             }
         }
+    }
+
+    // MARK: - Live recording (streaming ASR while on the call)
+
+    private var liveRecordingSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("En vivo")
+                    .font(.system(size: 11, weight: .semibold))
+                Spacer()
+                Text(appState.liveTranscribeStatus)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(appState.liveSegments) { seg in
+                        Text("[(formatTimestamp(seg.start))] (seg.text)")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    if !appState.livePartialText.isEmpty {
+                        Text(appState.livePartialText + " …")
+                            .font(.system(size: 11, weight: .medium))
+                            .italic()
+                            .foregroundStyle(.primary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            }
+            .frame(maxHeight: 150)
+        }
+        .padding(8)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
     }
 
     // MARK: - Live transcript
@@ -312,7 +351,7 @@ struct PopoverContent: View {
             }
             Spacer()
             HStack(spacing: 4) {
-                Text("v6.0.1")
+                Text("v6.1.0")
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
             }

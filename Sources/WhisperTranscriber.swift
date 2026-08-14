@@ -843,7 +843,9 @@ final class WhisperTranscriber: @unchecked Sendable {
       DispatchQueue.global(qos: .userInitiated).async {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: python)
-        process.arguments = [script, "--audio", wavURL.path, "--out", outPath]
+        // -B: never write __pycache__ (the scripts may live inside the signed
+        // .app bundle; writing bytecode there breaks the code signature)
+        process.arguments = ["-B", script, "--audio", wavURL.path, "--out", outPath]
         process.standardOutput = Pipe()
         process.standardError = Pipe()
         do {
@@ -899,6 +901,7 @@ final class WhisperTranscriber: @unchecked Sendable {
     guard FileManager.default.fileExists(atPath: python),
       FileManager.default.fileExists(atPath: script)
     else { return segments }
+    // (python -B: no __pycache__ inside the signed bundle)
 
     let segmentsPath = FileManager.default.temporaryDirectory
       .appendingPathComponent("segments-\(UUID().uuidString).json").path
@@ -917,7 +920,7 @@ final class WhisperTranscriber: @unchecked Sendable {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: python)
         process.arguments = [
-          script, "--audio", wavURL.path,
+          "-B", script, "--audio", wavURL.path,
           "--segments", segmentsPath,
           "--out", outPath,
         ]

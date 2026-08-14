@@ -273,24 +273,24 @@ echo ""
 echo "--- 11. Version bump ---"
 # ---------------------------------------------------------------
 
-if grep -q "6.0.1" "$ROOT/Resources/Info.plist"; then
-    green "  ✓ Version 6.0.1 in Info.plist"
+if grep -q "6.1.0" "$ROOT/Resources/Info.plist"; then
+    green "  ✓ Version 6.1.0 in Info.plist"
     PASS=$((PASS+1))
 else
     red "  ✗ Version not 6.0.1 in Info.plist"
     FAIL=$((FAIL+1))
 fi
 
-if grep -q "6.0.1" "$ROOT/Sources/SettingsView.swift"; then
-    green "  ✓ Version 6.0.1 in SettingsView"
+if grep -q "6.1.0" "$ROOT/Sources/SettingsView.swift"; then
+    green "  ✓ Version 6.1.0 in SettingsView"
     PASS=$((PASS+1))
 else
     red "  ✗ Version not 6.0.1 in SettingsView"
     FAIL=$((FAIL+1))
 fi
 
-if grep -q "6.0.1" "$ROOT/Sources/PopoverContent.swift"; then
-    green "  ✓ Version 6.0.1 in PopoverContent"
+if grep -q "6.1.0" "$ROOT/Sources/PopoverContent.swift"; then
+    green "  ✓ Version 6.1.0 in PopoverContent"
     PASS=$((PASS+1))
 else
     red "  ✗ Version not 6.0.1 in PopoverContent"
@@ -313,7 +313,7 @@ handoff = {
     'title': 'Test',
     'source': 'meetcapture',
     'created': '2026-07-14T00:00:00Z',
-    'metadata': {'transcript_path': '/tmp/test.txt', 'app_version': '6.0.1'}
+    'metadata': {'transcript_path': '/tmp/test.txt', 'app_version': '6.1.0'}
 }
 data = json.dumps(handoff)
 parsed = json.loads(data)

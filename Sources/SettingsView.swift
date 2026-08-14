@@ -21,6 +21,10 @@ struct SettingsView: View {
     @AppStorage("sherpaPythonPath") private var sherpaPythonPath = "/Users/gigi/HerMaatOS/venvs/venv-meet/bin/python3"
     @AppStorage("scriptsDir") private var scriptsDir = "/Users/gigi/HerMaatOS/work/meetcapture/scripts"
 
+    // Live streaming ASR (in-call preview)
+    @AppStorage("liveTranscribe") private var liveTranscribe = true
+    @AppStorage("liveModel") private var liveModel = "zipformer-es"
+
     // IA (summary endpoint — consumed by the external summary dispatcher)
     @AppStorage("aiEndpoint") private var aiEndpoint = "http://127.0.0.1:8083/v1"
     @AppStorage("aiModel") private var aiModel = ""
@@ -140,6 +144,18 @@ struct SettingsView: View {
 
             Divider()
 
+            Toggle("Live transcription while recording", isOn: $liveTranscribe)
+            Text("Streams the captured audio to sherpa-onnx in real time — partial text appears in the popover during the call. The final transcript still uses the engine above (more accurate + diarized).")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
+            Picker("Live model", selection: $liveModel) {
+                Text("Español (zipformer-es)").tag("zipformer-es")
+                Text("English (zipformer-en)").tag("zipformer-en")
+            }
+
+            Divider()
+
             TextField("Sherpa Python", text: $sherpaPythonPath)
             TextField("Scripts directory", text: $scriptsDir)
                 .font(.caption2)
@@ -213,11 +229,11 @@ struct SettingsView: View {
             Text("MeetCapture")
                 .font(.title2)
 
-            Text("v6.0.1")
+            Text("v6.1.0")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-            Text("Automatic Google Meet transcription")
+            Text("Automatic call transcription — Meet, Zoom, Teams, WhatsApp & more")
                 .font(.caption)
 
             Link("GitHub", destination: URL(string: "https://github.com/Gigisanta/MeetCapture")!)

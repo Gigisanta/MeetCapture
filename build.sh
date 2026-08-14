@@ -140,6 +140,13 @@ else
     echo "      Install it:  brew install whisper-cpp"
 fi
 
+# Bundle ASR/diarization python scripts (live streaming ASR + whole-file
+# sherpa + diarization). The app resolves scripts via the scriptsDir setting
+# (repo/dev) with a fallback to Contents/Resources/scripts (distribution).
+mkdir -p "$APP_BUNDLE/Contents/Resources/scripts"
+cp "$REPO_DIR"/scripts/*.py "$APP_BUNDLE/Contents/Resources/scripts/" 2>/dev/null || true
+echo "  Bundled: $(ls "$APP_BUNDLE/Contents/Resources/scripts" 2>/dev/null | wc -l | tr -d ' ') python scripts"
+
 # Ensure the Silero VAD model exists
 VAD_MODEL="$HOME/.whisper/models/ggml-silero-v5.1.2.bin"
 if [ ! -f "$VAD_MODEL" ]; then
