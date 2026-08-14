@@ -28,10 +28,20 @@ import sherpa_onnx
 
 MODELS_DIR = os.path.expanduser("~/.whisper/models/sherpa")
 
-# id -> (dir_relativa_al_models_dir, idioma)
+# id -> (dir_relativa_al_models_dir, idioma, licencia)
+# ⚠️ LICENCIAS (importante si se redistribuye la app con modelos incluidos):
+#   zipformer-es (kroko) es CC-BY-SA — no incluir los pesos en un bundle
+#   comercial sin cumplir share-alike. Alternativa Apache-2.0 de nivel palabra:
+#   ninguna streaming-es hoy; bookbot-es es fonémico (requiere lexicón gruut,
+#   no es drop-in). zipformer-en es Apache-2.0.
 MODEL_REGISTRY = {
-    "zipformer-es": ("sherpa-onnx-streaming-zipformer-es-kroko-2025-08-06", "es"),
-    "zipformer-en": ("sherpa-onnx-streaming-zipformer-en-2023-06-26", "en"),
+    "zipformer-es": ("sherpa-onnx-streaming-zipformer-es-kroko-2025-08-06", "es", "CC-BY-SA"),
+    "zipformer-en": ("sherpa-onnx-streaming-zipformer-en-2023-06-26", "en", "Apache-2.0"),
+    "zipformer-es-bookbot": (
+        "sherpa-onnx-streaming-zipformer-es-bookbot",
+        "es",
+        "Apache-2.0 (fonémico: salida IPA, requiere lexicón para palabras)",
+    ),
 }
 LANG_TO_MODEL = {"es": "zipformer-es", "en": "zipformer-en", "auto": "zipformer-es"}
 
