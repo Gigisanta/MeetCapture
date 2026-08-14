@@ -25,6 +25,8 @@ private let callAppPrefixes: [String] = [
   "us.zoom.xos", "com.microsoft.teams", "com.tinyspeck.slackmacgap",
   "com.apple.facetime", "com.hnc.discord", "com.cisco.webexmeetingsapp",
   "com.skype", "com.google.meet",
+  // Messaging apps with voice/video calls
+  "net.whatsapp.WhatsApp", "org.whispersystems.signal", "ru.keepcoder.Telegram",
 ]
 
 @MainActor
