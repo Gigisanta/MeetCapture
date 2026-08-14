@@ -1,4 +1,4 @@
-# MeetCapture v6.1
+# MeetCapture v6.2
 
 Native macOS menu-bar app for private, local meeting capture, **live in-call
 transcription** and Spanish/English transcription.
