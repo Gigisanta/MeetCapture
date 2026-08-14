@@ -51,3 +51,27 @@ playback). For mic-path testing or user demos, BlackHole is the standard tool:
   **phoneme-level** (IPA output; needs a gruut lexicon to produce words) — not
   a drop-in replacement for kroko. Verified: garbage word output without lexicon.
 - whisper.cpp ggml models: MIT. Silero VAD: MIT. pyannote/eres2net: MIT.
+
+## 4) Conversation recording (2026-08-14) — full report in
+   ~/HerMaatOS/output/deepresearch/macos_audio_capture_research.md
+
+- **iPhone (Continuity) as mic**: standard Core Audio input device — select in
+  System Settings > Sound > Input; apps using the default input pick it up
+  automatically. It is MONO → duplicate to both L/R (done in mic-only mode).
+  Wireless transport caveats: out-of-range drops, battery drain, incoming
+  call interrupts, privacy chime, lock-screen suspension. Sample rate is the
+  device nominal (44.1/48k); request 16k and let the converter resample.
+- **Phone call near the Mac**: NO macOS API captures a phone's call audio —
+  only the Mac mic (or iPhone mic via Continuity). Best practice: phone on
+  speakerphone, Mac mic captures the room, VAD/noise-gate the input.
+- **Mic-only mode**: an aggregate without a tap (this app's design) works and
+  was verified (tap=mic-only); Apple TN2091 suggests a plain HAL IOProc /
+  AVAudioEngine inputNode as the even simpler alternative.
+- **WhatsApp Desktop**: bundle id net.whatsapp.WhatsApp CONFIRMED (native
+  AppKit, not Electron) — process tap + mic-in-use detection (process objects)
+  is the correct trigger; already implemented in CallDetector.
+- **VAD auto-start (future)**: Silero VAD (sherpa-onnx) confirmed streaming
+  on 100ms chunks (official vad-microphone.py pattern). Recommended trigger:
+  150-250ms speech persistence to start, ~1.5-2s pre-roll prepended, hold
+  open while speech continues, stop after ~2-4s silence, reset LSTM between
+  segments. Native Swift option: paean-ai/silero-vad-swift (CoreML).
