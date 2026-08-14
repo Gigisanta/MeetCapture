@@ -434,7 +434,10 @@ struct PopoverContent: View {
         switch appState.phase {
         case .idle:         return "Watching for Google Meet calls"
         case .approaching:  return "Auto-record starts when it begins"
-        case .recording:    return "Capturing mic + call audio · texto en vivo"
+        case .recording:
+            return appState.audioCapture.micOnlyMode
+              ? "Conversación (solo micrófono) · texto en vivo"
+              : "Capturing mic + call audio · texto en vivo"
         case .transcribing: return "Generating transcript locally"
         case .done:         return "Saved to your transcripts folder"
         }

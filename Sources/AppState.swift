@@ -356,6 +356,8 @@ final class AppState: ObservableObject {
         Task {
             do {
                 let t0 = Date()
+                audioCapture.micOnlyMode =
+                  UserDefaults.standard.object(forKey: "micOnlyMode") as? Bool ?? false
                 try await audioCapture.startCapture(outputPath: outputPath)
                 print("TIMING startCapture took \(Date().timeIntervalSince(t0))s")
                 let t1 = Date()
