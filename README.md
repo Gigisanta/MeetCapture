@@ -20,6 +20,16 @@ transcription** and Spanish/English transcription.
 
 No meeting audio or transcript is sent over the network by MeetCapture.
 
+## Model licenses
+
+Models are **downloaded by the user** (never bundled with the app):
+
+- zipformer-es (live + sherpa engine, kroko): **CC-BY-SA** — share-alike if you redistribute the weights. Fine for personal/internal use; for a commercial bundle prefer an Apache-2.0 model (zipformer-en is Apache-2.0; bookbot es is Apache-2.0 but phoneme-level, needs a gruut lexicon).
+- zipformer-en: **Apache-2.0**.
+- whisper.cpp models (ggml-medium-q5_0, ...): **MIT**.
+- Silero VAD: MIT; pyannote/eres2net (diarization): MIT.
+
+
 ## Requirements
 
 - Apple Silicon Mac, macOS 14.4+
