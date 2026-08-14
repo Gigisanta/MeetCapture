@@ -62,7 +62,7 @@ def main():
         if args.model not in MODEL_REGISTRY:
             emit({"type": "error", "message": f"modelo desconocido: {args.model}. Opciones: {list(MODEL_REGISTRY)}"})
             sys.exit(2)
-        rel, _lang = MODEL_REGISTRY[args.model]
+        rel, _lang, _lic = MODEL_REGISTRY[args.model]  # 3-tuple: (dir, lang, license)
         model_dir = os.path.join(MODELS_DIR, rel)
     if not os.path.isdir(model_dir):
         emit({"type": "error", "message": f"no existe el modelo en {model_dir}"})
