@@ -20,6 +20,9 @@ struct PopoverContent: View {
                 header
                 if !appState.hasAudioPermission { permissionRow }
                 statusRow
+                if appState.phase == .idle, appState.liveTranscribeReady {
+                    liveReadyRow
+                }
                 if appState.phase == .recording && !appState.liveTranscribeStatus.isEmpty {
                     liveRecordingSection
                 }
@@ -108,6 +111,24 @@ struct PopoverContent: View {
                     .monospacedDigit()
             }
         }
+    }
+
+    // MARK: - Live ready (idle hint)
+
+    /// Small status row shown while idle: makes the live transcription
+    /// feature visible even before any call starts.
+    private var liveReadyRow: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "waveform.badge.mic")
+                .font(.system(size: 11))
+                .foregroundStyle(Brand.successGreen)
+            Text("Transcripción en vivo lista — el texto aparece al grabar")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            Spacer()
+        }
+        .padding(6)
+        .background(Brand.successGreen.opacity(0.10), in: RoundedRectangle(cornerRadius: 6))
     }
 
     // MARK: - Live recording (streaming ASR while on the call)
@@ -413,7 +434,7 @@ struct PopoverContent: View {
         switch appState.phase {
         case .idle:         return "Watching for Google Meet calls"
         case .approaching:  return "Auto-record starts when it begins"
-        case .recording:    return "Capturing mic + call audio"
+        case .recording:    return "Capturing mic + call audio · texto en vivo"
         case .transcribing: return "Generating transcript locally"
         case .done:         return "Saved to your transcripts folder"
         }
