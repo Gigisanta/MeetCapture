@@ -175,6 +175,7 @@ enum CaptureError: LocalizedError {
   }
 }
 
+
 // MARK: - Capture State
 
 enum CaptureState: Equatable {
@@ -250,6 +251,64 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
   /// Optional reference to CallDetector for retrieving PIDs of active
   /// conferencing apps when building a targeted process tap.
   weak var callDetector: CallDetector?
+
+  // MARK: - Conversation (mic-only) mode
+
+  /// When true, recordings capture ONLY the selected input device (no system
+  /// tap): for phone conversations near the Mac (WhatsApp on the phone, etc.).
+  /// Set by AppState before startCapture; read by the IOProc/write path.
+  var micOnlyMode = false
+
+  /// All input devices (uid, name) for the Settings picker.
+  func inputDevices() -> [(uid: String, name: String)] {
+    var out: [(uid: String, name: String)] = []
+    var addr = AudioObjectPropertyAddress(
+      mSelector: kAudioHardwarePropertyDevices,
+      mScope: kAudioObjectPropertyScopeGlobal,
+      mElement: kAudioObjectPropertyElementMain)
+    let sys = AudioObjectID(kAudioObjectSystemObject)
+    var size: UInt32 = 0
+    guard AudioObjectGetPropertyDataSize(sys, &addr, 0, nil, &size) == noErr, size > 0 else {
+      return out
+    }
+    let count = Int(size) / MemoryLayout<AudioObjectID>.size
+    var ids = [AudioObjectID](repeating: 0, count: count)
+    guard AudioObjectGetPropertyData(sys, &addr, 0, nil, &size, &ids) == noErr else { return out }
+
+    for dev in ids {
+      var inAddr = AudioObjectPropertyAddress(
+        mSelector: kAudioDevicePropertyStreamConfiguration,
+        mScope: kAudioDevicePropertyScopeInput,
+        mElement: kAudioObjectPropertyElementMain)
+      var inSize: UInt32 = 0
+      guard AudioObjectGetPropertyDataSize(dev, &inAddr, 0, nil, &inSize) == noErr,
+        inSize > 0 else { continue }
+      let buf = UnsafeMutableRawPointer.allocate(byteCount: Int(inSize), alignment: 1)
+      defer { buf.deallocate() }
+      guard AudioObjectGetPropertyData(dev, &inAddr, 0, nil, &inSize, buf) == noErr else {
+        continue
+      }
+      let abl = buf.assumingMemoryBound(to: AudioBufferList.self)
+      let channels =
+        Int(abl.pointee.mNumberBuffers) > 0 ? Int(abl.pointee.mBuffers.mNumberChannels) : 0
+      guard channels > 0 else { continue }
+
+      func prop(_ sel: AudioObjectPropertySelector) -> String? {
+        var a = AudioObjectPropertyAddress(
+          mSelector: sel, mScope: kAudioObjectPropertyScopeGlobal,
+          mElement: kAudioObjectPropertyElementMain)
+        var cf: Unmanaged<CFString>?
+        var sz = UInt32(MemoryLayout<CFString?>.size)
+        guard AudioObjectGetPropertyData(dev, &a, 0, nil, &sz, &cf) == noErr else { return nil }
+        return cf?.takeRetainedValue() as String?
+      }
+      if let uid = prop(kAudioDevicePropertyDeviceUID),
+        let name = prop(kAudioDevicePropertyDeviceNameCFString) {
+        out.append((uid: uid, name: name))
+      }
+    }
+    return out.sorted { $0.name < $1.name }
+  }
 
   // MARK: - Core Audio objects
 
@@ -416,38 +475,49 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
   /// Targeted PID tap → fallback global; aggregate with mic sub-device.
   /// IOProc copies buffers minimally, dispatches to utility queue.
   private func buildCoreAudio() throws {
-    // 1. Tap — targeted by PID (active call apps), fallback to global
-    let processIDs: [AudioObjectID] = callDetector?.activeCallProcessIDs() ?? []
-    let (tap, desc): (AudioObjectID, CATapDescription)
-    if !processIDs.isEmpty {
-      let result = try createTap(processIDs: processIDs, fallbackToGlobal: true)
-      tap = result.0
-      desc = result.1
-      _tapStrategy = "targeted"
+    // 1. Tap — targeted by PID (active call apps), fallback to global.
+    //    In mic-only conversation mode there is NO tap: only the selected
+    //    input device is captured (phone call near the Mac, iPhone mic via
+    //    Continuity, etc.) — the aggregate holds just the mic sub-device.
+    let micOnly = micOnlyMode
+    var tap = AudioObjectID(kAudioObjectUnknown)
+    var desc: CATapDescription?
+    if micOnly {
+      _tapStrategy = "mic-only"
     } else {
-      let result = try createGlobalTapWithDesc()
-      tap = result.0
-      desc = result.1
-      _tapStrategy = "global"
+      let processIDs: [AudioObjectID] = callDetector?.activeCallProcessIDs() ?? []
+      if !processIDs.isEmpty {
+        let result = try createTap(processIDs: processIDs, fallbackToGlobal: true)
+        tap = result.0
+        desc = result.1
+        _tapStrategy = "targeted"
+      } else {
+        let result = try createGlobalTapWithDesc()
+        tap = result.0
+        desc = result.1
+        _tapStrategy = "global"
+      }
     }
     tapID = tap
     tapDesc = desc
 
-    // 2. Private aggregate = system tap + mic (if available)
+    // 2. Private aggregate = (system tap) + mic (if available)
     let aggUID = "meetcapture-tap-\(UUID().uuidString)"
     var subDeviceList: [[String: Any]] = []
     if let micUID = defaultInputUID() {
       subDeviceList = [[kAudioSubDeviceUIDKey as String: micUID]]
     }
-    let aggDesc: [String: Any] = [
+    var aggDesc: [String: Any] = [
       kAudioAggregateDeviceNameKey as String: "MeetCaptureTap",
       kAudioAggregateDeviceUIDKey as String: aggUID,
       kAudioAggregateDeviceIsPrivateKey as String: 1,
       kAudioAggregateDeviceSubDeviceListKey as String: subDeviceList,
-      kAudioAggregateDeviceTapListKey as String: [
-        [kAudioSubTapUIDKey as String: desc.uuid.uuidString]
-      ],
     ]
+    if !micOnly, let desc {
+      aggDesc[kAudioAggregateDeviceTapListKey as String] = [
+        [kAudioSubTapUIDKey as String: desc.uuid.uuidString]
+      ]
+    }
     var agg = AudioObjectID(kAudioObjectUnknown)
     var err = AudioHardwareCreateAggregateDevice(aggDesc as CFDictionary, &agg)
     guard err == noErr else { throw CaptureError.aggregateCreationFailed(err) }
@@ -489,30 +559,52 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
       let nBuf = abl.count
       guard nBuf > 0 else { return }
 
-      // Buffer 0 = tap (system audio), Buffer 1 = mic (if present)
+      // Buffer 0 = tap (system audio), Buffer 1 = mic (if present).
+      // In mic-only conversation mode there is no tap: buffer 0 IS the mic.
+      let isMicOnly = self.micOnlyMode
       let sysCh = Int(abl[0].mNumberChannels)
       let sysBytes = Int(abl[0].mDataByteSize)
       let sysFrames = sysBytes / (MemoryLayout<Float>.size * max(sysCh, 1))
       guard sysFrames > 0, sysFrames <= kMaxBufferFrames else { return }
 
-      let hasMic = nBuf > 1 && abl[1].mDataByteSize > 0
-      let micCh = hasMic ? Int(abl[1].mNumberChannels) : 0
-      let micBytes = hasMic ? Int(abl[1].mDataByteSize) : 0
-      let micFrames = hasMic ? micBytes / (MemoryLayout<Float>.size * max(micCh, 1)) : 0
+      let hasMic: Bool
+      let micCh: Int
+      let micBytes: Int
+      let micFrames: Int
+      if isMicOnly {
+        hasMic = true
+        micCh = sysCh
+        micBytes = sysBytes
+        micFrames = sysFrames
+      } else {
+        hasMic = nBuf > 1 && abl[1].mDataByteSize > 0
+        micCh = hasMic ? Int(abl[1].mNumberChannels) : 0
+        micBytes = hasMic ? Int(abl[1].mDataByteSize) : 0
+        micFrames = hasMic ? micBytes / (MemoryLayout<Float>.size * max(micCh, 1)) : 0
+      }
 
       // --- Bounded copy of raw Float32 data ---
       // We allocate new arrays here (bounded by kMaxBufferFrames * kMaxChannels).
       // This is the ONLY allocation in the IOProc path and is bounded.
       let sysCount = sysFrames * sysCh
-      let sysData: [Float] = {
-        guard let ptr = abl[0].mData?.assumingMemoryBound(to: Float.self) else {
-          return []
-        }
-        return Array(UnsafeBufferPointer(start: ptr, count: sysCount))
-      }()
+      let sysData: [Float]
+      if isMicOnly {
+        sysData = []
+      } else if let ptr = abl[0].mData?.assumingMemoryBound(to: Float.self) {
+        sysData = Array(UnsafeBufferPointer(start: ptr, count: sysCount))
+      } else {
+        sysData = []
+      }
 
       let micData: [Float]
-      if hasMic, micFrames > 0 {
+      if isMicOnly {
+        // mic-only: buffer 0 (already bounded above) is the microphone
+        if let ptr = abl[0].mData?.assumingMemoryBound(to: Float.self) {
+          micData = Array(UnsafeBufferPointer(start: ptr, count: micFrames * micCh))
+        } else {
+          micData = []
+        }
+      } else if hasMic, micFrames > 0 {
         let micCount = micFrames * micCh
         if let ptr = abl[1].mData?.assumingMemoryBound(to: Float.self) {
           micData = Array(UnsafeBufferPointer(start: ptr, count: micCount))
@@ -602,10 +694,19 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
     guard outputFrames > 0 else { return }
 
     // 4. Preserve tracks in one file: L=system, R=mic.
+    //    Mic-only conversation mode: the mic goes to BOTH channels (the
+    //    transcriber averages L+R, the live ASR mix is (L+R)/2 → full mic).
     var out16 = [Int16](repeating: 0, count: outputFrames * 2)
-    for frame in 0..<outputFrames {
-      out16[frame * 2] = system16[frame]
-      out16[frame * 2 + 1] = microphone16[frame]
+    if micOnlyMode {
+      for frame in 0..<outputFrames {
+        out16[frame * 2] = microphone16[frame]
+        out16[frame * 2 + 1] = microphone16[frame]
+      }
+    } else {
+      for frame in 0..<outputFrames {
+        out16[frame * 2] = system16[frame]
+        out16[frame * 2 + 1] = microphone16[frame]
+      }
     }
 
     // 4b. Live streaming feed: mono mix of system + mic at 16 kHz, handed
@@ -738,6 +839,12 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
   }
 
   private func defaultInputUID() -> String? {
+    // Explicit input device chosen in Settings (e.g. "iPhone de gio
+    // Microphone" via Continuity for phone conversations near the Mac).
+    if let chosen = UserDefaults.standard.string(forKey: "inputDeviceUID"),
+      !chosen.isEmpty, inputDeviceExists(chosen) {
+      return chosen
+    }
     var devID = AudioDeviceID(0)
     var sz = UInt32(MemoryLayout<AudioDeviceID>.size)
     var addr = AudioObjectPropertyAddress(
@@ -757,6 +864,11 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
       mElement: kAudioObjectPropertyElementMain)
     guard AudioObjectGetPropertyData(devID, &uaddr, 0, nil, &usz, &uid) == noErr else { return nil }
     return uid?.takeRetainedValue() as String?
+  }
+
+  /// True if a device with the given UID currently exists (picker validity).
+  private func inputDeviceExists(_ uid: String) -> Bool {
+    inputDevices().contains { $0.uid == uid }
   }
 
   // MARK: - Stop

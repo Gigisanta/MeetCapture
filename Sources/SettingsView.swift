@@ -25,6 +25,11 @@ struct SettingsView: View {
     @AppStorage("liveTranscribe") private var liveTranscribe = true
     @AppStorage("liveModel") private var liveModel = "zipformer-es"
 
+    // Conversation mode (mic-only)
+    @AppStorage("micOnlyMode") private var micOnlyMode = false
+    @AppStorage("inputDeviceUID") private var inputDeviceUID = ""
+    @State private var inputDevices: [(uid: String, name: String)] = []
+
     // IA (summary endpoint — consumed by the external summary dispatcher)
     @AppStorage("aiEndpoint") private var aiEndpoint = "http://127.0.0.1:8083/v1"
     @AppStorage("aiModel") private var aiModel = ""
@@ -93,6 +98,24 @@ struct SettingsView: View {
             Text("Capture writes a 16kHz Int16 stereo PCM file (L = system audio, R = mic). Model and engine selection live in the ASR tab.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+
+            Toggle("Modo conversación (solo micrófono)", isOn: $micOnlyMode)
+            Text("Para conversaciones al lado de la Mac (WhatsApp del celular, llamadas telefónicas): graba solo el micrófono elegido, sin audio del sistema. Para Meet/WhatsApp Desktop/llamadas de apps se usa el modo normal (audio de la app + micrófono).")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
+            Picker("Dispositivo de entrada", selection: $inputDeviceUID) {
+                Text("Sistema (predeterminado)").tag("")
+                ForEach(inputDevices, id: \.uid) { device in
+                    Text(device.name).tag(device.uid)
+                }
+            }
+            Text("Podés elegir el micrófono del iPhone (Continuity) para capturar una llamada del teléfono con mejor audio.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .onAppear {
+                    inputDevices = appState.audioCapture.inputDevices()
+                }
 
             HStack {
                 Text("Microphone permission:")
