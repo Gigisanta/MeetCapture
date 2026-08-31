@@ -51,7 +51,7 @@ final class CallDetector: ObservableObject {
     // free. Switch to AudioObjectAddPropertyListenerBlock if this ever shows
     // on a power profile.
     let t = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: true) { [weak self] _ in
-      Task { @MainActor in self?.poll() }
+      Task { @MainActor [weak self] in self?.poll() }
     }
     timer = t
     poll()
