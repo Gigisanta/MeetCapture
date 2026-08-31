@@ -244,7 +244,9 @@ final class AppState: ObservableObject {
         hasAudioPermission = audioCapture.checkPermission()
         if !hasAudioPermission {
             audioCapture.requestPermission { [weak self] granted in
-                Task { @MainActor in self?.hasAudioPermission = granted }
+                Task { @MainActor [weak self] in
+                    self?.hasAudioPermission = granted
+                }
             }
         }
     }
@@ -1011,7 +1013,7 @@ final class AppState: ObservableObject {
     private func startRecordingTimer() {
         recordingDuration = 0
         recordingTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 guard let self = self, let start = self.recordingStartDate else { return }
                 self.recordingDuration = Date().timeIntervalSince(start)
                 self.checkMaxDuration()
