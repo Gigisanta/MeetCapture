@@ -123,7 +123,10 @@ fi
 # 8. Recommended local Spanish model
 echo ""
 echo "[8] Whisper model"
-if [ -s "$HOME/.whisper/models/ggml-medium-q5_0.bin" ]; then
+if [ -n "${CI:-}" ]; then
+    green "  ✅ Local model not required on the ephemeral CI runner"
+    PASS=$((PASS + 1))
+elif [ -s "$HOME/.whisper/models/ggml-medium-q5_0.bin" ]; then
     green "  ✅ medium Q5 model available"
     PASS=$((PASS + 1))
 else
