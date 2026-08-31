@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build MeetCapture v5 — Swift native menu bar app
+# Build MeetCapture — Swift native menu bar app
 # Usage: ./build.sh [--help] [--staging] [--staging-dir <path>] [--install-to <path>] [--sign <identity>] [--with-turbo] [--rollback]
 set -e
 
@@ -9,6 +9,11 @@ APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 BACKUP_DIR="$HOME/meetings/.backups"
 MAX_BACKUPS=3
+
+# Keep the build log and help text tied to the bundle metadata.  The app has
+# moved beyond the v5 capture format, so a hard-coded label here can silently
+# drift from the version users see in About/README.
+APP_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$REPO_DIR/Resources/Info.plist")"
 
 # Defaults
 DEST="$HOME/meetings/MeetCapture.app"
@@ -20,7 +25,7 @@ STAGING_DIR=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --help)
-            echo "MeetCapture v5 Build Script"
+            echo "MeetCapture v${APP_VERSION} Build Script"
             echo ""
             echo "Usage: ./build.sh [options] [<dest-path>]"
             echo ""
@@ -83,7 +88,7 @@ elif [ "$STAGING" = true ]; then
     APP_BUNDLE="/tmp/MeetCapture.app"
 fi
 
-echo "Building $APP_NAME v5..."
+echo "Building $APP_NAME v${APP_VERSION}..."
 echo "  Sources:  $REPO_DIR/Sources"
 echo "  Output:   $DEST"
 echo "  Staging:  $STAGING"
