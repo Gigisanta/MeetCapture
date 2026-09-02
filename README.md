@@ -1,3 +1,8 @@
+<!-- maatwork-brand:maatwork-mw-20260901 -->
+<p align="center"><img src="docs/brand/meetcapture-cover.png" alt="MeetCapture · MaatWork" width="1200"></p>
+
+> internal tool de MaatWork
+
 # MeetCapture v6.2
 
 Native macOS menu-bar app for private, local meeting capture, **live in-call
