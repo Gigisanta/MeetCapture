@@ -477,8 +477,7 @@ final class CaptureEngine: CaptureEngineBackend, @unchecked Sendable {
                 slot.frames = sysFrames
                 if micOnly {
                     Self.mixdown(first, channels: sysCh, frames: sysFrames, headroom: headroom, into: slot.mic)
-                    // Mic-only leaves L silent: PCMToWAV sums L+R, so copying
-                    // the mic to both channels would double it.
+                    // Mic-only leaves L silent; ChannelReader then keeps R alone.
                     slot.system.update(repeating: 0, count: sysFrames)
                 } else {
                     Self.mixdown(first, channels: sysCh, frames: sysFrames, headroom: headroom, into: slot.system)

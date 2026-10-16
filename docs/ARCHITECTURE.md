@@ -217,6 +217,7 @@ MEETCAPTURE_TEST_OUTPUT_DIR=<new empty temporary directory; required>
 MEETCAPTURE_CHECK_INPUT=<known WAV; required>
 MEETCAPTURE_CHECK_REPORT=<JSON path inside TEST_OUTPUT_DIR; required>
 MEETCAPTURE_CHECK_MIC_ONLY=1  # optional capture branch; default false
+MEETCAPTURE_CHECK_DIARIZE=1   # optional diarization (macOS 15+); default false
 ```
 
 The output directory must be completely empty before launch; the harness
@@ -229,7 +230,7 @@ and transcribes them with Parakeet (models already downloaded, or network on
 the first run). `MEETCAPTURE_CHECK_MIC_ONLY=1` selects the
 microphone-only branch and is reported as `micOnly:true`; the default is
 `false`, preserving the microphone-plus-system contract. Diarization is
-explicitly off for this check. Missing microphone permission is a blocked prerequisite. `ui` opens the real
+off unless `MEETCAPTURE_CHECK_DIARIZE=1`; the report lists the `speakers`. Missing microphone permission is a blocked prerequisite. `ui` opens the real
 `PopoverContent` with `AppState`, real engines, isolated history, and volatile
 settings with `allowsSettings:false`, so `SettingsView` cannot read or write
 normal preferences. It disables automatic operations, lets CUA exercise the

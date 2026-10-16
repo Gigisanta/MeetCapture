@@ -66,6 +66,7 @@ MEETCAPTURE_TEST_OUTPUT_DIR=<new temporary directory; required>
 MEETCAPTURE_CHECK_INPUT=<known WAV; required>
 MEETCAPTURE_CHECK_REPORT=<JSON path inside TEST_OUTPUT_DIR; required>
 MEETCAPTURE_CHECK_MIC_ONLY=1  # optional capture mode; default false
+MEETCAPTURE_CHECK_DIARIZE=1   # optional diarization (macOS 15+); default false
 ```
 
 The wrapper CLI for `import` and `capture` is:
@@ -93,8 +94,8 @@ variables and acceptance behavior are fixed:
   be downloaded already or the first run needs network. Setting
   `MEETCAPTURE_CHECK_MIC_ONLY=1` selects the microphone-only branch and the
   report records `micOnly: true`; the default is `false`, so the normal
-  contract remains microphone plus system audio. Diarization is disabled for
-  this check. Missing
+  contract remains microphone plus system audio. Diarization is off unless
+  `MEETCAPTURE_CHECK_DIARIZE=1`; the report lists the `speakers` found. Missing
   microphone permission is exit `77`, not evidence from a real call.
 - `ui` opens `PopoverContent` with real `AppState`, real engines, isolated
   history, and volatile settings. Automatic operations are disabled. CUA

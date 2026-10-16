@@ -1,3 +1,4 @@
+import AVFoundation
 import XCTest
 @testable import MeetCaptureCore
 
@@ -97,14 +98,17 @@ final class TranscriptionJobTests: XCTestCase {
         XCTAssertEqual(calls, 1, "one channel, one chunk")
     }
 
-    func testMicOnlyCaptureUsesTheLeftChannelOnly() throws {
+    /// The capture writes the mic to R and silence to L (AudioCaptureService).
+    func testMicOnlyCaptureTranscribesTheMicChannel() throws {
         let dir = TestSupport.makeTempDir(self, "job-miconly")
-        let audio = try capture(dir, left: gio(1), right: gio(1), strategy: "mic-only")
+        let audio = try capture(dir, left: [Int16](repeating: 0, count: 16_000), right: gio(1), strategy: "mic-only")
         let work = dir + "/work"
         try AppPaths.ensurePrivateDirectory(work)
         let layout = try ChannelReader.prepare(audioPath: audio, captureSampleRate: 16_000, workDirectory: work)
-        XCTAssertEqual(layout, .single(URL(fileURLWithPath: work + "/audio.wav")))
+        XCTAssertEqual(layout, .single(URL(fileURLWithPath: work + "/mic.wav")))
         XCTAssertNil(layout.mic)
+        let file = try AVAudioFile(forReading: layout.remote, commonFormat: .pcmFormatInt16, interleaved: false)
+        XCTAssertEqual(try ChunkedTranscription.readSamples(file, from: 0, to: 16_000), gio(1))
         ChannelReader.cleanup(layout, original: audio)
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: work), [])
     }

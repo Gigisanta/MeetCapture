@@ -114,7 +114,17 @@ PY
 fi
 
 LOG=$(mktemp /tmp/capture-selftest.XXXXXX)
-trap 'rm -f "$LOG"' EXIT
+cleanup() {
+    rm -f "$LOG"
+    # Capture mode registers the bundle with LaunchServices; a disposable copy
+    # left registered can shadow the installed app.
+    case "$(realpath "$APP_PATH")" in
+        /private/tmp/*|/private/var/folders/*/T/*)
+            /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
+                -u "$APP_PATH" >/dev/null 2>&1 || true ;;
+    esac
+}
+trap cleanup EXIT
 printf 'MeetCapture real self-test: mode=%s input=%ss output=%s\n' \
     "$MODE" "$INPUT_DURATION" "$OUTPUT"
 
@@ -149,6 +159,7 @@ fi
 if ! python3 - "$REPORT" "$REFERENCE" "$MODE" "$INPUT_DURATION" "$MAX_WER" "$REQUIRED_WORDS" <<'PY'
 import json
 import math
+import os
 import re
 import sys
 from pathlib import Path
@@ -175,8 +186,11 @@ if not isinstance(report, dict) or report.get('status') != 'passed':
     fail(f"status inesperado: {report.get('status') if isinstance(report, dict) else None!r}")
 if report.get('mode') != mode:
     fail(f"mode inesperado: {report.get('mode')!r}")
-if report.get('diarize') is not False:
-    fail('el reporte no confirma diarize=false')
+want_diarize = os.environ.get('MEETCAPTURE_CHECK_DIARIZE') == '1'
+if report.get('diarize') is not want_diarize:
+    fail(f'el reporte no confirma diarize={str(want_diarize).lower()}')
+if want_diarize and not report.get('speakers'):
+    fail('diarización activa sin hablantes en el reporte')
 
 actual = float(actual_text)
 limit = float(limit_text)
@@ -197,6 +211,10 @@ if not isinstance(records, list) or len(records) != expected_count:
 
 def tokens(text):
     return re.findall(r'[^\W_]+', text.casefold(), flags=re.UNICODE)
+
+def transcript_tokens(text):
+    """A saved transcript prefixes each turn with "[Speaker]: "."""
+    return tokens(re.sub(r'(?m)^\[[^\]\n]+\]:\s*', '', text))
 
 def word_error_rate(reference_words, hypothesis_words):
     previous = list(range(len(reference_words) + 1))
@@ -270,7 +288,7 @@ for index, record in enumerate(records):
         if record[key] in seen[n]:
             fail(f'records[{index}].{key} duplicado')
         seen[n].add(record[key])
-    record_words = tokens(record['text'])
+    record_words = transcript_tokens(record['text'])
     if not record_words:
         fail(f'records[{index}].text vacío')
     record_wer = word_error_rate(reference, record_words)
@@ -288,7 +306,7 @@ text = report.get('text')
 hypothesis = tokens(text) if isinstance(text, str) else []
 if not reference or not hypothesis:
     fail('referencia o transcript vacío')
-if tokens(records[0]['text']) != hypothesis:
+if transcript_tokens(records[0]['text']) != hypothesis:
     fail('report.text no coincide con el registro más reciente')
 wer = word_error_rate(reference, hypothesis)
 if wer > limit:
@@ -302,7 +320,7 @@ if not essential:
 if not essential:
     essential = list(dict.fromkeys(reference))
 for index, record in enumerate(records):
-    record_words = tokens(record['text'])
+    record_words = transcript_tokens(record['text'])
     missing = [word for word in essential if word not in record_words]
     if missing:
         fail(f'records[{index}] faltan palabras esenciales: ' + ', '.join(missing))

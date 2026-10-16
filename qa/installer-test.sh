@@ -427,4 +427,15 @@ done
 assert_preserved_state
 printf 'PASS: backup copy failure aborts before replacing the installed app\n'
 
+setup_case growing_recording close-fails
+mkdir -p "$MEETINGS/transcripts"
+printf 'pcm\n' >"$MEETINGS/transcripts/recording-1.pcm"
+run_installer
+[ "$STATUS" -ne 0 ] || fail 'installer ran while a recording was being written'
+[ "$(cat "$APP/Contents/version-marker")" = old ] || fail 'growing recording case changed the installed app'
+[ ! -s "$BUILD_LOG" ] || fail 'growing recording case started a build'
+grep -F 'refusing to install' "$OUTPUT_FILE" >/dev/null || fail 'growing recording abort gave no reason'
+assert_preserved_state
+printf 'PASS: a recording written in the last minute aborts before building\n'
+
 printf '%s\n' 'All installer fixture cases passed.'

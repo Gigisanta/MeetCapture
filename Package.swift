@@ -24,7 +24,7 @@ let package = Package(
     ],
     dependencies: [
         // Parakeet ASR + offline diarization on the ANE. Pinned by revision:
-        // no tagged release (latest v0.9.1) has the Parakeet ultra model.
+        // no tagged release has the Parakeet ultra model yet.
         .package(url: "https://github.com/FluidInference/FluidAudio.git",
                  revision: "bd11ac8da17a944a7291a2c76e9a172eb275f629"),
     ],

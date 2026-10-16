@@ -1,8 +1,9 @@
 // ChannelReader.swift
 // Splits a capture into the 16 kHz mono WAVs the pipeline reads: L (system,
-// the remote side) and R (mic, Gio). Mic-only captures, imports, legacy
-// mono files and a system channel that stayed silent the whole meeting give
-// one channel, diarized as a whole and with no "Gio".
+// the remote side) and R (mic, Gio). Imports, legacy mono files and a system
+// channel that stayed silent the whole meeting (always, in mic-only captures,
+// which write the mic to R only) give one channel, diarized as a whole and
+// with no "Gio".
 
 import Foundation
 
@@ -32,8 +33,7 @@ enum ChannelReader {
                         workDirectory: String) throws -> ChannelLayout {
         if PCMToWAV.is16kMonoWAV(audioPath) { return .single(URL(fileURLWithPath: audioPath)) }
         let format = PCMToWAV.inputFormat(forAudio: audioPath, captureSampleRate: captureSampleRate)
-        let stereo = AudioFormatSidecar.read(forAudio: audioPath)?.layout == "L=system,R=mic"
-        if stereo, case .int16Interleaved(let channels, _) = format, channels >= 2 {
+        if case .int16Interleaved(let channels, _) = format, channels >= 2 {
             let system = URL(fileURLWithPath: workDirectory + "/system.wav")
             let mic = URL(fileURLWithPath: workDirectory + "/mic.wav")
             let peaks = try converting([system, mic]) {

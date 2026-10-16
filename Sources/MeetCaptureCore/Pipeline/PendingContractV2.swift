@@ -21,7 +21,9 @@ struct PendingContractV2: Equatable, Sendable {
 
     /// Labels in order of first appearance, so the summary names "Gio" and
     /// "Participante N" instead of inventing attendees.
-    var speakers: [String] {
+    var speakers: [String] { Self.speakers(of: segments) }
+
+    static func speakers(of segments: [Segment]) -> [String] {
         var seen = Set<String>()
         return segments.compactMap(\.speaker).filter { !$0.isEmpty && seen.insert($0).inserted }
     }
