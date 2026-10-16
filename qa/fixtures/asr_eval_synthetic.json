@@ -1,0 +1,38 @@
+{
+ "about": "Synthetic, invented dialogue for qa/asr_eval.py selftest. Expected values were computed by hand: 35 reference words, 1 uncertain.",
+ "ref": {
+  "turns": [
+   {"speaker": "Gio", "start": 0.0, "end": 4.0, "text": "Hola, ¿cómo están? Quería ver el estado de resultados del FCI."},
+   {"speaker": "P1", "start": 4.0, "end": 8.0, "text": "Sí, compramos cinco CEDEAR con dólar MEP, unos 3 palos."},
+   {"speaker": "P2", "start": 8.0, "end": 12.0, "text": "La caución rinde [?treinta y dos?] por ciento en Cactus Wealth."},
+   {"speaker": "Gio", "start": 12.0, "end": 14.0, "text": "Perfecto, lo cargo en AppSheet."}
+  ]
+ },
+ "cases": [
+  {
+   "name": "perfect",
+   "hyp": {"engine": "perfect", "segments": [
+    {"start": 0.0, "end": 4.0, "speaker": "Gio", "text": "Hola cómo están, quería ver el estado de resultados del F.C.I."},
+    {"start": 4.0, "end": 8.0, "speaker": "A", "text": "Sí. Compramos 5 CEDEARs con dólar MEP, unos tres palos."},
+    {"start": 8.0, "end": 12.0, "speaker": "B", "text": "La caución rinde 32% en Cactus Wealth."},
+    {"start": 12.0, "end": 14.0, "speaker": "Gio", "text": "Perfecto, eh, lo cargo en AppSheet."}
+   ]},
+   "expect": {"ref_words": 35, "wer": 0.0286, "wer_certain": 0.0294, "keyword_recall": 1.0, "number_recall": 1.0,
+              "gio_attribution": 1.0, "gio_precision": 1.0, "remote_purity": 1.0, "hyp_speakers": 3,
+              "wer_split": 0.0286, "wer_gio": 0.0, "wer_remote": 0.0526}
+  },
+  {
+   "name": "noisy",
+   "hyp": {"engine": "noisy", "segments": [
+    {"start": 0.0, "end": 4.0, "speaker": "Gio", "text": "Hola cómo están quería ver el estado de resultado del FCI"},
+    {"start": 4.0, "end": 8.0, "speaker": "Remote", "text": "Sí compramos cinco CEDEAR con dólar MEP unos tres palos"},
+    {"start": 8.0, "end": 12.0, "speaker": "Remote", "text": "La caución rinde 30 por ciento en Cactus Wealth"},
+    {"start": 12.0, "end": 14.0, "speaker": "Remote", "text": "Perfecto lo cargo en app shit"}
+   ]},
+   "expect": {"ref_words": 35, "uncertain_fraction": 0.0286, "wer": 0.1143, "wer_certain": 0.0882,
+              "keyword_recall": 0.8889, "number_recall": 0.75,
+              "gio_attribution": 0.6875, "gio_precision": 1.0, "remote_purity": 0.4167, "hyp_speakers": 2,
+              "wer_split": 0.3714, "wer_gio": 0.375, "wer_remote": 0.3684}
+  }
+ ]
+}
