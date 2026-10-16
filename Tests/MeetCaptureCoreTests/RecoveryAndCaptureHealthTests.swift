@@ -63,6 +63,26 @@ final class RecoveryAndCaptureHealthTests: XCTestCase {
         XCTAssertEqual(RecordingRecovery.attempts(forAudio: audio), 1)
     }
 
+    func testCaptureHandedOffWithGapsStaysRecoverableUntilItsCheckpointsAreGone() throws {
+        let dir = TestSupport.makeTempDir(self, "recovery-gaps")
+        let gapped = try makeCapture(dir, "recording-meet-1-a")
+        let transcript = RecordingRecovery.transcriptPath(forAudio: gapped)
+        TestSupport.write("hola [fragmento sin transcribir 00:05:00–00:10:00]", to: transcript)
+        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-3 * 86_400)],
+                                              ofItemAtPath: transcript)
+        try ProcessedMarker.write(transcriptPath: transcript, title: "x")
+        try FileManager.default.createDirectory(atPath: ChunkedTranscription.workDirectory(forAudio: gapped),
+                                                withIntermediateDirectories: true)
+
+        XCTAssertEqual(RecordingRecovery.find(in: dir).map(\.audioPath), [gapped])
+        XCTAssertEqual(RecordingRecovery.sessionId(forAudio: gapped), "meet-1-a")
+        XCTAssertNil(RecordingRecovery.sessionId(forAudio: dir + "/imported.pcm"))
+
+        ChunkedTranscription.removeWork(forAudio: gapped)
+        XCTAssertTrue(RecordingRecovery.find(in: dir).isEmpty, "complete once the checkpoints are dropped")
+        XCTAssertFalse(RecordingRecovery.needsTranscript(audioPath: gapped))
+    }
+
     func testRecentTranscriptWithoutMarkerIsRetriedButOldOneIsLeftAlone() throws {
         let dir = TestSupport.makeTempDir(self, "recovery-stranded")
         let now = Date()

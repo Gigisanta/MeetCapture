@@ -19,6 +19,14 @@ struct MeetingSession: Equatable, Sendable {
         self.id = "meet-\(epoch)-\(UUID().uuidString.lowercased())"
     }
 
+    /// Redoing a capture keeps the id it was recorded under, so the result
+    /// replaces its transcript, history row and handoff.
+    init(id: String, startedAt: Date, title: String?) {
+        self.startedAt = startedAt
+        self.title = title
+        self.id = id
+    }
+
     var displayTitle: String { title ?? Self.untitled }
 
     static let untitled = "Untitled Meeting"

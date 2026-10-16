@@ -362,6 +362,170 @@ final class AppStateRegressionTests: XCTestCase {
         XCTAssertEqual(state.phase, .idle)
     }
 
+    // MARK: - Transcripts with gaps
+
+    private static let gappedOutcome = TranscriptionJob.Outcome(
+        segments: [Segment(start: 0, end: 1, text: "Arrancamos"),
+                   Segment(start: 300, end: 600, text: "[fragmento sin transcribir 00:05:00–00:10:00]")],
+        engineUsed: .parakeet, modelUsed: "fixture", audioDurationSec: 600, failedChunks: 1)
+    private static let completeOutcome = TranscriptionJob.Outcome(
+        segments: [Segment(start: 0, end: 1, text: "Arrancamos"), Segment(start: 300, end: 301, text: "y cerramos")],
+        engineUsed: .parakeet, modelUsed: "fixture", audioDurationSec: 600)
+
+    /// Like the real job, a run leaves its chunk checkpoints behind.
+    private static func runner(_ calls: TranscriptionCallCounter,
+                               outcome: @escaping @Sendable (Int) -> TranscriptionJob.Outcome)
+        -> AppStateTranscriptionRunner {
+        { job, _ in
+            calls.increment()
+            try FileManager.default.createDirectory(
+                atPath: ChunkedTranscription.workDirectory(forAudio: job.audioPath), withIntermediateDirectories: true)
+            return outcome(calls.value)
+        }
+    }
+
+    private func useSettings(_ values: [String: Any]) {
+        let defaults = UserDefaults.standard
+        let previous = defaults.volatileDomain(forName: UserDefaults.argumentDomain)
+        defaults.setVolatileDomain(previous.merging(values) { $1 }, forName: UserDefaults.argumentDomain)
+        addTeardownBlock { defaults.setVolatileDomain(previous, forName: UserDefaults.argumentDomain) }
+    }
+
+    private func pendingFiles(in dir: String) throws -> [[String: Any]] {
+        try FileManager.default.contentsOfDirectory(atPath: dir).filter { $0.hasSuffix(".pending") }.map {
+            try XCTUnwrap(JSONSerialization.jsonObject(
+                with: Data(contentsOf: URL(fileURLWithPath: dir + "/" + $0))) as? [String: Any])
+        }
+    }
+
+    func testPartialTranscriptKeepsAudioAndCheckpointsAndShowsError() async throws {
+        let outputDir = TestSupport.makeTempDir(self, "app-partial")
+        let paths = AppPaths(environment: ["MEETCAPTURE_TEST_OUTPUT_DIR": outputDir], home: outputDir)
+        useSettings([Settings.Key.notifyHermes.rawValue: false,
+                     Settings.Key.retention.rawValue: RetentionPolicy.deleteAfterHandoff.rawValue])
+        let backend = FakeRecordingBackend()
+        backend.suspendStart = false
+        let calls = TranscriptionCallCounter()
+        let state = AppState(
+            paths: paths, store: MeetingStore(path: paths.databasePath), recordingDriver: backend.driver,
+            transcriptionRunner: Self.runner(calls) { _ in Self.gappedOutcome },
+            errorDismissalDelay: 300, recoveryRetryDelays: [3_600, 3_600])
+
+        state.startRecording()
+        try await waitUntil { backend.isRecording }
+        state.stopRecording()
+        try await waitUntil { state.phase == .done }
+
+        let audio = try XCTUnwrap(backend.outputPath)
+        XCTAssertEqual(state.errorMessage, Strings.errorPartialTranscript(1))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: audio), "retention must not delete audio with gaps")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: ChunkedTranscription.workDirectory(forAudio: audio)))
+        XCTAssertTrue(RecordingRecovery.hasGaps(audioPath: audio))
+        XCTAssertEqual(RecordingRecovery.attempts(forAudio: audio), 1, "the gapped run counts as an attempt")
+        let pending = try XCTUnwrap(try pendingFiles(in: outputDir).first)
+        XCTAssertTrue(pending["audioPath"] is NSNull, "the dispatcher must not delete audio a retry needs")
+        XCTAssertEqual(state.lastAudioPath, audio)
+    }
+
+    func testGappedCaptureIsRetriedAndReplacesItsTranscriptRowAndHandoff() async throws {
+        let outputDir = TestSupport.makeTempDir(self, "app-gap-retry")
+        let paths = AppPaths(environment: ["MEETCAPTURE_TEST_OUTPUT_DIR": outputDir], home: outputDir)
+        useSettings([Settings.Key.notifyHermes.rawValue: false,
+                     Settings.Key.retention.rawValue: RetentionPolicy.deleteAfterHandoff.rawValue])
+        let backend = FakeRecordingBackend()
+        backend.suspendStart = false
+        backend.writesRecoverableCapture = true
+        let store = MeetingStore(path: paths.databasePath)
+        let calls = TranscriptionCallCounter()
+        let state = AppState(
+            paths: paths, store: store, recordingDriver: backend.driver,
+            transcriptionRunner: Self.runner(calls) { $0 == 1 ? Self.gappedOutcome : Self.completeOutcome },
+            errorDismissalDelay: 300, recoveryRetryDelays: [0.05, 0.05])
+
+        state.startRecording()
+        try await waitUntil { backend.isRecording }
+        state.stopRecording()
+        try await waitUntil { state.phase == .done }
+        let audio = try XCTUnwrap(backend.outputPath)
+        let id = try XCTUnwrap(RecordingRecovery.sessionId(forAudio: audio))
+        let title = try XCTUnwrap(store.record(id: id)).title
+
+        try await waitUntil { calls.value == 2 && !state.isRecovering }
+
+        XCTAssertEqual(store.count(), 1, "the retry replaces the meeting instead of adding one")
+        let record = try XCTUnwrap(store.record(id: id))
+        XCTAssertEqual(record.title, title)
+        XCTAssertFalse(record.transcriptText.contains("fragmento sin transcribir"))
+        let transcript = try String(contentsOfFile: RecordingRecovery.transcriptPath(forAudio: audio), encoding: .utf8)
+        XCTAssertTrue(transcript.contains("y cerramos"))
+        let pendings = try pendingFiles(in: outputDir)
+        XCTAssertEqual(pendings.count, 1)
+        XCTAssertEqual(pendings.first?["meetingId"] as? String, id)
+        XCTAssertEqual(pendings.first?["checksum"] as? String, PendingContractV2.sha256Hex(transcript))
+        XCTAssertEqual(pendings.first?["audioPath"] as? String, audio)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: ChunkedTranscription.workDirectory(forAudio: audio)))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: RecordingRecovery.attemptsPath(forAudio: audio)))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: audio), "complete now: retention applies")
+        XCTAssertTrue(state.recoverableRecordings.isEmpty)
+    }
+
+    func testGapRetriesStopAtTheAttemptCap() async throws {
+        let outputDir = TestSupport.makeTempDir(self, "app-gap-cap")
+        let paths = AppPaths(environment: ["MEETCAPTURE_TEST_OUTPUT_DIR": outputDir], home: outputDir)
+        useSettings([Settings.Key.notifyHermes.rawValue: false])
+        try FileManager.default.createDirectory(atPath: paths.transcriptsDir, withIntermediateDirectories: true)
+        let audio = paths.transcriptsDir + "/recording-meet-1789474169-cap.pcm"
+        try Data(count: RecordingRecovery.minimumBytes).write(to: URL(fileURLWithPath: audio))
+        try AudioFormatSidecar.capture(tapStrategy: "global", tapInfo: "t").write(forAudio: audio)
+        let store = MeetingStore(path: paths.databasePath)
+        let calls = TranscriptionCallCounter()
+        let state = AppState(
+            paths: paths, store: store, recordingDriver: FakeRecordingBackend().driver,
+            transcriptionRunner: Self.runner(calls) { _ in Self.gappedOutcome },
+            recoveryRetryDelays: [0.05, 0.05, 0.05, 0.05])
+
+        state.recoverRecordings(automaticOnly: true)
+        try await waitUntil { calls.value == RecordingRecovery.maxAutomaticAttempts && !state.isRecovering }
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        XCTAssertEqual(calls.value, RecordingRecovery.maxAutomaticAttempts, "no automatic attempt past the cap")
+        XCTAssertEqual(RecordingRecovery.attempts(forAudio: audio), RecordingRecovery.maxAutomaticAttempts)
+        XCTAssertEqual(store.count(), 1)
+        XCTAssertEqual(try pendingFiles(in: outputDir).map { $0["meetingId"] as? String }, ["meet-1789474169-cap"])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: audio))
+        XCTAssertEqual(state.recoverableRecordings.map(\.audioPath), [audio], "still offered for a manual retry")
+        XCTAssertTrue(RecordingRecovery.automatic(state.recoverableRecordings).isEmpty)
+    }
+
+    func testRetranscribingAGappedCaptureReplacesItInPlace() async throws {
+        let outputDir = TestSupport.makeTempDir(self, "app-gap-manual")
+        let paths = AppPaths(environment: ["MEETCAPTURE_TEST_OUTPUT_DIR": outputDir], home: outputDir)
+        useSettings([Settings.Key.notifyHermes.rawValue: false])
+        let backend = FakeRecordingBackend()
+        backend.suspendStart = false
+        let store = MeetingStore(path: paths.databasePath)
+        let calls = TranscriptionCallCounter()
+        let state = AppState(
+            paths: paths, store: store, recordingDriver: backend.driver,
+            transcriptionRunner: Self.runner(calls) { $0 == 1 ? Self.gappedOutcome : Self.completeOutcome },
+            errorDismissalDelay: 300, recoveryRetryDelays: [3_600, 3_600])
+        state.startRecording()
+        try await waitUntil { backend.isRecording }
+        state.stopRecording()
+        try await waitUntil { state.phase == .done }
+        let audio = try XCTUnwrap(backend.outputPath)
+
+        await state.retranscribeLastAudio()
+
+        XCTAssertEqual(calls.value, 2)
+        XCTAssertEqual(store.count(), 1)
+        XCTAssertEqual(state.lastTranscriptPath, RecordingRecovery.transcriptPath(forAudio: audio))
+        XCTAssertEqual(try pendingFiles(in: outputDir).map { $0["meetingId"] as? String },
+                       [RecordingRecovery.sessionId(forAudio: audio)])
+        XCTAssertNil(state.errorMessage)
+        XCTAssertFalse(RecordingRecovery.hasGaps(audioPath: audio))
+    }
+
     private func waitUntil(_ condition: @escaping @MainActor () -> Bool) async throws {
         let deadline = Date().addingTimeInterval(3)
         while !condition() {
@@ -383,6 +547,8 @@ private final class FakeRecordingBackend {
     var outputPath: String?
     var lastStoppedPath: String?
     var startIsSuspended = false
+    /// Writes a capture big enough, with its sidecar, for recovery to pick up.
+    var writesRecoverableCapture = false
     private var startContinuation: CheckedContinuation<Void, Error>?
 
     var driver: AppStateRecordingDriver {
@@ -399,7 +565,12 @@ private final class FakeRecordingBackend {
         startCallCount += 1
         outputPath = path
         if let startError { throw startError }
-        try Data("fixture pcm".utf8).write(to: URL(fileURLWithPath: path))
+        if writesRecoverableCapture {
+            try Data(count: RecordingRecovery.minimumBytes).write(to: URL(fileURLWithPath: path))
+            try AudioFormatSidecar.capture(tapStrategy: "global", tapInfo: "t").write(forAudio: path)
+        } else {
+            try Data("fixture pcm".utf8).write(to: URL(fileURLWithPath: path))
+        }
         if cancelStart {
             throw CaptureError.startCancelled
         }

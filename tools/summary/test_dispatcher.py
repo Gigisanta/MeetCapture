@@ -100,6 +100,20 @@ class DispatcherTests(unittest.TestCase):
         mod.run_once(self.cfg)
         self.assertIn("meet-1.pending", self.names())
 
+    def test_changed_transcript_under_same_id_replaces_the_summary(self):
+        _contract("meet-rev", text="hola [fragmento sin transcribir 00:05:00–00:10:00]\n", with_audio=False)
+        mod.run_once(self.cfg)
+        self.assertIn("meet-rev.done", self.names())
+        _contract("meet-rev", text="hola mundo completo\n")
+        self.assertEqual(mod.run_once(self.cfg), 1)
+        self.assertNotIn("meet-rev.pending", self.names(), "the revision is acknowledged")
+        with open(os.path.join(MEETINGS, "meet-rev.summary.md"), encoding="utf-8") as f:
+            self.assertIn("hola mundo completo", f.read())
+        with open(os.path.join(MEETINGS, "meet-rev.done"), encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["checksum"],
+                             hashlib.sha256("hola mundo completo\n".encode("utf-8")).hexdigest())
+        self.assertNotIn("meet-rev.pcm", self.names(), "the complete handoff releases the audio")
+
     def test_checksum_mismatch_is_permanent_error(self):
         _contract("meet-2", checksum="deadbeef")
         mod.run_once(self.cfg)

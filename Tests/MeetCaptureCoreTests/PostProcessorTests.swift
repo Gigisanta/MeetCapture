@@ -78,6 +78,44 @@ final class PostProcessorTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: orphan + ".format.json"))
     }
 
+    func testDaySweepKeepsACaptureWithGapsToRedo() throws {
+        let dir = TestSupport.makeTempDir(self, "retention-gaps")
+        let done = dir + "/recording-done.pcm", gapped = dir + "/recording-gapped.pcm"
+        for audio in [done, gapped] {
+            TestSupport.write("x", to: audio)
+            try ProcessedMarker.write(transcriptPath: RecordingRecovery.transcriptPath(forAudio: audio), title: "x")
+            try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-90_000)],
+                                                  ofItemAtPath: audio)
+        }
+        try FileManager.default.createDirectory(atPath: ChunkedTranscription.workDirectory(forAudio: gapped),
+                                                withIntermediateDirectories: true)
+
+        Retention.cleanupOldRecordings(in: dir, policy: .keep24h)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: done))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: gapped), "a capture with gaps keeps its audio for the retry")
+    }
+
+    func testPartialHandoffKeepsAudioAndLeavesItOutOfTheContract() async throws {
+        let dir = TestSupport.makeTempDir(self, "postprocess-partial")
+        let audio = dir + "/recording-partial.pcm"
+        TestSupport.write("x", to: audio)
+        let session = MeetingSession(startedAt: Date(), title: "Parcial")
+        var input = PostProcessInput(
+            session: session, segments: [Segment(start: 0, end: 1, text: "hola")],
+            transcriptPath: RecordingRecovery.transcriptPath(forAudio: audio), capturePath: audio,
+            durableAudioPath: audio, engine: .parakeet, model: "fixture", language: "es",
+            applyRetention: true, retention: .deleteAfterHandoff, meetingsDir: dir, audioDurationSec: 1)
+        input.partial = true
+
+        let result = try await PostProcessor(store: MeetingStore(path: dir + "/m.db")).run(input)
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: audio))
+        let contract = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: Data(contentsOf: URL(fileURLWithPath: result.pendingPath))) as? [String: Any])
+        XCTAssertTrue(contract["audioPath"] is NSNull)
+    }
+
     func testImportStampSanitisesName() {
         let stamp = AudioImporter.stamp(for: URL(fileURLWithPath: "/x/Mi reunión (final).m4a"), now: TestSupport.fixedDate)
         XCTAssertTrue(stamp.hasSuffix("-Mi-reunion--final-"), stamp)

@@ -552,6 +552,24 @@ def _finalize_artifacts(backups) -> None:
                 log("no se pudo limpiar backup de artefacto: %s" % e, "WARN")
 
 
+def _checksum_of(path: str):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f).get("checksum")
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def is_revision(path: str, done_path: str) -> bool:
+    """A handoff whose transcript changed since the acknowledged one.
+
+    The app re-publishes a meeting under the same id when a retry fills the
+    gaps of its transcript; the same checksum is a duplicate and is skipped.
+    """
+    new = _checksum_of(path)
+    return isinstance(new, str) and new != _checksum_of(done_path)
+
+
 def process_file(path: str, cfg: dict) -> None:
     name = os.path.basename(path)
     m = PENDING_RE.match(name)
@@ -560,9 +578,12 @@ def process_file(path: str, cfg: dict) -> None:
         return
     base = m.group("base")
     done_path = os.path.join(MEETINGS_DIR, base + ".done")
-    if os.path.exists(done_path):
+    revision = os.path.exists(done_path) and is_revision(path, done_path)
+    if os.path.exists(done_path) and not revision:
         log("skip %s: %s.done ya existe (idempotente)" % (name, base))
         return
+    if revision:
+        log("revisión de %s: el transcript cambió, se rehace el resumen" % base)
 
     # --- contrato ---
     try:
@@ -685,9 +706,9 @@ def process_file(path: str, cfg: dict) -> None:
     # --- ack idempotente + cleanup de audio ---
     try:
         os.chmod(path, 0o600)
-        if os.path.exists(done_path):
+        if os.path.exists(done_path) and not revision:
             raise FileExistsError("ya existe %s" % done_path)
-        os.replace(path, done_path)  # atómico: .pending -> .done
+        os.replace(path, done_path)  # atómico: .pending -> .done (una revisión lo reemplaza)
     except Exception as e:  # noqa: BLE001 — sin ack, no debe quedar artefacto huérfano
         _rollback_artifacts((), (json_path, html_path, md_path), backups)
         return fail(path, base, "ack del handoff falló: %s" % e)

@@ -11,7 +11,8 @@ struct PendingContractV2: Equatable, Sendable {
     var endedAt: Date
     var transcriptPath: String
     var transcriptText: String
-    var audioPath: String
+    /// nil when the app keeps the audio for itself (a transcript with gaps).
+    var audioPath: String?
     var engine: ASREngine
     var model: String
     var language: String
@@ -57,7 +58,7 @@ struct PendingContractV2: Equatable, Sendable {
             "endedAt": ISO8601.string(from: endedAt),
             "durationSec": duration,
             "transcriptPath": transcriptPath,
-            "audioPath": audioExists ? audioPath : NSNull(),
+            "audioPath": (audioExists ? audioPath : nil).map { $0 as Any } ?? NSNull(),
             "engine": engine.rawValue,
             "model": model,
             "language": language,
@@ -74,7 +75,7 @@ struct PendingContractV2: Equatable, Sendable {
         let fm = FileManager.default
         let pendingURL = URL(fileURLWithPath: pendingPath)
         try AppPaths.ensurePrivateDirectory(pendingURL.deletingLastPathComponent().path)
-        let data = try encode(audioExists: fm.fileExists(atPath: audioPath))
+        let data = try encode(audioExists: audioPath.map { fm.fileExists(atPath: $0) } ?? false)
         let tmpURL = pendingURL.appendingPathExtension("tmp-\(UUID().uuidString)")
         defer { try? fm.removeItem(at: tmpURL) }
         try data.write(to: tmpURL, options: .atomic)

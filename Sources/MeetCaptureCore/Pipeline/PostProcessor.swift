@@ -20,6 +20,10 @@ struct PostProcessInput: Sendable {
     var meetingsDir: String
     var audioDurationSec: Double? = nil
     var audioEndedAt: Date? = nil
+    /// The transcript has gaps. The app keeps the audio to redo them, so
+    /// retention is skipped and the handoff leaves `audioPath` null: the
+    /// summary dispatcher must not delete audio a retry still needs.
+    var partial = false
 }
 
 struct PostProcessResult: Sendable {
@@ -101,12 +105,12 @@ actor PostProcessor {
         // can never expose a handoff that invites external cleanup.
         let contract = PendingContractV2(
             session: session, endedAt: endedAt, transcriptPath: input.transcriptPath,
-            transcriptText: text, audioPath: input.durableAudioPath, engine: input.engine,
+            transcriptText: text, audioPath: input.partial ? nil : input.durableAudioPath, engine: input.engine,
             model: input.model, language: input.language, segments: segments)
         let pendingPath = input.session.pendingPath(in: input.meetingsDir)
         try contract.write(to: pendingPath)
 
-        if input.applyRetention, !Retention.apply(policy: input.retention, audioPath: input.capturePath) {
+        if input.applyRetention, !input.partial, !Retention.apply(policy: input.retention, audioPath: input.capturePath) {
             throw PostProcessError.retentionFailed("no se pudo borrar el audio o su sidecar")
         }
 

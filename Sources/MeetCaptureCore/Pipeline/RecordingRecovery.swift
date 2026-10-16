@@ -1,7 +1,8 @@
 // RecordingRecovery.swift
-// Captures that never reached a transcript: the app quit or crashed while
-// recording, or the transcription failed. The raw PCM and its sidecar are
-// enough to run the normal pipeline again.
+// Captures that never reached a complete transcript: the app quit or crashed
+// while recording, the transcription failed, or it left gaps. The raw PCM and
+// its sidecar are enough to run the normal pipeline again; a gapped capture
+// also keeps its chunk checkpoints, so a retry redoes only the gaps.
 
 import Foundation
 
@@ -21,6 +22,9 @@ enum RecordingRecovery {
     /// surprise summaries.
     static let automaticWindow: TimeInterval = 48 * 3600
     static let maxAutomaticAttempts = 3
+    /// Wait before the next automatic attempt after the first and second
+    /// failures; the third is the last one `automatic` allows.
+    static let retryDelays: [TimeInterval] = [300, 1_200]
     /// Under 10 s of 16 kHz stereo s16le there is no meeting to transcribe.
     static let minimumBytes = 16_000 * 4 * 10
 
@@ -30,8 +34,32 @@ enum RecordingRecovery {
 
     static func attemptsPath(forAudio audioPath: String) -> String { audioPath + ".recovery.json" }
 
-    /// Recordings with a valid sidecar and no processed marker, newest
-    /// first: today's meeting never waits behind an old orphan. `excluding` holds captures still in use.
+    /// The meeting id a capture was recorded under (`recording-<id>.pcm`).
+    static func sessionId(forAudio audioPath: String) -> String? {
+        let name = (audioPath as NSString).lastPathComponent
+        guard name.hasPrefix("recording-"), name.hasSuffix(".pcm") else { return nil }
+        let id = String(name.dropFirst("recording-".count).dropLast(".pcm".count))
+        return id.isEmpty ? nil : id
+    }
+
+    /// Handed off with gaps: the marker is written, but the chunk checkpoints
+    /// stay until a run transcribes every chunk.
+    static func hasGaps(audioPath: String) -> Bool {
+        let fm = FileManager.default
+        return fm.fileExists(atPath: ProcessedMarker.path(forTranscript: transcriptPath(forAudio: audioPath)))
+            && fm.fileExists(atPath: ChunkedTranscription.workDirectory(forAudio: audioPath))
+    }
+
+    /// No complete transcript yet: never handed off, or handed off with gaps.
+    static func needsTranscript(audioPath: String) -> Bool {
+        hasGaps(audioPath: audioPath)
+            || !FileManager.default.fileExists(
+                atPath: ProcessedMarker.path(forTranscript: transcriptPath(forAudio: audioPath)))
+    }
+
+    /// Recordings with a valid sidecar that were never handed off or were
+    /// handed off with gaps, newest first: today's meeting never waits behind
+    /// an old orphan. `excluding` holds captures still in use.
     static func find(in directory: String, excluding: Set<String> = [], now: Date = Date()) -> [RecoverableRecording] {
         let fm = FileManager.default
         guard let names = try? fm.contentsOfDirectory(atPath: directory) else { return [] }
@@ -41,8 +69,8 @@ enum RecordingRecovery {
             guard !excluding.contains(audioPath) else { return nil }
             let transcript = transcriptPath(forAudio: audioPath)
             let sidecarPath = AudioFormatSidecar.path(forAudio: audioPath)
-            guard !fm.fileExists(atPath: ProcessedMarker.path(forTranscript: transcript)),
-                  !isSettledTranscript(transcript, now: now),
+            let handedOff = fm.fileExists(atPath: ProcessedMarker.path(forTranscript: transcript))
+            guard handedOff ? hasGaps(audioPath: audioPath) : !isSettledTranscript(transcript, now: now),
                   let sidecar = AudioFormatSidecar.read(forAudio: audioPath),
                   sidecar.tapStrategy != "import",
                   let audio = try? fm.attributesOfItem(atPath: audioPath),
