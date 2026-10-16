@@ -51,8 +51,9 @@ the summary dispatcher removes handoff audio after a successful summary unless
 ## Requirements
 
 - Apple Silicon Mac, macOS 14.4 or newer; speaker diarization needs macOS 15.
-- Network once: the speech models (about 0.6 GB) download on first use to
-  `~/Library/Application Support/FluidAudio/`.
+- Network once: `install.sh` downloads the speech models (about 0.6 GB) to
+  `~/Library/Application Support/FluidAudio/`; otherwise they download on
+  first use.
 - Permissions when requested: Microphone, Screen and System Audio Recording,
   Calendar, and Notifications. Calendar auto-recording is optional.
 
@@ -239,8 +240,8 @@ See [`qa/README.md`](qa/README.md) for the current check matrix and
    before reinstalling with `./install.sh`; the installer refuses to replace
    a running bundle. On macOS 26, run the strict hosted-icon smoke check above
    to separate an on-screen item from an AppKit-only proxy.
-2. **No transcript on the first meeting.** The speech models download on first
-   use; a failed download keeps the audio. Check the network: recent
+2. **No transcript on the first meeting.** The speech models download at
+   install or on first use; a failed download keeps the audio. Check the network: recent
    recordings are retried at the next launch, older ones with "Transcribir".
 3. **Everyone on the call is one `Participante`.** Enable "Identificar
    hablantes" in Settings › ASR. Diarization is skipped on macOS 14.

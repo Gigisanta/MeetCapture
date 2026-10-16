@@ -227,6 +227,18 @@ if path_exists "$APP"; then
   assert_bundle_stopped "$APP" || exit 1
 fi
 
+# A capture still being written belongs to a recorder this script cannot see
+# (another copy of the app): never swap bundles under it.
+GROWING="$(find "$MEETINGS" -maxdepth 2 -name 'recording-*.pcm' -mtime -60s 2>/dev/null || true)"
+if [ -n "$GROWING" ]; then
+  printf 'A recording was written in the last minute; refusing to install:\n%s\n' "$GROWING" >&2
+  exit 1
+fi
+if lsof -t +D "$MEETINGS/transcripts" 2>/dev/null | grep -q .; then
+  printf '%s\n' 'A process holds a file open in ~/meetings/transcripts; refusing to install.' >&2
+  exit 1
+fi
+
 STAGE="$(mktemp -d "${TMPDIR:-/tmp}/meetcapture-install.XXXXXX")"
 cd "$ROOT"
 ./build.sh --staging-dir "$STAGE"
@@ -310,6 +322,14 @@ if [ "$ORIGINAL_APP_PRESENT" -eq 1 ]; then
 fi
 mv "$NEW_APP" "$APP"
 verify_bundle "$APP"
+
+# Download and compile the speech models now (about 0.6 GB once), so the first
+# meeting needs no network. A failure only means the app downloads them later.
+if MEETCAPTURE_PREFETCH_MODELS=1 "$(bundle_executable_path "$APP")"; then
+  printf '%s\n' 'Speech models ready.'
+else
+  printf '%s\n' 'WARNING: speech models could not be prepared now; the first transcription will download them.' >&2
+fi
 
 if ! open -n "$APP"; then
   printf '%s\n' 'LaunchServices could not open the installed app.' >&2

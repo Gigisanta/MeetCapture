@@ -19,6 +19,13 @@ struct PendingContractV2: Equatable, Sendable {
 
     var speakerCount: Int { TranscriptFormatter.speakerCount(segments) }
 
+    /// Labels in order of first appearance, so the summary names "Gio" and
+    /// "Participante N" instead of inventing attendees.
+    var speakers: [String] {
+        var seen = Set<String>()
+        return segments.compactMap(\.speaker).filter { !$0.isEmpty && seen.insert($0).inserted }
+    }
+
     enum ContractError: LocalizedError {
         case invalidDuration
 
@@ -54,6 +61,7 @@ struct PendingContractV2: Equatable, Sendable {
             "language": language,
             "segments": segmentDicts,
             "speakerCount": speakerCount,
+            "speakers": speakers,
             "checksum": Self.sha256Hex(transcriptText),
         ]
         return try JSONSerialization.data(withJSONObject: contract, options: [.prettyPrinted, .sortedKeys])

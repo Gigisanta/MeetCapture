@@ -45,7 +45,7 @@ def _contract(base: str, text: str = "hola mundo\n", with_audio: bool = True, **
     contract = {
         "version": 2, "meetingId": base, "title": "Demo", "startedAt": "2026-09-01T14:08:29Z",
         "endedAt": "2026-09-01T14:10:29Z", "durationSec": 120.0, "transcriptPath": tpath,
-        "audioPath": apath, "engine": "whisper", "model": "medium-q5_0", "language": "es",
+        "audioPath": apath, "engine": "parakeet", "model": "parakeet-tdt-0.6b-ultra", "language": "es",
         "segments": [{"start": 0, "end": 1, "text": "hola mundo"}], "speakerCount": 0,
         "checksum": hashlib.sha256(text.encode("utf-8")).hexdigest(),
     }
@@ -240,6 +240,30 @@ class DispatcherTests(unittest.TestCase):
             self.assertIn("&lt;interno&gt;", f.read())
         with open(os.path.join(MEETINGS, "meet-notes.summary.md"), encoding="utf-8") as f:
             self.assertIn("## Mis notas\n\nPrioridad: cerrar presupuesto.", f.read())
+
+    def test_long_transcript_is_summarized_by_parts_then_merged(self):
+        line = "[Gio]: " + "presupuesto " * 40 + "\n"
+        _contract("meet-long", text=line * 120, speakers=["Gio", "Participante 1"])
+        cfg = dict(self.cfg, dry_run=False, model="test-model")
+        partial = json.dumps({"resumen": ["parte"], "action_items": [], "decisiones": [], "asistentes": []})
+        final = json.dumps({"resumen": ["reunión completa"], "action_items": [], "decisiones": [],
+                            "asistentes": ["Gio"]})
+        prompts = []
+
+        def fake(_cfg, _model, prompt):
+            prompts.append(prompt)
+            return final if "resúmenes JSON" in prompt else partial
+
+        with mock.patch.object(mod, "call_llm", side_effect=fake):
+            mod.run_once(cfg)
+        parts = mod.split_transcript(line * 120)
+        self.assertGreater(len(parts), 1)
+        self.assertTrue(all(len(p) <= mod.MAP_CHARS for p in parts))
+        self.assertEqual("\n".join(parts), (line * 120).rstrip("\n"), "no line is lost or cut")
+        self.assertEqual(len(prompts), len(parts) + 1)
+        self.assertTrue(all("Hablantes etiquetados: Gio, Participante 1" in p for p in prompts))
+        with open(os.path.join(MEETINGS, "meet-long.summary.json"), encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["resumen"], ["reunión completa"])
 
     def test_notes_symlink_outside_is_rejected_without_audio_delete(self):
         _contract("meet-bad-notes")

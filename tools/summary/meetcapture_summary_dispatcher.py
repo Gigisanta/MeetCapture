@@ -60,6 +60,9 @@ BACKOFF_BASE = 300       # 5 min after the first failure
 BACKOFF_CAP = 6 * 3600   # never wait more than 6 h between attempts
 
 SUMMARY_FIELDS = ("resumen", "action_items", "decisiones", "asistentes")
+# ~6k tokens: longer transcripts are summarized by parts, then merged, so a
+# local model's context window never truncates the end of a meeting.
+MAP_CHARS = 24_000
 
 SYSTEM_PROMPT = (
     "Sos un asistente de resúmenes de reuniones. Devolvé SIEMPRE JSON válido con "
@@ -156,6 +159,35 @@ def call_llm(cfg: dict, model: str, transcript_text: str) -> str:
             if attempt < 2:
                 time.sleep(5 * (attempt + 1))
     raise RuntimeError("LLM/red falló tras 3 intentos: %s" % last_err)
+
+
+def split_transcript(text: str, limit: int = MAP_CHARS) -> list[str]:
+    """Consecutive parts of at most ``limit`` characters, cut between lines."""
+    parts, current, size = [], [], 0
+    for line in text.splitlines():
+        if current and size + len(line) + 1 > limit:
+            parts.append("\n".join(current))
+            current, size = [], 0
+        current.append(line)
+        size += len(line) + 1
+    if current:
+        parts.append("\n".join(current))
+    return parts
+
+
+def summarize(cfg: dict, model: str, header: str, text: str) -> dict:
+    """One call for a short transcript; map per part and reduce for a long one."""
+    parts = split_transcript(text)
+    if len(parts) <= 1:
+        return parse_llm_json(call_llm(cfg, model, header + "Transcripción:\n" + text))
+    partials = []
+    for i, part in enumerate(parts, 1):
+        partials.append(parse_llm_json(call_llm(
+            cfg, model, header + "Transcripción, parte %d de %d:\n%s" % (i, len(parts), part))))
+    return parse_llm_json(call_llm(cfg, model, header + (
+        "Estos son resúmenes JSON de las %d partes consecutivas de una misma reunión. "
+        "Unilos en un solo JSON con las mismas claves, sin repetir ni contradecir:\n%s"
+        % (len(parts), json.dumps(partials, ensure_ascii=False)))))
 
 
 def parse_llm_json(content: str) -> dict:
@@ -606,14 +638,16 @@ def process_file(path: str, cfg: dict) -> None:
             if not model:
                 model = discover_model(cfg)
                 log("model auto-descubierto: %s" % model)
-            prompt_text = (
-                "Título: %s\nFecha: %s\nTags permitidos: %s\n\n"
-                "Notas escritas por la persona (priorizalas como contexto):\n%s\n\nTranscripción:\n%s"
+            raw = contract.get("speakers")
+            speakers = [s for s in raw if isinstance(s, str) and s] if isinstance(raw, list) else []
+            header = (
+                "Título: %s\nFecha: %s\nTags permitidos: %s\nHablantes etiquetados: %s\n\n"
+                "Notas escritas por la persona (priorizalas como contexto):\n%s\n\n"
                 % (contract.get("title") or "", contract.get("startedAt") or "",
-                   ", ".join(vocabulary) if vocabulary else "ninguno", user_notes, text)
+                   ", ".join(vocabulary) if vocabulary else "ninguno",
+                   ", ".join(speakers) if speakers else "sin etiquetas", user_notes)
             )
-            content = call_llm(cfg, model, prompt_text)
-            llm_obj = parse_llm_json(content)
+            llm_obj = summarize(cfg, model, header, text)
             summary = normalize_summary(llm_obj)
             summary["tags"] = filter_tags(llm_obj.get("tags"), vocabulary)
         except Exception as e:  # noqa: BLE001 — red/LLM: retry, no se borra nada

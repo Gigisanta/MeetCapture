@@ -7,16 +7,16 @@ final class PendingContractV2Tests: XCTestCase {
     private func contract(segments: [Segment], audioPath: String = "/nonexistent/recording.pcm") -> PendingContractV2 {
         PendingContractV2(session: session, endedAt: TestSupport.fixedDate.addingTimeInterval(90.5),
                           transcriptPath: "/tmp/x.txt", transcriptText: TranscriptFormatter.text(for: segments),
-                          audioPath: audioPath, engine: .parakeet, model: "medium-q5_0", language: "es",
+                          audioPath: audioPath, engine: .parakeet, model: "parakeet-tdt-0.6b-ultra", language: "es",
                           segments: segments)
     }
 
-    /// Golden shape: exactly the 14 keys the real `.done` files in ~/meetings carry, in sorted order.
+    /// Golden shape: the 14 keys of the v2 `.done` files plus `speakers`, in sorted order.
     func testEncodesExactlyTheV2KeysSorted() throws {
         let data = try contract(segments: [Segment(start: 0, end: 1.5, text: "hola")]).encode(audioExists: false)
         let root = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         let expected = ["audioPath", "checksum", "durationSec", "endedAt", "engine", "language", "meetingId",
-                        "model", "segments", "speakerCount", "startedAt", "title", "transcriptPath", "version"]
+                        "model", "segments", "speakerCount", "speakers", "startedAt", "title", "transcriptPath", "version"]
         XCTAssertEqual(root.keys.sorted(), expected)
         XCTAssertEqual(root["version"] as? Int, 2)
         XCTAssertEqual(root["meetingId"] as? String, session.id)
@@ -25,6 +25,7 @@ final class PendingContractV2Tests: XCTestCase {
         XCTAssertEqual(root["durationSec"] as? Double, 90.5)
         XCTAssertTrue(root["audioPath"] is NSNull, "audioPath must be JSON null when the file is gone")
         XCTAssertEqual(root["speakerCount"] as? Int, 0)
+        XCTAssertEqual(root["speakers"] as? [String], [])
         // Sorted keys + pretty printing is what the dispatcher and diffs rely on.
         let text = String(decoding: data, as: UTF8.self)
         XCTAssertTrue(text.hasPrefix("{\n  \"audioPath\""))
@@ -37,6 +38,8 @@ final class PendingContractV2Tests: XCTestCase {
         let c = contract(segments: segments)
         let root = try XCTUnwrap(JSONSerialization.jsonObject(with: c.encode(audioExists: true)) as? [String: Any])
         XCTAssertEqual(root["checksum"] as? String, PendingContractV2.sha256Hex("[A]: uno\n[B]: dos"))
+        XCTAssertEqual(contract(segments: segments + [Segment(start: 2, end: 3, text: "tres", speaker: "A")]).speakers,
+                       ["A", "B"], "first appearance order, no repeats")
         XCTAssertEqual(PendingContractV2.sha256Hex(""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
         XCTAssertEqual(root["speakerCount"] as? Int, 2)
         XCTAssertEqual((root["segments"] as? [[String: Any]])?.first?["speaker"] as? String, "A")

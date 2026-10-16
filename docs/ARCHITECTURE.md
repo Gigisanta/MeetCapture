@@ -92,7 +92,9 @@ and `Settings` only know `Support`. Nothing below `App` touches SwiftUI.
      gap over 1.5 s, or a sentence end after 45 s. `Aliases` applies the
      `config.json` spelling fixes to the merged turns.
 
-   The models download on first use to `~/Library/Application Support/FluidAudio/`.
+   `install.sh` downloads the models to `~/Library/Application Support/FluidAudio/`
+   (`MEETCAPTURE_PREFETCH_MODELS=1`), or the first job does. Parakeet loads when a
+   recording starts and is freed after 10 minutes with no recording or job.
 4. **Hand off.** `PostProcessor` is an actor: it rejects empty transcripts,
    writes the `.txt` transcript, commits `MeetingStore`, writes the
    `.processed.json` marker, and only then publishes the `.pending`
@@ -102,7 +104,9 @@ and `Settings` only know `Support`. Nothing below `App` touches SwiftUI.
 5. **Summarize.** The canonical
    `tools/summary/meetcapture_summary_dispatcher.py` turns each `.pending`
    into `.summary.json`, `.summary.html` and `.summary.md`, renames it to `.done`, and
-   deletes the audio unless `keep_audio` is set. The optional launchd agent
+   deletes the audio unless `keep_audio` is set. A transcript over 24k characters is
+   summarized in parts and the part summaries merged; the `speakers` list
+   names who appears. The optional launchd agent
    wakes it on changes to `~/meetings` and every 15 minutes; it does not start
    MeetCapture or capture audio. Transient failures move the file to
    `.pending.retry[.N]` with a backoff of 5 min doubling up to 6 h; after 8

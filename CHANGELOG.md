@@ -37,6 +37,11 @@ Planned as 7.0.0 (`scripts/version.sh` bumps it at release).
 - Per-channel checkpoints in `<audio>.work/remote/` and `<audio>.work/mic/`
   (manifest version 2) plus a cached `diarization.json`; a chunk failing twice
   becomes `[fragmento sin transcribir …]` and the audio is kept.
+- `install.sh` downloads and compiles the models (`MEETCAPTURE_PREFETCH_MODELS=1`)
+  and refuses to swap the bundle while a `recording-*.pcm` is being written.
+  Parakeet loads when a recording starts and is freed after 10 idle minutes.
+- `.pending` lists the transcript `speakers`; the summary dispatcher names
+  them and summarizes long transcripts in parts before merging them.
 
 ### Fixed
 - Run as a menu-bar-only app (`LSUIElement`) with a square template-icon

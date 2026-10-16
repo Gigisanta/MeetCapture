@@ -86,12 +86,18 @@ enum DiarizationError: LocalizedError {
 }
 
 struct FluidDiarizer: SpeakerDiarizing {
+    // macOS 14 crashes inside BNNS during Core ML predictions (FluidAudio
+    // #661/#878, fixed in 15). A crash cannot be caught, so skip it there.
+    static var isSupported: Bool { ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 15 }
+
+    /// Downloads and compiles the diarizer models; nothing to do on macOS 14.
+    static func prefetch() async throws {
+        guard isSupported else { return }
+        try await OfflineDiarizerManager(config: OfflineDiarizerConfig()).prepareModels()
+    }
+
     func spans(in wav: URL) async throws -> [SpeakerSpan] {
-        // macOS 14 crashes inside BNNS during Core ML predictions (FluidAudio
-        // #661/#878, fixed in 15). A crash cannot be caught, so skip it there.
-        guard ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 15 else {
-            throw DiarizationError.unsupportedOS
-        }
+        guard Self.isSupported else { throw DiarizationError.unsupportedOS }
         let manager = OfflineDiarizerManager(config: OfflineDiarizerConfig())
         try await manager.prepareModels()
         let result = try await manager.process(wav)

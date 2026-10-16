@@ -116,6 +116,10 @@ final class AppState: ObservableObject {
     private var recoveryRetryTask: Task<Void, Never>?
     private var systemAudioHeard = false
     private var lastLevelCheck: TimeInterval = 0
+    /// Only the real engine is warmed and unloaded; injected runners are fakes.
+    private let managesModels: Bool
+    private var modelUnloadTask: Task<Void, Never>?
+    static let modelIdleUnload: UInt64 = 600
     private let logger = AppInfo.logger("AppState")
 
     init(paths: AppPaths = .current, store: MeetingStore = .shared,
@@ -130,6 +134,7 @@ final class AppState: ObservableObject {
         self.store = store
         postProcessor = PostProcessor(store: store)
         self.recordingDriver = recordingDriver ?? .live(recorder: recorder)
+        managesModels = transcriptionRunner == nil
         self.transcriptionRunner = transcriptionRunner ?? { job, progress in
             try await Task.detached(priority: .userInitiated) {
                 try await job.run(progress: progress)
@@ -224,6 +229,7 @@ final class AppState: ObservableObject {
         meetingNotes = ""
         isStartingRecording = true
         phase = .recording
+        warmModels()
         recordingOrigin = origin
         recordingDuration = 0
         captureWarning = nil
@@ -344,6 +350,28 @@ final class AppState: ObservableObject {
 
     // MARK: - Transcription
 
+    /// Loads Parakeet while the meeting runs, so the transcript starts at once.
+    private func warmModels() {
+        guard managesModels else { return }
+        modelUnloadTask?.cancel()
+        Task.detached(priority: .utility) { try? await ParakeetEngine.shared.prepare() }
+        scheduleModelUnload()
+    }
+
+    /// Frees the models after `modelIdleUnload` seconds with no recording or job.
+    private func scheduleModelUnload() {
+        guard managesModels else { return }
+        modelUnloadTask?.cancel()
+        modelUnloadTask = Task { @MainActor [weak self] in
+            while true {
+                try? await Task.sleep(nanoseconds: Self.modelIdleUnload * 1_000_000_000)
+                guard let self, !Task.isCancelled else { return }
+                if self.phase != .recording, self.phase != .transcribing, self.recoveringPath == nil { break }
+            }
+            await ParakeetEngine.shared.unload()
+        }
+    }
+
     private func makeJob(audioPath: String, captureSampleRate: Double) -> TranscriptionJob {
         TranscriptionJob(audioPath: audioPath, captureSampleRate: captureSampleRate,
                          language: Settings.asrLanguage, diarize: Settings.diarize,
@@ -352,6 +380,7 @@ final class AppState: ObservableObject {
 
     private func transcribe(session: MeetingSession, audioPath: String, durableAudioPath: String,
                             transcriptPath: String, applyRetention: Bool) async {
+        defer { scheduleModelUnload() }
         errorMessage = nil
         phase = .transcribing
         transcriptionProgress = 0
@@ -494,6 +523,7 @@ final class AppState: ObservableObject {
         RecordingRecovery.recordFailure(audioPath: recording.audioPath, reason: "attempt started")
         let session = MeetingSession(startedAt: recording.startedAt, title: Strings.recoveredRecording)
         let job = makeJob(audioPath: recording.audioPath, captureSampleRate: 16_000)
+        defer { scheduleModelUnload() }
         do {
             let outcome = try await transcriptionRunner(job) { _ in }
             let input = PostProcessInput(
