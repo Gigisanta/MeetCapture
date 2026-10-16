@@ -550,10 +550,10 @@ final class AppState: ObservableObject {
         recoveringPath = nil
     }
 
-    /// Automatic retry after 5, 20 and 60 min; `RecordingRecovery.automatic`
-    /// stops picking a capture once it reaches the attempt cap.
+    /// Automatic retry 5 and 20 min after the first and second failures; the
+    /// third is the last attempt `RecordingRecovery.automatic` allows.
     private func scheduleRecoveryRetry(attempts: Int) {
-        let delays: [UInt64] = [300, 1_200, 3_600]
+        let delays: [UInt64] = [300, 1_200]
         guard attempts >= 1, attempts <= delays.count else { return }
         recoveryRetryTask?.cancel()
         recoveryRetryTask = Task { @MainActor [weak self] in

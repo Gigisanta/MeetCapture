@@ -24,7 +24,9 @@ actor ParakeetEngine: SpeechRecognizer {
     static let shared = ParakeetEngine()
     static let modelName = "parakeet-tdt-0.6b-ultra"
     private static let version = AsrModelVersion.ultra
-    private var manager: AsrManager?
+    /// One load shared by every caller; actor reentrancy would otherwise let
+    /// the warm-up and a job each download and load the model.
+    private var loading: Task<AsrManager, Error>?
 
     func prepare() async throws { _ = try await loaded() }
 
@@ -36,23 +38,32 @@ actor ParakeetEngine: SpeechRecognizer {
         return Self.words(from: result.tokenTimings ?? [])
     }
 
-    /// Frees the CoreML models; the next call loads them again.
+    /// Frees the CoreML models; the next call loads them again. Callers only
+    /// unload when no job runs (AppState checks the phase first).
     func unload() async {
-        await manager?.cleanup()
-        manager = nil
+        guard let task = loading else { return }
+        loading = nil
+        await (try? task.value)?.cleanup()
     }
 
-    var isLoaded: Bool { manager != nil }
-
     private func loaded() async throws -> AsrManager {
-        if let manager { return manager }
-        let version = Self.version
-        let models = try await AsrModels.downloadAndLoad(version: version)
-        let manager = AsrManager(config: ASRConfig(tdtConfig: TdtConfig(blankId: version.blankId),
-                                                   encoderHiddenSize: version.encoderHiddenSize))
-        try await manager.loadModels(models)
-        self.manager = manager
-        return manager
+        if let loading { return try await loading.value }
+        let task = Task<AsrManager, Error> {
+            let version = Self.version
+            let models = try await AsrModels.downloadAndLoad(version: version)
+            let manager = AsrManager(config: ASRConfig(tdtConfig: TdtConfig(blankId: version.blankId),
+                                                       encoderHiddenSize: version.encoderHiddenSize))
+            try await manager.loadModels(models)
+            return manager
+        }
+        loading = task
+        do {
+            return try await task.value
+        } catch {
+            // A failed load (offline, say) must not stick: the next call retries.
+            if loading == task { loading = nil }
+            throw error
+        }
     }
 
     /// SentencePiece tokens → words: "▁" (or a space) starts a word; word

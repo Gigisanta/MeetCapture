@@ -40,6 +40,8 @@ Planned as 7.0.0 (`scripts/version.sh` bumps it at release).
 - `install.sh` downloads and compiles the models (`MEETCAPTURE_PREFETCH_MODELS=1`)
   and refuses to swap the bundle while a `recording-*.pcm` is being written.
   Parakeet loads when a recording starts and is freed after 10 idle minutes.
+- Default retention is now 24 h instead of deleting the audio right after the
+  handoff, so a failed or partial transcript can still be redone.
 - `.pending` lists the transcript `speakers`; the summary dispatcher names
   them and summarizes long transcripts in parts before merging them.
 

@@ -324,8 +324,10 @@ mv "$NEW_APP" "$APP"
 verify_bundle "$APP"
 
 # Download and compile the speech models now (about 0.6 GB once), so the first
-# meeting needs no network. A failure only means the app downloads them later.
-if MEETCAPTURE_PREFETCH_MODELS=1 "$(bundle_executable_path "$APP")"; then
+# meeting needs no network. A failure only means the app downloads them later;
+# the 15 min cap keeps a stalled download from leaving no app running.
+if MEETCAPTURE_PREFETCH_MODELS=1 /usr/bin/perl -e 'alarm shift; exec @ARGV or exit 127' 900 \
+    "$(bundle_executable_path "$APP")"; then
   printf '%s\n' 'Speech models ready.'
 else
   printf '%s\n' 'WARNING: speech models could not be prepared now; the first transcription will download them.' >&2
