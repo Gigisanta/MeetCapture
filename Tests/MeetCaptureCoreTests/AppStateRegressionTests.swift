@@ -391,7 +391,7 @@ private final class FakeRecordingBackend {
             openPrivacySettings: {},
             isRecording: { self.isRecording },
             currentSampleRate: { 16_000 },
-            start: { [self] outputPath, _, _ in try await self.start(path: outputPath) },
+            start: { [self] outputPath, _ in try await self.start(path: outputPath) },
             stop: { [self] in try await self.stop() })
     }
 

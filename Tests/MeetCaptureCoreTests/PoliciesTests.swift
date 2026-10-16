@@ -23,34 +23,6 @@ final class CallActivityDebouncerTests: XCTestCase {
     }
 }
 
-final class LiveASRWarmPolicyTests: XCTestCase {
-    let now = TestSupport.fixedDate
-
-    func testZeroMinutesNeverUnloads() {
-        let p = LiveASRWarmPolicy(idleUnloadMinutes: 0)
-        XCTAssertNil(p.idleUnloadInterval)
-        XCTAssertFalse(p.shouldUnload(idleSince: now.addingTimeInterval(-86_400), now: now, callActive: false, nextMeetingStart: nil))
-    }
-
-    func testUnloadsAfterIdleUnlessSomethingNeedsIt() {
-        let p = LiveASRWarmPolicy(idleUnloadMinutes: 10)
-        let idle = now.addingTimeInterval(-601)
-        XCTAssertTrue(p.shouldUnload(idleSince: idle, now: now, callActive: false, nextMeetingStart: nil))
-        XCTAssertFalse(p.shouldUnload(idleSince: now.addingTimeInterval(-599), now: now, callActive: false, nextMeetingStart: nil))
-        XCTAssertFalse(p.shouldUnload(idleSince: idle, now: now, callActive: true, nextMeetingStart: nil))
-        XCTAssertFalse(p.shouldUnload(idleSince: idle, now: now, callActive: false, nextMeetingStart: now.addingTimeInterval(240)))
-        XCTAssertTrue(p.shouldUnload(idleSince: idle, now: now, callActive: false, nextMeetingStart: now.addingTimeInterval(3_600)))
-    }
-
-    func testWarmsForCallsAndImminentMeetings() {
-        let p = LiveASRWarmPolicy(idleUnloadMinutes: 10)
-        XCTAssertTrue(p.shouldWarm(callActive: true, nextMeetingStart: nil, now: now))
-        XCTAssertTrue(p.shouldWarm(callActive: false, nextMeetingStart: now.addingTimeInterval(300), now: now))
-        XCTAssertFalse(p.shouldWarm(callActive: false, nextMeetingStart: now.addingTimeInterval(301), now: now))
-        XCTAssertFalse(p.shouldWarm(callActive: false, nextMeetingStart: nil, now: now))
-    }
-}
-
 final class MeetingDetectionPolicyTests: XCTestCase {
     let now = TestSupport.fixedDate
     func meeting(startIn offset: TimeInterval, length: TimeInterval = 1_800) -> Meeting {

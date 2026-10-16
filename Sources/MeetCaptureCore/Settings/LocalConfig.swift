@@ -11,9 +11,9 @@ struct LocalConfig: Equatable, Sendable {
     var whitelistedEmails: [String] = []
     /// whisper.cpp initial prompt (names, companies, jargon) for spelling.
     var domainPrompt: String? = nil
-    /// Python interpreter with sherpa-onnx installed (live ASR, diarization).
+    /// Python interpreter with sherpa-onnx installed (diarization).
     var python: String? = nil
-    /// Directory holding transcribe_sherpa.py & co.
+    /// Directory holding speaker_diarize.py.
     var scriptsDir: String? = nil
 
     static let empty = LocalConfig()

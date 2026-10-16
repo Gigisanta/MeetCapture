@@ -19,9 +19,6 @@ protocol PopoverStateModel: ObservableObject {
     var lastTranscriptPath: String? { get }
     var lastSegments: [Segment] { get }
     var lastAudioPath: String? { get }
-    var livePartialText: String { get }
-    var liveSegments: [LiveASRSegment] { get }
-    var liveASRState: LiveASRState { get }
     var history: [MeetingSummary] { get }
     var historyQuery: String { get set }
     var meetingNotes: String { get set }
@@ -46,7 +43,6 @@ protocol PopoverStateModel: ObservableObject {
 @MainActor
 struct PopoverContent<Model: PopoverStateModel>: View {
     @ObservedObject var appState: Model
-    @AppStorage(Settings.Key.liveTranscribe.rawValue) private var liveTranscribe = Settings.Default.liveTranscribe
     @AppStorage(Settings.Key.micOnlyMode.rawValue) private var micOnlyMode = Settings.Default.micOnlyMode
     @State private var now = Date()
     private let allowsSettings: Bool
@@ -57,9 +53,6 @@ struct PopoverContent<Model: PopoverStateModel>: View {
     init(appState: Model, settingsStore: UserDefaults = .standard, allowsSettings: Bool = true) {
         self._appState = ObservedObject(wrappedValue: appState)
         self.allowsSettings = allowsSettings
-        self._liveTranscribe = AppStorage(
-            wrappedValue: Settings.Default.liveTranscribe,
-            Settings.Key.liveTranscribe.rawValue, store: settingsStore)
         self._micOnlyMode = AppStorage(
             wrappedValue: Settings.Default.micOnlyMode,
             Settings.Key.micOnlyMode.rawValue, store: settingsStore)
@@ -173,7 +166,7 @@ struct PopoverContent<Model: PopoverStateModel>: View {
         }
     }
 
-    // MARK: - Status card (state + live text)
+    // MARK: - Status card
 
     private var statusCard: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -202,50 +195,9 @@ struct PopoverContent<Model: PopoverStateModel>: View {
                         .monospacedDigit()
                 }
             }
-            if appState.phase == .recording, !appState.isStartingRecording, liveTranscribe {
-                liveText
-            } else if appState.phase == .idle || appState.phase == .approaching {
-                HStack(spacing: 6) {
-                    Image(systemName: liveTranscribe && appState.liveASRState == .ready ? "waveform.badge.mic" : "waveform")
-                        .font(.system(size: 10))
-                        .foregroundStyle(liveTranscribe && appState.liveASRState == .ready ? Brand.successGreen : .secondary)
-                    Text(Strings.liveStatus(appState.liveASRState, enabled: liveTranscribe))
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                }
-            }
         }
         .padding(10)
         .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
-    }
-
-    private var liveText: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 3) {
-                    if appState.liveSegments.isEmpty && appState.livePartialText.isEmpty {
-                        Text(appState.liveASRState == .ready ? Strings.liveWaiting
-                             : Strings.liveStatus(appState.liveASRState, enabled: true))
-                            .font(.system(size: 11)).foregroundStyle(.tertiary)
-                    }
-                    ForEach(appState.liveSegments) { seg in
-                        Text("[\(formatTimestamp(seg.start))] \(seg.text)")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    if !appState.livePartialText.isEmpty {
-                        Text(appState.livePartialText + " …")
-                            .font(.system(size: 11, weight: .medium))
-                            .italic()
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    Color.clear.frame(height: 1).id("bottom")
-                }
-            }
-            .frame(height: 150)
-            .onChange(of: appState.liveSegments.count) { _, _ in proxy.scrollTo("bottom") }
-        }
     }
 
     // MARK: - Primary action

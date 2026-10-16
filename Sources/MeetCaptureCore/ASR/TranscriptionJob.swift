@@ -1,6 +1,6 @@
 // TranscriptionJob.swift
 // Transcription of one audio file with the configured engine:
-// PCM/WAV → 16 kHz mono WAV → sherpa or chunked whisper → diarization.
+// PCM/WAV → 16 kHz mono WAV → chunked whisper → diarization.
 // Runs entirely off the main actor; reports coarse progress.
 
 import Foundation
@@ -22,7 +22,6 @@ enum TranscriptionError: LocalizedError {
 struct TranscriptionJob: Sendable {
     var audioPath: String
     var captureSampleRate: Double
-    var engine: ASREngine
     var model: String
     var language: String
     var diarize: Bool
@@ -30,7 +29,7 @@ struct TranscriptionJob: Sendable {
     var toolchain: Toolchain
     var whisperModels: WhisperModels = .default
 
-    /// Whisper model actually used (after memory fallback) or the sherpa model id.
+    /// Whisper model actually used (after memory fallback).
     struct Outcome: Sendable {
         var segments: [Segment]
         var engineUsed: ASREngine
@@ -41,7 +40,6 @@ struct TranscriptionJob: Sendable {
     }
 
     func run(progress: @escaping @Sendable (Double) -> Void) async throws -> Outcome {
-        let logger = AppInfo.logger("TranscriptionJob")
         let state = Signposts.pipeline.beginInterval("transcription")
         defer { Signposts.pipeline.endInterval("transcription", state) }
 
@@ -52,48 +50,31 @@ struct TranscriptionJob: Sendable {
         progress(0.3)
         try Task.checkCancellation()
 
-        let sherpa = SherpaScripts(toolchain: toolchain)
-        var segments: [Segment]? = nil
-        var engineUsed = engine
-        var modelUsed = model
-        var failedChunks = 0
-
-        if engine == .sherpa {
-            segments = await sherpa?.transcribe(wav: wav, model: model)
-            if segments == nil {
-                logger.warning("sherpa no disponible; usando whisper")
-                engineUsed = .whisper
-            }
+        guard let cli = WhisperCLI.locate() else { throw WhisperError.cliNotFound }
+        guard let selected = whisperModels.select(setting: model) else {
+            throw WhisperError.noModel(directory: whisperModels.directory)
         }
-        if segments == nil {
-            guard let cli = WhisperCLI.locate() else { throw WhisperError.cliNotFound }
-            guard let selected = whisperModels.select(setting: engine == .whisper ? model : Settings.Default.asrModel) else {
-                throw WhisperError.noModel(directory: whisperModels.directory)
-            }
-            modelUsed = URL(fileURLWithPath: selected.path).deletingPathExtension().lastPathComponent
-                .replacingOccurrences(of: "ggml-", with: "")
-            let modelPath = selected.path, vad = whisperModels.vadModelPath
-            let language = language, prompt = prompt
-            let chunked = try await ChunkedTranscription.run(
-                wav: wav, sourceAudio: audioPath,
-                engine: { chunk, useGPU in
-                    try await cli.transcribe(wav: chunk, modelPath: modelPath, language: language,
-                                             prompt: prompt, vadModelPath: vad, useGPU: useGPU)
-                },
-                progress: { progress(0.3 + 0.5 * $0) })
-            segments = chunked.segments
-            failedChunks = chunked.failedChunks
-        }
+        let modelUsed = URL(fileURLWithPath: selected.path).deletingPathExtension().lastPathComponent
+            .replacingOccurrences(of: "ggml-", with: "")
+        let modelPath = selected.path, vad = whisperModels.vadModelPath
+        let language = language, prompt = prompt
+        let chunked = try await ChunkedTranscription.run(
+            wav: wav, sourceAudio: audioPath,
+            engine: { chunk, useGPU in
+                try await cli.transcribe(wav: chunk, modelPath: modelPath, language: language,
+                                         prompt: prompt, vadModelPath: vad, useGPU: useGPU)
+            },
+            progress: { progress(0.3 + 0.5 * $0) })
         progress(0.8)
         try Task.checkCancellation()
 
-        var result = TranscriptFormatter.cleaned(segments ?? [])
+        var result = TranscriptFormatter.cleaned(chunked.segments)
         guard !result.isEmpty else { throw TranscriptionError.emptyOutput }
-        if diarize, let labels = await sherpa?.diarize(wav: wav, segments: result) {
+        if diarize, let labels = await SpeakerDiarizer(toolchain: toolchain)?.diarize(wav: wav, segments: result) {
             result = DiarizationMerge.apply(labels: labels, to: result)
         }
         progress(1.0)
-        return Outcome(segments: result, engineUsed: engineUsed, modelUsed: modelUsed,
-                       audioDurationSec: audioDuration, failedChunks: failedChunks)
+        return Outcome(segments: result, engineUsed: .whisper, modelUsed: modelUsed,
+                       audioDurationSec: audioDuration, failedChunks: chunked.failedChunks)
     }
 }

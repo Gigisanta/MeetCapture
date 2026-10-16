@@ -11,15 +11,11 @@ enum Settings {
         case notifyHermes
         case retention
         case maxRecordingDuration
-        case engine
         case asrModel
         case asrLanguage
         case diarize
         case sherpaPythonPath
         case scriptsDir
-        case liveTranscribe
-        case liveModel
-        case liveIdleUnloadMinutes
         case micOnlyMode
         case inputDeviceUID
     }
@@ -30,15 +26,11 @@ enum Settings {
         /// A day to retranscribe (a better engine, a gap) before the audio goes.
         static let retention = RetentionPolicy.keep24h
         static let maxRecordingDuration: Double = 10_800
-        static let engine = ASREngine.whisper
         static let asrModel = "medium-q5_0"
         static let asrLanguage = "es"
         static let diarize = true
         static let sherpaPythonPath = ""
         static let scriptsDir = ""
-        static let liveTranscribe = true
-        static let liveModel = "zipformer-es"
-        static let liveIdleUnloadMinutes = 10
         static let micOnlyMode = false
         static let inputDeviceUID = ""
     }
@@ -49,15 +41,11 @@ enum Settings {
             Key.notifyHermes.rawValue: Default.notifyHermes,
             Key.retention.rawValue: Default.retention.rawValue,
             Key.maxRecordingDuration.rawValue: Default.maxRecordingDuration,
-            Key.engine.rawValue: Default.engine.rawValue,
             Key.asrModel.rawValue: Default.asrModel,
             Key.asrLanguage.rawValue: Default.asrLanguage,
             Key.diarize.rawValue: Default.diarize,
             Key.sherpaPythonPath.rawValue: Default.sherpaPythonPath,
             Key.scriptsDir.rawValue: Default.scriptsDir,
-            Key.liveTranscribe.rawValue: Default.liveTranscribe,
-            Key.liveModel.rawValue: Default.liveModel,
-            Key.liveIdleUnloadMinutes.rawValue: Default.liveIdleUnloadMinutes,
             Key.micOnlyMode.rawValue: Default.micOnlyMode,
             Key.inputDeviceUID.rawValue: Default.inputDeviceUID,
         ]
@@ -80,7 +68,6 @@ enum Settings {
     static var autoRecord: Bool { bool(.autoRecord, default: Default.autoRecord) }
     static var notifyHermes: Bool { bool(.notifyHermes, default: Default.notifyHermes) }
     static var diarize: Bool { bool(.diarize, default: Default.diarize) }
-    static var liveTranscribe: Bool { bool(.liveTranscribe, default: Default.liveTranscribe) }
     static var micOnlyMode: Bool { bool(.micOnlyMode, default: Default.micOnlyMode) }
 
     static var retention: RetentionPolicy {
@@ -94,27 +81,11 @@ enum Settings {
         return min(max(value, 1_800), 28_800)
     }
 
-    static var engine: ASREngine {
-        ASREngine(rawValue: string(.engine, default: Default.engine.rawValue)) ?? Default.engine
-    }
-
-    /// Model as typed in Settings; empty falls back to the engine's default.
+    /// Model as typed in Settings; empty or a retired sherpa model id
+    /// falls back to the default.
     static var asrModel: String {
-        model(for: engine, configured: string(.asrModel, default: ""))
-    }
-
-    /// Shared by runtime and Settings UI so a previous engine's standard
-    /// model cannot disable transcription before the settings window opens.
-    static func model(for engine: ASREngine, configured: String) -> String {
-        let value = configured.trimmingCharacters(in: .whitespacesAndNewlines)
-        switch engine {
-        case .sherpa where value.isEmpty || WhisperModelSize.normalized(from: value) != nil:
-            return "zipformer-es"
-        case .whisper where value.isEmpty || value == "zipformer-es" || value == "zipformer-en":
-            return Default.asrModel
-        default:
-            return value
-        }
+        let value = string(.asrModel, default: "")
+        return value.isEmpty || value.hasPrefix("zipformer-") ? Default.asrModel : value
     }
 
     static var asrLanguage: String {
@@ -130,17 +101,6 @@ enum Settings {
     static var scriptsDir: String? {
         let value = string(.scriptsDir, default: "")
         return value.isEmpty ? nil : value
-    }
-
-    static var liveModel: String {
-        let value = string(.liveModel, default: Default.liveModel)
-        return value.isEmpty ? Default.liveModel : value
-    }
-
-    /// Minutes of idle before the live recognizer is unloaded; 0 = never.
-    static var liveIdleUnloadMinutes: Int {
-        let value = store.object(forKey: Key.liveIdleUnloadMinutes.rawValue) as? Int ?? Default.liveIdleUnloadMinutes
-        return max(0, value)
     }
 
     static var inputDeviceUID: String? {

@@ -66,7 +66,7 @@ struct Toolchain: Sendable, Equatable {
         return FileManager.default.isReadableFile(atPath: path) ? path : nil
     }
 
-    /// Ready for sherpa work: python present (and, if validated, importable) + scripts.
+    /// Ready for diarization: python present (and, if validated, importable) + scripts.
     var isUsable: Bool {
         python != nil && scriptsDir != nil && pythonHasSherpa != false
     }
@@ -84,7 +84,7 @@ struct Toolchain: Sendable, Equatable {
 }
 
 enum ToolchainResolver {
-    static let sentinelScript = "transcribe_sherpa.py"
+    static let sentinelScript = "speaker_diarize.py"
 
     static func resolve(
         settingsPython: String? = Settings.sherpaPythonPath,

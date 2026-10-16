@@ -1,4 +1,3 @@
-import os
 import XCTest
 @testable import MeetCaptureCore
 
@@ -106,26 +105,6 @@ final class RecoveryAndCaptureHealthTests: XCTestCase {
         let path = dir + "/capture.pcm"
         try stereo(Array(repeating: (100, 100), count: 8_000)).write(to: URL(fileURLWithPath: path))
         XCTAssertNil(ChannelLevels.measureTail(path: path, seconds: 10))
-    }
-
-    // MARK: - Live sink
-
-    /// The consumer reads the sink once per chunk (~100/s). Each read of a
-    /// bare closure from the generic lock added a thunk layer; after ~18 min
-    /// calling it overflowed the stack.
-    func testReadingTheLiveSinkDoesNotDeepenItsCallStack() {
-        let engine = CaptureEngine()
-        let depth = OSAllocatedUnfairLock(initialState: [Int]())
-        engine.setLiveSink { _ in
-            let frames = Thread.callStackSymbols.count
-            depth.withLock { $0.append(frames) }
-        }
-        engine.liveSink.withLock { $0 }?.call([1])
-        for _ in 0..<10_000 { _ = engine.liveSink.withLock { $0 } }
-        engine.liveSink.withLock { $0 }?.call([1])
-        let recorded = depth.withLock { $0 }
-        XCTAssertEqual(recorded.count, 2)
-        XCTAssertEqual(recorded.first, recorded.last)
     }
 
     // MARK: - Mixing and whisper output

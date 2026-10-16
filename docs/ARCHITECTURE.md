@@ -20,7 +20,7 @@ Sources/MeetCaptureCore/           everything else, one directory per layer
   App/        AppState, RecordingCoordinator, MeetingDetectionPolicy, Notifier
   Capture/    CoreAudioTap, AudioRingBuffer, AudioResampler, PCMFileWriter, AudioFormatSidecar, InputDevices, AudioCaptureService
   Detection/  CallDetector, CallActivityDebouncer, CalendarService, MeetingFilter
-  ASR/        WhisperCLI, WhisperModels, SherpaScripts, TranscriptionJob, LiveASRService, LiveASRWarmPolicy, PCMToWAV, Segment, SegmentJSON
+  ASR/        WhisperCLI, WhisperModels, ChunkedTranscription, SpeakerDiarizer, TranscriptionJob, PCMToWAV, Segment, SegmentJSON
   Pipeline/   MeetingSession, PendingContractV2, PostProcessor, Retention, AudioImporter
   Store/      MeetingStore (sqlite3 + FTS5)
   Settings/   Settings, LocalConfig, SummaryDispatcherConfig, ToolchainResolver, AppPaths
@@ -56,37 +56,33 @@ and `Settings` only know `Support`. Nothing below `App` touches SwiftUI.
    The IOProc copies both tracks into a preallocated `AudioRingBuffer`
    (64 slots of 8192 frames, no allocation on the real-time thread). One
    consumer thread mixes, resamples to 16 kHz (`AudioResampler` wraps
-   `AVAudioConverter` with a reused output buffer), feeds the live
-   recognizer and appends Int16 stereo to `PCMFileWriter`, which flushes
+   `AVAudioConverter` with a reused output buffer) and appends Int16
+   stereo to `PCMFileWriter`, which flushes
    every 64 KB. Left channel is the system, right is the microphone; in microphone-only
    mode both channels carry the microphone so mono conversion preserves its level.
    `AudioFormatSidecar` writes `<file>.pcm.format.json` with schema
    `meetcapture.audio.v1` so no consumer guesses the byte layout.
-3. **Live transcription.** `LiveASRService` owns one
-   `meetcapture_stream_asr.py` child for the whole app lifetime. It streams
-   the mono mix on stdin and reads JSONL (`ready`, `partial`, `final`,
-   `error`, `done`) on a dedicated thread. `LiveASRWarmPolicy` decides when
-   to warm (a call is active, a meeting starts within 5 min, or the user
-   presses Record) and when to unload (idle for `liveIdleUnloadMinutes`,
-   default 10, 0 disables). Startup applies that demand policy rather than
-   loading the recognizer for an idle app. The published `LiveASRState` (`cold`,
-   `warming`, `ready`, `failed`) drives the popover text.
-4. **Transcribe.** After capture stops, `TranscriptionJob` converts the
-   PCM to a 16 kHz mono WAV (`PCMToWAV`) and runs one of two engines through
-   `ProcessRunner`: `whisper-cli` with `-oj` JSON output, or
-   `transcribe_sherpa.py` (`--audio`, `--out`, `--model`). If diarization is
-   on, `speaker_diarize.py` receives the WAV plus `{"segments": [...]}` and
-   returns the same list with `speaker` labels; `"?"` maps to no speaker.
-   `ProcessRunner` drains both pipes, applies a timeout proportional to the
-   audio length (10 s per minute, clamped to 30 s to 600 s) and escalates
-   SIGTERM to SIGKILL after 5 s.
-5. **Hand off.** `PostProcessor` is an actor: it rejects empty transcripts,
+3. **Transcribe.** There is no live transcription. After capture stops,
+   `TranscriptionJob` converts the PCM to a 16 kHz mono WAV (`PCMToWAV`)
+   and `ChunkedTranscription` cuts it into ~5 min chunks at the quietest
+   100 ms frame within ±10 s of each boundary. Each chunk runs `whisper-cli`
+   (`-oj`) once on the GPU and, if that fails, once on the CPU
+   (`--no-gpu`), with a per-chunk timeout of 60 s + 2× its duration.
+   Finished chunks are checkpointed in `<audio>.work/` (`manifest.json` +
+   `chunk-NNN.json`), so a timeout, crash or quit resumes at the first
+   missing chunk. A chunk that fails on both is marked in the text as
+   `[fragmento sin transcribir …]` and the audio is kept. If diarization
+   is on, `speaker_diarize.py` receives the WAV plus `{"segments": [...]}`
+   and returns the same list with `speaker` labels; `"?"` maps to no
+   speaker. `ProcessRunner` drains both pipes and escalates SIGTERM to
+   SIGKILL after 5 s.
+4. **Hand off.** `PostProcessor` is an actor: it rejects empty transcripts,
    writes the `.txt` transcript, commits `MeetingStore`, writes the
    `.processed.json` marker, and only then publishes the `.pending`
    contract. It applies `RetentionPolicy` after those writes succeed.
    `AppState` receives the `PostProcessResult` and updates published state
    on the main actor.
-6. **Summarize.** The canonical
+5. **Summarize.** The canonical
    `tools/summary/meetcapture_summary_dispatcher.py` turns each `.pending`
    into `.summary.json`, `.summary.html` and `.summary.md`, renames it to `.done`, and
    deletes the audio unless `keep_audio` is set. The optional launchd agent
@@ -142,10 +138,8 @@ runtime behavior.
 
 | Process | Started by | Lifetime | Input and output |
 | --- | --- | --- | --- |
-| `whisper-cli` (bundle first, then Homebrew) | TranscriptionJob | per transcript | WAV in, `-oj` JSON out. |
-| `transcribe_sherpa.py` | TranscriptionJob | per transcript | `--audio --out [--model]`, writes `{"segments": [...]}`. |
+| `whisper-cli` (bundle first, then Homebrew) | ChunkedTranscription | per chunk | WAV in, `-oj` JSON out. |
 | `speaker_diarize.py` | TranscriptionJob | per transcript | `--audio --segments --out`, adds `speaker` per segment. |
-| `meetcapture_stream_asr.py` | LiveASRService | warm while needed | Int16 mono PCM on stdin, JSONL on stdout. |
 | `afconvert` | AudioImporter | per import | Converts wav, m4a, aiff, caf to 16 kHz Int16. |
 | `meetcapture_summary_dispatcher.py` | optional `ai.hermes.meetcapture-summary` launchd agent or manual invocation | one pass per trigger | `.pending` in, `.summary.*` and `.done` out. |
 
@@ -181,14 +175,12 @@ is not sufficient evidence that its dependencies load.
 | Area | Where | How |
 | --- | --- | --- |
 | Contracts (`.pending`, marker, sidecar, segment JSON, WAV header) | `Tests/MeetCaptureCoreTests` | `swift test` |
-| Policies (warm, debounce, detection, retention, meeting filter) | same | `swift test` |
+| Policies (debounce, detection, retention, meeting filter) | same | `swift test` |
 | Store (schema migration, FTS query builder, search) | same | `swift test` against a temp database |
 | Settings, config, toolchain resolution, process runner | same | `swift test` with temp dirs and fake executables |
 | Bundle, signature, isolated UI render and app liveness | `qa/app-smoke-test.sh` | renders `PopoverSnapshot` with synthetic `UIFixtureState`; a guarded `/tmp` LaunchServices launch checks app liveness, requires `NSStatusItem.isVisible` and a button attached to a window, and calls the status button's `performClick` twice, requiring the popover window to appear and then close; it skips operational startup and meeting writes |
 | Dispatcher lifecycle and backoff | `tools/summary/test_dispatcher.py` | Python tests in a temporary directory with `dry_run`; does not prove app capture or import |
 | Summary content gate | `tools/summary/test_real_summary_check.py` | Offline assertions over temporary fixtures; does not call the configured gateway or prove a real summary run |
-| Direct ASR engine comparison | `qa/benchmark-asr.sh` with `qa/gen_test_corpus.sh` | disposable corpus, original reference text, WER and RTF; `ENGINE=both` and `MAX_WER=0.15` by default; per-engine artifacts are retained; no AppState or Core Audio |
-| Model-backed ASR, streaming and diarization | `qa/real_asr_check.py` | local sherpa scripts, genuine segments JSON and temporary corpus; no meeting or microphone path |
 | Visual evidence | `qa/visual-test.sh` | normal popover screenshot or headless synthetic fixture; visual evidence only |
 | Real import/capture pipeline | `qa/capture-selftest.sh` with `MEETCAPTURE_REAL_CHECK=import|capture`, required `MEETCAPTURE_TEST_OUTPUT_DIR`, `MEETCAPTURE_CHECK_INPUT` WAV, and `MEETCAPTURE_CHECK_REPORT` JSON | import covers two imports plus one re-transcription; capture covers AppState, AV/Core Audio, `afplay`, isolated WAV, and CPU Whisper; the wrapper validates reference/WER |
 | Real UI behavior | `MEETCAPTURE_REAL_CHECK=ui` with the same required fresh output, input WAV, and JSON report | real `AppState` and `PopoverContent` with `allowsSettings:false`, isolated history, manual import/re-transcription, search matches/non-matches and recovery through CUA; no Settings, normal startup or PASS emission |
@@ -224,9 +216,8 @@ format sidecar in the isolated output directory, converts it to WAV for real
 Whisper, and runs real Whisper with
 `MEETCAPTURE_WHISPER_CPU_ONLY=1`. `MEETCAPTURE_CHECK_MIC_ONLY=1` selects the
 microphone-only branch and is reported as `micOnly:true`; the default is
-`false`, preserving the microphone-plus-system contract. Diarization and live
-ASR are explicitly off for this check; the streaming path has a separate
-check. Missing microphone permission is a blocked prerequisite. `ui` opens the real
+`false`, preserving the microphone-plus-system contract. Diarization is
+explicitly off for this check. Missing microphone permission is a blocked prerequisite. `ui` opens the real
 `PopoverContent` with `AppState`, real engines, isolated history, and volatile
 settings with `allowsSettings:false`, so `SettingsView` cannot read or write
 normal preferences. It disables automatic operations, lets CUA exercise the

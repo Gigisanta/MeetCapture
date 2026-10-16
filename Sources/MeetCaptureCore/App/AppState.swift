@@ -16,7 +16,7 @@ struct AppStateRecordingDriver {
     let openPrivacySettings: () -> Void
     let isRecording: () -> Bool
     let currentSampleRate: () -> Double
-    let start: (String, TapConfiguration, RecordingCoordinator.LiveOptions?) async throws -> Void
+    let start: (String, TapConfiguration) async throws -> Void
     let stop: () async throws -> String?
 
     static func live(recorder: RecordingCoordinator) -> Self {
@@ -25,8 +25,8 @@ struct AppStateRecordingDriver {
             openPrivacySettings: { recorder.audioCapture.openPrivacySettings() },
             isRecording: { recorder.isRecording },
             currentSampleRate: { recorder.audioCapture.currentSampleRate },
-            start: { outputPath, configuration, live in
-                try await recorder.start(outputPath: outputPath, configuration: configuration, live: live)
+            start: { outputPath, configuration in
+                try await recorder.start(outputPath: outputPath, configuration: configuration)
             },
             stop: { try await recorder.stop() })
     }
@@ -61,9 +61,6 @@ final class AppState: ObservableObject {
     @Published var lastTranscriptPath: String?
     @Published var lastSegments: [Segment] = []
     @Published var lastAudioPath: String?
-    @Published var livePartialText = ""
-    @Published var liveSegments: [LiveASRSegment] = []
-    @Published var liveASRState: LiveASRState = .cold
     @Published var history: [MeetingSummary] = []
     @Published var historyQuery = "" {
         didSet {
@@ -109,7 +106,6 @@ final class AppState: ObservableObject {
     private var recordingStopTask: Task<Void, Never>?
     private var stopRequested = false
     private var scheduledStart: DispatchWorkItem?
-    private var warmTimer: Timer?
     private var historySearchTask: Task<Void, Never>?
     private var historySearchGeneration: UInt = 0
     private var errorDismissalTask: Task<Void, Never>?
@@ -165,19 +161,11 @@ final class AppState: ObservableObject {
         refreshHistory()
         await refreshToolchain()
         recoverRecordings(automaticOnly: true)
-        // Keep the heavyweight recognizer cold until a call, an imminent
-        // meeting or an explicit recording actually needs it.
-        applyWarmPolicy()
-        warmTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in self?.applyWarmPolicy() }
-        }
     }
 
     func shutdown() {
         callDetector.stop()
-        warmTimer?.invalidate()
         if phase == .recording { stopRecording() }
-        recorder.unloadLive()
     }
 
     /// True while quitting would cut a capture short.
@@ -187,7 +175,6 @@ final class AppState: ObservableObject {
     /// capture stays an orphan that startup recovery picks up next launch.
     func shutdownGracefully(timeout: TimeInterval = 15) async {
         callDetector.stop()
-        warmTimer?.invalidate()
         recoveryTask?.cancel()
         if let start = recordingStartTask { await start.value }
         if recordingStopTask == nil, recordingDriver.isRecording() {
@@ -200,7 +187,6 @@ final class AppState: ObservableObject {
         }
         recordingStopTask?.cancel()
         resetRecordingState()
-        recorder.unloadLive()
     }
 
     func refreshPermissions() {
@@ -250,21 +236,17 @@ final class AppState: ObservableObject {
         captureWarning = nil
         systemAudioHeard = false
         lastLevelCheck = 0
-        liveSegments = []
-        livePartialText = ""
         if origin != .liveCall { callDetector.reconcileSuspended = true }
 
         let outputPath = "\(paths.transcriptsDir)/recording-\(session.id).pcm"
         activeCapturePath = outputPath
         let configuration = TapConfiguration(
             micOnly: Settings.micOnlyMode, inputDeviceUID: Settings.inputDeviceUID)
-        let live = Settings.liveTranscribe
-            ? RecordingCoordinator.LiveOptions(model: Settings.liveModel, toolchain: toolchain) : nil
         stopRequested = false
         recordingStartTask = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                try await self.recordingDriver.start(outputPath, configuration, live)
+                try await self.recordingDriver.start(outputPath, configuration)
             } catch is CancellationError {
                 guard self.session?.id == session.id else { return }
                 self.recordingStartTask = nil
@@ -338,8 +320,6 @@ final class AppState: ObservableObject {
             do {
                 audioPath = try await self.recordingDriver.stop()
             } catch {
-                self.livePartialText = ""
-                self.liveSegments = []
                 self.errorMessage = Strings.errorRecording(error.localizedDescription)
                 self.resetRecordingState()
                 return
@@ -349,7 +329,6 @@ final class AppState: ObservableObject {
                 self.resetRecordingState()
                 return
             }
-            self.livePartialText = ""
             await self.transcribe(session: session, audioPath: audioPath, durableAudioPath: audioPath,
                                   transcriptPath: RecordingRecovery.transcriptPath(forAudio: audioPath),
                                   applyRetention: true)
@@ -380,11 +359,11 @@ final class AppState: ObservableObject {
         let prompt = LocalConfig.load(path: paths.configFile).domainPrompt ?? WhisperCLI.defaultPrompt
         let job = TranscriptionJob(
             audioPath: audioPath, captureSampleRate: recordingDriver.currentSampleRate(),
-            engine: Settings.engine, model: Settings.asrModel, language: Settings.asrLanguage,
+            model: Settings.asrModel, language: Settings.asrLanguage,
             diarize: Settings.diarize, prompt: prompt, toolchain: toolchain)
         let input = PostProcessInput(
             session: session, segments: [], transcriptPath: transcriptPath, capturePath: audioPath,
-            durableAudioPath: durableAudioPath, engine: Settings.engine, model: Settings.asrModel,
+            durableAudioPath: durableAudioPath, engine: .whisper, model: Settings.asrModel,
             language: Settings.asrLanguage, applyRetention: applyRetention,
             retention: Settings.retention, meetingsDir: paths.meetingsDir,
             audioEndedAt: applyRetention ? RecordingRecovery.modificationDate(audioPath) : Date())
@@ -522,7 +501,7 @@ final class AppState: ObservableObject {
         let prompt = LocalConfig.load(path: paths.configFile).domainPrompt ?? WhisperCLI.defaultPrompt
         let job = TranscriptionJob(
             audioPath: recording.audioPath, captureSampleRate: 16_000,
-            engine: Settings.engine, model: Settings.asrModel, language: Settings.asrLanguage,
+            model: Settings.asrModel, language: Settings.asrLanguage,
             diarize: Settings.diarize, prompt: prompt, toolchain: toolchain)
         do {
             let outcome = try await transcriptionRunner(job) { _ in }
@@ -599,18 +578,6 @@ final class AppState: ObservableObject {
 
     private func bind() {
         recorder.onTick = { [weak self] elapsed in self?.tick(elapsed) }
-        recorder.liveASR.onState = { [weak self] state in
-            Task { @MainActor [weak self] in self?.liveASRState = state }
-        }
-        recorder.liveASR.onPartial = { [weak self] text in
-            Task { @MainActor [weak self] in self?.livePartialText = text }
-        }
-        recorder.liveASR.onFinal = { [weak self] seg in
-            Task { @MainActor [weak self] in
-                self?.liveSegments.append(seg)
-                self?.livePartialText = ""
-            }
-        }
         audioCapture.$lastError
             .compactMap { $0 }
             .sink { [weak self] message in self?.handleCaptureFailure(message) }
@@ -663,7 +630,6 @@ final class AppState: ObservableObject {
     }
 
     private func handleCallActivity(_ active: Bool) {
-        if active { warmLive() }
         switch MeetingDetectionPolicy.action(callActive: active, phase: phase, origin: recordingOrigin,
                                              autoRecord: Settings.autoRecord) {
         case .start(let origin): if hasAudioPermission { startRecording(origin: origin) }
@@ -679,7 +645,6 @@ final class AppState: ObservableObject {
             if phase == .approaching { phase = .idle; currentMeeting = nil; scheduledStart?.cancel() }
             return
         }
-        warmLive()
         guard phase != .approaching else { return }
         phase = .approaching
         currentMeeting = next
@@ -696,30 +661,6 @@ final class AppState: ObservableObject {
         }
         scheduledStart = work
         DispatchQueue.main.asyncAfter(deadline: .now() + max(0, next.timeUntilStart(now: now)), execute: work)
-    }
-
-    // MARK: - Live ASR warm policy
-
-    private var warmPolicy: LiveASRWarmPolicy { LiveASRWarmPolicy(idleUnloadMinutes: Settings.liveIdleUnloadMinutes) }
-
-    private func warmLive() {
-        guard Settings.liveTranscribe, toolchain.isUsable else { return }
-        recorder.warmLive(.init(model: Settings.liveModel, toolchain: toolchain))
-    }
-
-    private func applyWarmPolicy() {
-        guard phase != .recording else { return }
-        let now = Date()
-        let next = calendarService.nextMeeting?.startDate
-        if recorder.liveASR.isRunning {
-            if warmPolicy.shouldUnload(idleSince: recorder.liveIdleSince, now: now,
-                                       callActive: callDetector.isCallActive, nextMeetingStart: next) {
-                logger.info("live ASR descargado por inactividad")
-                recorder.unloadLive()
-            }
-        } else if warmPolicy.shouldWarm(callActive: callDetector.isCallActive, nextMeetingStart: next, now: now) {
-            warmLive()
-        }
     }
 
 }

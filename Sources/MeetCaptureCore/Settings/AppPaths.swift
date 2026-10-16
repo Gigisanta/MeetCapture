@@ -19,7 +19,6 @@ struct AppPaths: Sendable, Equatable {
     var configFile: String { configDir + "/config.json" }
     var summaryConfigFile: String { configDir + "/summary.json" }
     var venvPython: String { configDir + "/venv/bin/python3" }
-    var sherpaModelsDir: String { whisperModelsDir + "/sherpa" }
 
     static let current = AppPaths(
         environment: ProcessInfo.processInfo.environment,

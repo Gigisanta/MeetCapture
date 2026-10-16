@@ -46,13 +46,11 @@ public enum RealPipelineCheck {
             // Highest-priority volatile domain: no user's saved preferences are
             // changed, and every operational setting is explicit for this run.
             var settings = Settings.defaults
-            settings[Settings.Key.engine.rawValue] = "whisper"
             settings[Settings.Key.asrModel.rawValue] = "medium-q5_0"
             settings[Settings.Key.asrLanguage.rawValue] = env["MEETCAPTURE_CHECK_LANGUAGE"] ?? "es"
             settings[Settings.Key.notifyHermes.rawValue] = false
             settings[Settings.Key.autoRecord.rawValue] = false
             settings[Settings.Key.diarize.rawValue] = false
-            settings[Settings.Key.liveTranscribe.rawValue] = false
             settings[Settings.Key.micOnlyMode.rawValue] = env["MEETCAPTURE_CHECK_MIC_ONLY"] == "1"
             settings[Settings.Key.retention.rawValue] = RetentionPolicy.keep.rawValue
             UserDefaults.standard.setVolatileDomain(settings, forName: UserDefaults.argumentDomain)
@@ -170,7 +168,7 @@ public enum RealPipelineCheck {
         }
         var result: [String: Any] = ["status": "passed", "mode": mode, "text": text,
             "inputDurationSec": duration, "elapsedSec": Date().timeIntervalSince(start),
-            "historyCount": history.count, "records": records, "diarize": false, "live": false,
+            "historyCount": history.count, "records": records, "diarize": false,
             "micOnly": Settings.micOnlyMode]
         result.merge(capture) { _, new in new }
         return result

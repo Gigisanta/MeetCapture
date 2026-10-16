@@ -39,16 +39,6 @@ enum Strings {
         case .done: return "Guardada en la carpeta de transcripciones"
         }
     }
-    static func liveStatus(_ state: LiveASRState, enabled: Bool) -> String {
-        guard enabled else { return "Transcripción en vivo desactivada" }
-        switch state {
-        case .cold: return "Transcripción en vivo: en pausa"
-        case .warming: return "Transcripción en vivo: iniciando…"
-        case .ready: return "Transcripción en vivo: lista"
-        case .failed: return "Transcripción en vivo: no disponible"
-        }
-    }
-    static let liveWaiting = "Escuchando…"
 
     // Permissions
     static let micPermissionTitle = "Falta el permiso de micrófono"
@@ -149,24 +139,14 @@ enum Strings {
         static let granted = "Concedido"
         static let required = "Pendiente"
 
-        static let engine = "Motor"
-        static let engineWhisper = "Whisper (whisper.cpp, local)"
-        static let engineSherpa = "Sherpa (sherpa-onnx, archivo completo)"
-        static let engineHelp = "Sherpa corre al terminar la grabación; si falta el script o falla, se usa Whisper."
         static let model = "Modelo"
-        static let modelHelp = "Whisper: tiny, base, small, medium-q5_0 (recomendado), large-v3-turbo. Sherpa: zipformer-es, zipformer-en."
+        static let modelHelp = "Whisper: tiny, base, small, medium-q5_0 (recomendado), large-v3-turbo. Corre al terminar la grabación."
         static let language = "Idioma"
         static let spanish = "Español (es)"
         static let english = "Inglés (en)"
         static let autoDetect = "Detectar"
         static let diarize = "Identificar hablantes"
         static let diarizeHelp = "Etiqueta cada segmento con su hablante (sherpa-onnx). Si no está disponible, la transcripción sale sin etiquetas."
-        static let liveTranscribe = "Transcripción en vivo mientras grabás"
-        static let liveHelp = "Muestra el texto en el popover durante la llamada. La transcripción final la hace el motor de arriba."
-        static let liveModel = "Modelo en vivo"
-        static let liveIdle = "Apagar el reconocedor tras"
-        static let never = "Nunca"
-        static func minutes(_ n: Int) -> String { "\(n) min" }
         static let toolchain = "Herramientas"
         static let choosePython = "Elegir python…"
         static let chooseScripts = "Elegir carpeta de scripts…"

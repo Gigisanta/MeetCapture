@@ -14,13 +14,6 @@ final class SegmentJSONTests: XCTestCase {
         XCTAssertEqual(SegmentJSON.parseWhisper(Data("not json".utf8)), [])
     }
 
-    func testSherpaNilOnEmptyOrGarbage() {
-        XCTAssertNil(SegmentJSON.parseSherpa(Data("[]".utf8)))
-        XCTAssertNil(SegmentJSON.parseSherpa(Data(#"{"segments":[]}"#.utf8)))
-        let segs = SegmentJSON.parseSherpa(Data(#"{"engine":"sherpa","segments":[{"start":0.5,"end":1,"text":"ok"}]}"#.utf8))
-        XCTAssertEqual(segs, [Segment(start: 0.5, end: 1, text: "ok")])
-    }
-
     /// The bug that kept speakerCount at 0: speaker_diarize.py reads asr["segments"], so the
     /// file passed via --segments must be an object, never a bare array.
     func testDiarizerInputIsWrappedInSegmentsObject() throws {

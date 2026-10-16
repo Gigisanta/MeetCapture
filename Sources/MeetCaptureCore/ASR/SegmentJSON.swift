@@ -3,7 +3,6 @@
 //
 //   whisper-cli -oj   → {"transcription":[{"offsets":{"from":ms,"to":ms},"text":…}]}
 //                        (older builds: {"segments":[{start,end,text}]})
-//   transcribe_sherpa → {"engine","model","language","segments":[{start,end,text}]}
 //   speaker_diarize   ← {"segments":[{start,end,text}]}   (what it reads via --segments)
 //                     → {"speakers":N,"segments":[{start,end,text,"speaker":"A"|"?"}]}
 
@@ -33,15 +32,6 @@ enum SegmentJSON {
             return plainSegments(items)
         }
         return []
-    }
-
-    /// transcribe_sherpa.py output. nil when unparseable or empty (caller falls back to whisper).
-    static func parseSherpa(_ data: Data) -> [Segment]? {
-        guard let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              let items = root["segments"] as? [[String: Any]]
-        else { return nil }
-        let segments = plainSegments(items)
-        return segments.isEmpty ? nil : segments
     }
 
     /// What speaker_diarize.py expects on --segments: the transcript wrapped in {"segments": [...]}.

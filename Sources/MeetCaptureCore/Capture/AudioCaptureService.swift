@@ -5,7 +5,7 @@
 //
 // Threads:
 //   real-time IOProc  → mixes each track to mono into a preallocated ring slot
-//   consumer Thread   → resample, interleave, live sink, buffered file write
+//   consumer Thread   → resample, interleave, buffered file write
 //   rebuildQueue      → Core Audio graph build/teardown, device-change rebuilds
 //   main actor        → published state
 
@@ -115,8 +115,6 @@ protocol CaptureEngineBackend: AnyObject, Sendable {
     var onRebuildFailure: (@Sendable (String) -> Void)? { get set }
     var acceptedCallbacks: Int { get }
     var droppedCallbacks: Int { get }
-    func getLiveSink() -> (@Sendable ([Int16]) -> Void)?
-    func setLiveSink(_ sink: (@Sendable ([Int16]) -> Void)?)
 
     func start(outputPath: String, configuration: TapConfiguration) throws
     func commitStart()
@@ -135,12 +133,6 @@ final class AudioCaptureService: ObservableObject {
     @Published private(set) var state: CaptureState = .idle
     @Published private(set) var lastError: String?
     private(set) var currentOutputPath: String?
-
-    /// Consumer of the live 16 kHz mono mix (L+R, clamped). Called on the consumer thread.
-    var liveSink: (@Sendable ([Int16]) -> Void)? {
-        get { engine.getLiveSink() }
-        set { engine.setLiveSink(newValue) }
-    }
 
     var currentSampleRate: Double { Self.targetSampleRate }
     var droppedCallbacks: Int { engine.droppedCallbacks }
@@ -355,16 +347,8 @@ final class AudioCaptureService: ObservableObject {
     }
 }
 
-/// Holds the live sink inside the lock. A bare closure in the generic lock
-/// state is re-wrapped in a reabstraction thunk on every `withLock { $0 }`
-/// and the thunks pile up: after ~18 min of reads per chunk the consumer
-/// thread overflowed its stack (SIGBUS on 2026-09-15 and 2026-09-24).
-struct LiveSinkBox: Sendable {
-    let call: @Sendable ([Int16]) -> Void
-}
-
 /// Everything below the main actor: owned by `queue` except the ring
-/// (IOProc + consumer) and `liveSink` (any thread).
+/// (IOProc + consumer).
 final class CaptureEngine: CaptureEngineBackend, @unchecked Sendable {
     private struct PendingStartArtifacts: Sendable {
         let audioPath: String
@@ -373,19 +357,10 @@ final class CaptureEngine: CaptureEngineBackend, @unchecked Sendable {
 
     let queue = DispatchQueue(label: AppInfo.bundleID + ".capture", qos: .userInitiated)
     let ring = AudioRingBuffer()
-    let liveSink = OSAllocatedUnfairLock<LiveSinkBox?>(initialState: nil)
     var onRebuildFailure: (@Sendable (String) -> Void)?
 
     var acceptedCallbacks: Int { ring.acceptedCallbacks }
     var droppedCallbacks: Int { ring.droppedCallbacks }
-
-    func getLiveSink() -> (@Sendable ([Int16]) -> Void)? {
-        liveSink.withLock { $0 }?.call
-    }
-
-    func setLiveSink(_ sink: (@Sendable ([Int16]) -> Void)?) {
-        liveSink.withLock { $0 = sink.map(LiveSinkBox.init(call:)) }
-    }
 
     private var tap: CoreAudioTap?
     private var configuration: TapConfiguration?
@@ -422,7 +397,7 @@ final class CaptureEngine: CaptureEngineBackend, @unchecked Sendable {
             try sidecar.write(forAudio: outputPath)
 
             let consumer = try Consumer(ring: ring, writer: writer, inputRate: tap.sampleRate,
-                                        liveSink: liveSink, onWriteFailure: onRebuildFailure)
+                                        onWriteFailure: onRebuildFailure)
             self.consumer = consumer
             consumer.start()
             try startIOProc(tap, micOnly: configuration.micOnly)
@@ -502,8 +477,8 @@ final class CaptureEngine: CaptureEngineBackend, @unchecked Sendable {
                 slot.frames = sysFrames
                 if micOnly {
                     Self.mixdown(first, channels: sysCh, frames: sysFrames, headroom: headroom, into: slot.mic)
-                    // Mic-only leaves L silent: PCMToWAV and the live sink sum
-                    // L+R, so copying the mic to both channels would double it.
+                    // Mic-only leaves L silent: PCMToWAV sums L+R, so copying
+                    // the mic to both channels would double it.
                     slot.system.update(repeating: 0, count: sysFrames)
                 } else {
                     Self.mixdown(first, channels: sysCh, frames: sysFrames, headroom: headroom, into: slot.system)
@@ -575,7 +550,7 @@ final class CaptureEngine: CaptureEngineBackend, @unchecked Sendable {
                 self.consumer = nil
                 try consumer.finish()
                 let fresh = try Consumer(ring: ring, writer: writer, inputRate: tap.sampleRate,
-                                         liveSink: liveSink, onWriteFailure: onRebuildFailure)
+                                         onWriteFailure: onRebuildFailure)
                 self.consumer = fresh
                 fresh.start()
             }
@@ -592,12 +567,11 @@ final class CaptureEngine: CaptureEngineBackend, @unchecked Sendable {
     // MARK: - Consumer thread
 
     /// Drains ring slots: resample both tracks, interleave L/R, feed the
-    /// live sink and the buffered writer. Owns the resamplers.
+    /// buffered writer. Owns the resamplers.
     private final class Consumer: @unchecked Sendable {
         let inputRate: Double
         private let ring: AudioRingBuffer
         private let writer: PCMFileWriter
-        private let liveSink: OSAllocatedUnfairLock<LiveSinkBox?>
         private let onWriteFailure: (@Sendable (String) -> Void)?
         private let system: AudioResampler
         private let mic: AudioResampler
@@ -610,7 +584,6 @@ final class CaptureEngine: CaptureEngineBackend, @unchecked Sendable {
         private var completionError: Error?
 
         init(ring: AudioRingBuffer, writer: PCMFileWriter, inputRate: Double,
-             liveSink: OSAllocatedUnfairLock<LiveSinkBox?>,
              onWriteFailure: (@Sendable (String) -> Void)?) throws {
             guard let system = AudioResampler(inputRate: inputRate, outputRate: AudioCaptureService.targetSampleRate, channels: 1),
                   let mic = AudioResampler(inputRate: inputRate, outputRate: AudioCaptureService.targetSampleRate, channels: 1)
@@ -618,7 +591,6 @@ final class CaptureEngine: CaptureEngineBackend, @unchecked Sendable {
             self.ring = ring
             self.writer = writer
             self.inputRate = inputRate
-            self.liveSink = liveSink
             self.onWriteFailure = onWriteFailure
             self.system = system
             self.mic = mic
@@ -631,8 +603,8 @@ final class CaptureEngine: CaptureEngineBackend, @unchecked Sendable {
             let thread = Thread { [self] in run() }
             thread.name = "meetcapture.capture.consumer"
             thread.qualityOfService = .userInitiated
-            // Foundation gives block threads 512 KB; the resampler + live feed
-            // path overflowed that on real calls (three SIGBUS on 2026-09-11).
+            // Foundation gives block threads 512 KB; the resampler path
+            // overflowed that on real calls (three SIGBUS on 2026-09-11).
             thread.stackSize = AudioCaptureService.workerStackSize
             thread.start()
         }
@@ -674,11 +646,6 @@ final class CaptureEngine: CaptureEngineBackend, @unchecked Sendable {
             for i in 0..<n {
                 interleaved.append(system16[i])
                 interleaved.append(mic16[i])
-            }
-            if let sink = liveSink.withLock({ $0 }) {
-                var mix = [Int16](repeating: 0, count: n)
-                for i in 0..<n { mix[i] = PCMToWAV.mix(system16[i], mic16[i]) }
-                sink.call(mix)
             }
             do {
                 try writer.write(interleaved)

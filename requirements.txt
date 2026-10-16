@@ -1,4 +1,3 @@
-# Python side of MeetCapture (optional): live transcription, sherpa engine
-# and speaker labels. Install into ~/.meetcapture/venv with scripts/setup-venv.sh.
+# Python side of MeetCapture (optional): speaker labels. Install into ~/.meetcapture/venv with scripts/setup-venv.sh.
 sherpa-onnx==1.13.4
 numpy>=2,<3

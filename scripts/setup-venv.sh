@@ -1,6 +1,6 @@
 #!/bin/bash
-# setup-venv.sh: create ~/.meetcapture/venv with sherpa-onnx (live
-# transcription, sherpa engine, speaker labels) and print the interpreter
+# setup-venv.sh: create ~/.meetcapture/venv with sherpa-onnx (speaker
+# labels) and print the interpreter
 # path the app will pick up automatically.
 #   VENV_DIR   override the destination (default ~/.meetcapture/venv)
 #   PYTHON     override the base interpreter (default: Homebrew python3.11, else python3)
@@ -28,4 +28,4 @@ fi
 echo ""
 echo "python: $VENV_DIR/bin/python3"
 echo "MeetCapture resolves this path on its own (Settings › ASR shows 'fuente: venv')."
-echo "Models: scripts/fetch-models.sh --sherpa-es --diarization"
+echo "Models: scripts/fetch-models.sh --diarization"

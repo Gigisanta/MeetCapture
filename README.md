@@ -20,14 +20,10 @@ Website: https://meetcapture.maat.work
   microphone into 16 kHz Int16 stereo PCM. In the normal two-track layout,
   left is system audio and right is the microphone; microphone-only mode
   carries the microphone on both channels.
-- **Live transcription.** When the optional sherpa-onnx toolchain is
-  available, a streaming recognizer shows partial and final text in the
-  popover while recording. It is a preview; the whole-file engine produces
-  the durable transcript.
-- **Whole-file transcript.** After capture, `whisper-cli` is preferred when
-  configured and remains the default engine; sherpa-onnx can be selected and
-  falls back to Whisper when it is unavailable. The selected model and engine
-  are recorded in the handoff.
+- **Transcript after the call.** There is no live transcription. After
+  capture, `whisper-cli` transcribes ~5 min chunks, GPU first and CPU as a
+  fallback, checkpointing each one so a timeout, crash or quit resumes
+  instead of starting over. The model is recorded in the handoff.
 - **Speaker labels.** Diarization is optional. When enabled and its models are
   available, the segments receive speaker labels; missing labels remain
   unassigned.
@@ -53,7 +49,7 @@ the summary dispatcher removes handoff audio after a successful summary unless
 - `whisper-cli` from `brew install whisper-cpp` for the Whisper engine.
 - Permissions when requested: Microphone, Screen and System Audio Recording,
   Calendar, and Notifications. Calendar auto-recording is optional.
-- Optional sherpa-onnx and diarization support: Python 3.11 with the packages
+- Optional diarization support: Python 3.11 with the packages
   from `requirements.txt`, normally created by `scripts/setup-venv.sh`.
 
 ## Install
@@ -75,11 +71,11 @@ zipped bundles in `~/meetings/.backups/` for manual recovery. Run `qa/app-smoke-
 real pipeline checks separately; a successful launch alone does not prove
 capture, transcription, import, SQLite publication, or summary delivery.
 
-Optional sherpa and diarization setup:
+Optional diarization setup:
 
 ```bash
 ./scripts/setup-venv.sh
-./scripts/fetch-models.sh --sherpa-es --diarization
+./scripts/fetch-models.sh --diarization
 ```
 
 The app resolves the interpreter and scripts through Settings, config,
@@ -166,9 +162,7 @@ summary dispatcher.
 
 `qa/visual-test.sh --headless` has the same fixture boundary. Its interactive
 mode is a screenshot check of the normal popover and is visual evidence only.
-`qa/benchmark-asr.sh` exercises ASR engines with disposable fixtures, and
-`qa/real_asr_check.py` is the separate model-backed sherpa check; neither proves
-the app capture path. `qa/capture-selftest.sh` is the real app wrapper for
+`qa/capture-selftest.sh` is the real app wrapper for
 `import` and `capture`, while the `ui` mode is launched from the separate QA
 bundle and exercised by CUA. The real `ui` mode below replaces the
 `PopoverSnapshot` fixture for functional UI evidence; snapshots remain an
@@ -237,11 +231,6 @@ PASS is inferred from fixture counts; the local evidence and unresolved limits
 are recorded in `CHANGELOG.md`. The legacy duration-based self-test is not a
 substitute because an error must not become a successful check.
 
-The separate `qa/benchmark-asr.sh` gate defaults to `ENGINE=both` and
-`MAX_WER=0.15`. It creates a unique `benchmark.*` directory below `TMP`, keeps
-the engine artifacts, and fails when a requested engine is unavailable or its
-WER exceeds the limit.
-
 A real transcription that produces no segments is exit `1`; it publishes no
 `.pending` handoff and retains its input audio for diagnosis or retry.
 
@@ -260,14 +249,12 @@ See [`qa/README.md`](qa/README.md) for the current check matrix and
    rebuild; the bundle includes the CLI when it is available during build.
 3. **Model not found.** Run `./scripts/fetch-models.sh --whisper` and check
    the model directory shown in Settings › ASR.
-4. **Live transcription unavailable.** Create the optional venv and fetch a
-   sherpa model; the final Whisper path can still work without live ASR.
-5. **Speakers are unassigned.** Fetch the diarization models and enable
+4. **Speakers are unassigned.** Fetch the diarization models and enable
    speaker labels in Settings › ASR.
-6. **A handoff remains in retry or failed state.** Inspect the endpoint in
+5. **A handoff remains in retry or failed state.** Inspect the endpoint in
    `~/.meetcapture/summary.json` and the private summary log; use
    `--retry-failed` only after fixing the underlying cause.
-7. **The left channel is silent.** Grant Screen and System Audio Recording in
+6. **The left channel is silent.** Grant Screen and System Audio Recording in
    System Settings › Privacy and restart the app; the process tap requires it.
 
 ## License

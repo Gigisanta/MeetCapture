@@ -6,17 +6,15 @@ live in `qa/`.
 
 ## Bundled runtime helpers
 
-`build.sh` copies exactly these three files into the app bundle:
+`build.sh` copies exactly this file into the app bundle:
 
 | Script | Caller | Contract |
 | --- | --- | --- |
-| `meetcapture_stream_asr.py` | `LiveASRService` while recording | Reads 16 kHz mono Int16 PCM from stdin and writes JSONL `ready`, `partial`, `final`, `error`, and `done` events. `--model` selects `zipformer-es` or `zipformer-en`. |
-| `transcribe_sherpa.py` | `TranscriptionJob` for the sherpa whole-file engine | `--audio <wav> --out <json> [--model <id>]`; writes an object with a `segments` list. |
 | `speaker_diarize.py` | `TranscriptionJob` after transcription | `--audio <wav> --segments <json> --out <json>`; reads the wrapped `segments` payload and writes segments with optional speaker labels. |
 
-The sherpa helpers need a Python interpreter that can import `sherpa_onnx`
-and the matching models. Whisper whole-file transcription uses the bundled or
-Homebrew `whisper-cli` and does not require these Python scripts.
+The diarizer needs a Python interpreter that can import `sherpa_onnx` and
+the diarization models. Transcription uses the bundled or Homebrew
+`whisper-cli` and does not require Python.
 
 For scripts, `ToolchainResolver` checks Settings › ASR, `config.json`,
 `$MEETCAPTURE_SCRIPTS_DIR`, and then `Contents/Resources/scripts` in the
@@ -31,7 +29,7 @@ diagnostics even when validation fails.
 | Script | Purpose |
 | --- | --- |
 | `setup-venv.sh` | Creates `~/.meetcapture/venv` from `requirements.txt` and prints the interpreter path. |
-| `fetch-models.sh` | Downloads Whisper, sherpa, and diarization models into the per-user model directory. |
+| `fetch-models.sh` | Downloads Whisper and diarization models into the per-user model directory. |
 | `version.sh` | Prints the version from `Resources/Info.plist`; `--check` rejects other version literals in tracked release files. |
 | `deploy-site.sh` | Publishes `site/` to Vercel for maintainers who have separately authorized that external action. |
 
@@ -50,7 +48,3 @@ captured PCM plus format sidecar. Its CLI remains `--app`, `--mode`, `--input`,
 `--required-words` arguments. For the capture diagnostic, the inherited
 `MEETCAPTURE_CHECK_MIC_ONLY=1` opt-in selects microphone-only mixing and the
 report carries `micOnly:true`; the default remains `false`.
-
-The separate `qa/benchmark-asr.sh` command defaults to `ENGINE=both` and
-`MAX_WER=0.15`. It creates and retains a unique `benchmark.*` directory below
-`TMP`; a missing requested engine or an over-limit WER fails the benchmark.

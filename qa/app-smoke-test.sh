@@ -108,7 +108,7 @@ fi
 echo ""
 echo "[5b] Bundled resources"
 MISSING=""
-for r in scripts/transcribe_sherpa.py scripts/speaker_diarize.py scripts/meetcapture_stream_asr.py config.example.json; do
+for r in scripts/speaker_diarize.py config.example.json; do
     [ -f "$APP_BUNDLE/Contents/Resources/$r" ] || MISSING="$MISSING $r"
 done
 if [ -z "$MISSING" ]; then

@@ -176,8 +176,8 @@ if not isinstance(report, dict) or report.get('status') != 'passed':
     fail(f"status inesperado: {report.get('status') if isinstance(report, dict) else None!r}")
 if report.get('mode') != mode:
     fail(f"mode inesperado: {report.get('mode')!r}")
-if report.get('diarize') is not False or report.get('live') is not False:
-    fail('el reporte no confirma diarize=false y live=false')
+if report.get('diarize') is not False:
+    fail('el reporte no confirma diarize=false')
 
 actual = float(actual_text)
 limit = float(limit_text)

@@ -13,15 +13,11 @@ struct SettingsView: View {
     @AppStorage(Settings.Key.notifyHermes.rawValue) private var notifyHermes = Settings.Default.notifyHermes
     @AppStorage(Settings.Key.retention.rawValue) private var retention = Settings.Default.retention.rawValue
     @AppStorage(Settings.Key.maxRecordingDuration.rawValue) private var maxRecordingDuration = Settings.Default.maxRecordingDuration
-    @AppStorage(Settings.Key.engine.rawValue) private var engine = Settings.Default.engine.rawValue
     @AppStorage(Settings.Key.asrModel.rawValue) private var asrModel = Settings.Default.asrModel
     @AppStorage(Settings.Key.asrLanguage.rawValue) private var asrLanguage = Settings.Default.asrLanguage
     @AppStorage(Settings.Key.diarize.rawValue) private var diarize = Settings.Default.diarize
     @AppStorage(Settings.Key.sherpaPythonPath.rawValue) private var sherpaPythonPath = Settings.Default.sherpaPythonPath
     @AppStorage(Settings.Key.scriptsDir.rawValue) private var scriptsDir = Settings.Default.scriptsDir
-    @AppStorage(Settings.Key.liveTranscribe.rawValue) private var liveTranscribe = Settings.Default.liveTranscribe
-    @AppStorage(Settings.Key.liveModel.rawValue) private var liveModel = Settings.Default.liveModel
-    @AppStorage(Settings.Key.liveIdleUnloadMinutes.rawValue) private var liveIdleUnloadMinutes = Settings.Default.liveIdleUnloadMinutes
     @AppStorage(Settings.Key.micOnlyMode.rawValue) private var micOnlyMode = Settings.Default.micOnlyMode
     @AppStorage(Settings.Key.inputDeviceUID.rawValue) private var inputDeviceUID = Settings.Default.inputDeviceUID
 
@@ -91,11 +87,6 @@ struct SettingsView: View {
 
     private var asr: some View {
         Form {
-            Picker(S.engine, selection: $engine) {
-                Text(S.engineWhisper).tag(ASREngine.whisper.rawValue)
-                Text(S.engineSherpa).tag(ASREngine.sherpa.rawValue)
-            }
-            help(S.engineHelp)
             TextField(S.model, text: $asrModel)
             help(S.modelHelp)
             Picker(S.language, selection: $asrLanguage) {
@@ -104,17 +95,6 @@ struct SettingsView: View {
                 Text(S.autoDetect).tag("auto")
             }
             Toggle(S.diarize, isOn: $diarize)
-            Divider()
-            Toggle(S.liveTranscribe, isOn: $liveTranscribe)
-            help(S.liveHelp)
-            Picker(S.liveModel, selection: $liveModel) {
-                Text("Español (zipformer-es)").tag("zipformer-es")
-                Text("English (zipformer-en)").tag("zipformer-en")
-            }
-            Picker(S.liveIdle, selection: $liveIdleUnloadMinutes) {
-                Text(S.never).tag(0)
-                ForEach([5, 10, 30, 60], id: \.self) { Text(S.minutes($0)).tag($0) }
-            }
             Divider()
             LabeledContent(S.toolchain) {
                 VStack(alignment: .leading, spacing: 2) {
@@ -139,8 +119,6 @@ struct SettingsView: View {
             help(S.toolchainHelp)
         }
         .padding()
-        .onAppear { normalizeASRModel(for: engine) }
-        .onChange(of: engine) { _, newValue in normalizeASRModel(for: newValue) }
         .onChange(of: sherpaPythonPath) { _, _ in Task { await appState.refreshToolchain() } }
         .onChange(of: scriptsDir) { _, _ in Task { await appState.refreshToolchain() } }
     }
@@ -230,14 +208,6 @@ struct SettingsView: View {
 
     private func help(_ text: String) -> some View {
         Text(text).font(.caption2).foregroundStyle(.secondary)
-    }
-
-    /// The model field is shared by both engines, so a default persisted for
-    /// Whisper must not silently be sent to sherpa-onnx (or vice versa).
-    private func normalizeASRModel(for engineRawValue: String) {
-        guard let selected = ASREngine(rawValue: engineRawValue) else { return }
-        let model = Settings.model(for: selected, configured: asrModel)
-        if asrModel != model { asrModel = model }
     }
 
     private func permissionRow(_ label: String, granted: Bool, request: @escaping () -> Void) -> some View {

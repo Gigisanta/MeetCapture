@@ -101,11 +101,6 @@
    never emits PASS. Use `PopoverSnapshot` only for appearance and the real UI
    run for functionality. Do not reuse the legacy duration-based self-test.
 
-   The separate `qa/benchmark-asr.sh` gate defaults to `ENGINE=both` and
-   `MAX_WER=0.15`. It writes each run below the selected `TMP` directory in a
-   unique `benchmark.*` directory, retains the engine artifacts, and fails if a
-   requested engine is missing or exceeds the WER limit.
-
 4. Open a pull request and review the actual reports and diffs. The current CI
    matrix builds on macOS 14 and 15 and uploads the staging bundle from macOS
    14. It does not currently prove the real capture/import contract or

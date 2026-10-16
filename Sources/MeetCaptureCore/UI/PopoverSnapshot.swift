@@ -145,9 +145,6 @@ private final class UIFixtureState: ObservableObject, PopoverStateModel {
     @Published var lastTranscriptPath: String?
     @Published var lastSegments: [Segment] = []
     @Published var lastAudioPath: String?
-    @Published var livePartialText = ""
-    @Published var liveSegments: [LiveASRSegment] = []
-    @Published var liveASRState: LiveASRState = .ready
     @Published var history: [MeetingSummary] = []
     @Published var historyQuery = "" {
         didSet {
@@ -181,13 +178,6 @@ private final class UIFixtureState: ObservableObject, PopoverStateModel {
         case .recording:
             phase = .recording
             recordingDuration = 12 * 60 + 34
-            liveSegments = [
-                LiveASRSegment(start: 11 * 60 + 48, end: 11 * 60 + 55,
-                               text: "El objetivo es cerrar los pendientes del sprint."),
-                LiveASRSegment(start: 11 * 60 + 57, end: 12 * 60 + 4,
-                               text: "La estabilidad del proceso de captura es crítica."),
-            ]
-            livePartialText = "Si me dan el acceso al repositorio, pruebo la diarización"
         case .interactive:
             phase = .idle
             currentMeeting = nil
@@ -219,8 +209,6 @@ private final class UIFixtureState: ObservableObject, PopoverStateModel {
         phase = .recording
         recordingDuration = 3
         currentMeeting = nil
-        liveSegments = []
-        livePartialText = "Grabación sintética en curso"
         errorMessage = nil
     }
 
@@ -229,7 +217,6 @@ private final class UIFixtureState: ObservableObject, PopoverStateModel {
         phase = .done
         recordingDuration = 4
         transcriptionProgress = 1
-        livePartialText = ""
         lastAudioPath = nil
         errorMessage = "Fixture: transcripción sintética lista; no se escribió ningún archivo."
     }

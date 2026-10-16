@@ -114,11 +114,11 @@ else
     echo "      Install it:  brew install whisper-cpp"
 fi
 
-# Bundle the three runtime python scripts (live streaming ASR, whole-file
-# sherpa, diarization). The app resolves them through ToolchainResolver:
+# Bundle the runtime python script (diarization). The app resolves it
+# through ToolchainResolver:
 # Settings › ASR → ~/.meetcapture/config.json → $MEETCAPTURE_SCRIPTS_DIR →
 # Contents/Resources/scripts (this copy).
-RUNTIME_SCRIPTS=(transcribe_sherpa.py speaker_diarize.py meetcapture_stream_asr.py)
+RUNTIME_SCRIPTS=(speaker_diarize.py)
 mkdir -p "$APP_BUNDLE/Contents/Resources/scripts"
 for s in "${RUNTIME_SCRIPTS[@]}"; do
     cp "$REPO_DIR/scripts/$s" "$APP_BUNDLE/Contents/Resources/scripts/"

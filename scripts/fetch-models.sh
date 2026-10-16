@@ -3,8 +3,6 @@
 # with the app; every file lands under ~/.whisper/models.
 #
 #   --whisper       ggml-medium-q5_0 (MIT) + Silero VAD for whisper.cpp   ~540 MB
-#   --sherpa-es     streaming zipformer es (kroko, CC-BY-SA) + silero_vad.onnx  ~290 MB
-#   --sherpa-en     streaming zipformer en (Apache-2.0)                     ~300 MB
 #   --diarization   pyannote segmentation 3.0 + 3D-Speaker ERes2Net        ~ 45 MB
 #   --all           everything above
 #
@@ -16,15 +14,13 @@ SHERPA_DIR="$MODELS_DIR/sherpa"
 HF="https://huggingface.co"
 SHERPA_REL="https://github.com/k2-fsa/sherpa-onnx/releases/download"
 
-WHISPER=0; SHERPA_ES=0; SHERPA_EN=0; DIAR=0
-[ $# -gt 0 ] || { sed -n '2,12p' "$0"; exit 1; }
+WHISPER=0; DIAR=0
+[ $# -gt 0 ] || { sed -n '2,10p' "$0"; exit 1; }
 for arg in "$@"; do
     case "$arg" in
         --whisper) WHISPER=1 ;;
-        --sherpa-es) SHERPA_ES=1 ;;
-        --sherpa-en) SHERPA_EN=1 ;;
         --diarization) DIAR=1 ;;
-        --all) WHISPER=1; SHERPA_ES=1; SHERPA_EN=1; DIAR=1 ;;
+        --all) WHISPER=1; DIAR=1 ;;
         *) echo "unknown flag: $arg" >&2; exit 1 ;;
     esac
 done
@@ -57,23 +53,6 @@ if [ $WHISPER -eq 1 ]; then
     echo "whisper.cpp (MIT)"
     fetch "$HF/ggerganov/whisper.cpp/resolve/main/ggml-medium-q5_0.bin" "$MODELS_DIR/ggml-medium-q5_0.bin"
     fetch "$HF/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin" "$MODELS_DIR/ggml-silero-v5.1.2.bin"
-fi
-
-if [ $SHERPA_ES -eq 1 ]; then
-    echo "sherpa-onnx streaming zipformer es (kroko)"
-    echo "  license: CC-BY-SA. Fine for personal and internal use; share-alike if you redistribute the weights."
-    name="sherpa-onnx-streaming-zipformer-es-kroko-2025-08-06"
-    fetch "$SHERPA_REL/asr-models/$name.tar.bz2" "$SHERPA_DIR/$name.tar.bz2"
-    extract "$SHERPA_DIR/$name.tar.bz2" "$SHERPA_DIR/$name"
-    fetch "$SHERPA_REL/asr-models/silero_vad.onnx" "$SHERPA_DIR/silero_vad.onnx"
-fi
-
-if [ $SHERPA_EN -eq 1 ]; then
-    echo "sherpa-onnx streaming zipformer en (Apache-2.0)"
-    name="sherpa-onnx-streaming-zipformer-en-2023-06-26"
-    fetch "$SHERPA_REL/asr-models/$name.tar.bz2" "$SHERPA_DIR/$name.tar.bz2"
-    extract "$SHERPA_DIR/$name.tar.bz2" "$SHERPA_DIR/$name"
-    fetch "$SHERPA_REL/asr-models/silero_vad.onnx" "$SHERPA_DIR/silero_vad.onnx"
 fi
 
 if [ $DIAR -eq 1 ]; then

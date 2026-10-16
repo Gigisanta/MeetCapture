@@ -12,7 +12,7 @@ final class SettingsTests: XCTestCase {
 
     func testClampsAndFallbacks() {
         let store = UserDefaults.standard
-        let keys = [Settings.Key.maxRecordingDuration, .liveIdleUnloadMinutes, .asrModel, .engine, .retention]
+        let keys = [Settings.Key.maxRecordingDuration, .asrModel, .retention]
         let saved: [String: Any] = Dictionary(uniqueKeysWithValues: keys.compactMap { key in
             store.object(forKey: key.rawValue).map { (key.rawValue, $0) }
         })
@@ -26,20 +26,12 @@ final class SettingsTests: XCTestCase {
         XCTAssertEqual(Settings.maxRecordingDuration, 1_800)
         store.set(999_999.0, forKey: Settings.Key.maxRecordingDuration.rawValue)
         XCTAssertEqual(Settings.maxRecordingDuration, 28_800)
-        store.set(-5, forKey: Settings.Key.liveIdleUnloadMinutes.rawValue)
-        XCTAssertEqual(Settings.liveIdleUnloadMinutes, 0)
-        store.set("garbage", forKey: Settings.Key.engine.rawValue)
-        XCTAssertEqual(Settings.engine, .whisper)
-        store.set("sherpa", forKey: Settings.Key.engine.rawValue)
         store.set("  ", forKey: Settings.Key.asrModel.rawValue)
-        XCTAssertEqual(Settings.asrModel, "zipformer-es", "empty model falls back per engine")
-        store.set(Settings.Default.asrModel, forKey: Settings.Key.asrModel.rawValue)
-        XCTAssertEqual(Settings.asrModel, "zipformer-es", "a persisted Whisper default cannot disable Sherpa")
-        store.set("/tmp/custom-sherpa-model", forKey: Settings.Key.asrModel.rawValue)
-        XCTAssertEqual(Settings.asrModel, "/tmp/custom-sherpa-model", "custom selections must survive")
-        store.set("whisper", forKey: Settings.Key.engine.rawValue)
-        store.set("zipformer-en", forKey: Settings.Key.asrModel.rawValue)
-        XCTAssertEqual(Settings.asrModel, Settings.Default.asrModel, "switching back also resolves the engine default")
+        XCTAssertEqual(Settings.asrModel, Settings.Default.asrModel, "empty model falls back to the default")
+        store.set("zipformer-es", forKey: Settings.Key.asrModel.rawValue)
+        XCTAssertEqual(Settings.asrModel, Settings.Default.asrModel, "a retired sherpa model cannot disable transcription")
+        store.set("large-v3-turbo", forKey: Settings.Key.asrModel.rawValue)
+        XCTAssertEqual(Settings.asrModel, "large-v3-turbo", "custom selections must survive")
         store.set("bogus", forKey: Settings.Key.retention.rawValue)
         XCTAssertEqual(Settings.retention, .keep24h, "the default keeps a day to retranscribe")
         store.set("deleteAfterHandoff", forKey: Settings.Key.retention.rawValue)
@@ -57,18 +49,6 @@ final class SettingsTests: XCTestCase {
         XCTAssertEqual(d.meetingsDir, "/Users/x/meetings")
         XCTAssertEqual(d.transcriptsDir, "/Users/x/meetings/transcripts")
         XCTAssertEqual(d.venvPython, "/Users/x/.meetcapture/venv/bin/python3")
-        XCTAssertEqual(d.sherpaModelsDir, "/Users/x/.whisper/models/sherpa")
-    }
-
-    func testSwitchingToSherpaNormalizesEveryKnownWhisperModel() {
-        for size in [WhisperModelSize.tiny, .base, .small, .medium, .large, .largeV3Turbo] {
-            for suffix in ["", "-q5_0", "-q5_1", "-q8_0", "-f16"] {
-                let model = size.rawValue + suffix
-                XCTAssertEqual(Settings.model(for: .sherpa, configured: model), "zipformer-es", model)
-            }
-        }
-        XCTAssertEqual(Settings.model(for: .sherpa, configured: "custom-model"), "custom-model")
-        XCTAssertEqual(Settings.model(for: .sherpa, configured: "/models/medium"), "/models/medium")
     }
 
     func testLocalConfigParsingIsTolerant() {

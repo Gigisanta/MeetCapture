@@ -18,7 +18,6 @@ private final class BlockingCaptureEngine: CaptureEngineBackend, @unchecked Send
     private var _startCount = 0
     private var _stopCount = 0
     private var _stopError: Error?
-    private var liveSink: (@Sendable ([Int16]) -> Void)?
     private var pendingAudioPath: String?
     private var pendingSidecarPath: String?
 
@@ -89,12 +88,6 @@ private final class BlockingCaptureEngine: CaptureEngineBackend, @unchecked Send
         }
         stopEntered.signal()
         if let error { throw error }
-    }
-
-    func getLiveSink() -> (@Sendable ([Int16]) -> Void)? { liveSink }
-
-    func setLiveSink(_ sink: (@Sendable ([Int16]) -> Void)?) {
-        liveSink = sink
     }
 
     private func withLock<T>(_ body: () -> T) -> T {
