@@ -20,6 +20,7 @@ enum Retention {
     @discardableResult
     static func apply(policy: RetentionPolicy, audioPath: String) -> Bool {
         guard policy == .deleteAfterHandoff else { return true }
+        ChunkedTranscription.removeWork(forAudio: audioPath)
         let sidecar = AudioFormatSidecar.path(forAudio: audioPath)
         if FileManager.default.fileExists(atPath: audioPath) {
             do {
@@ -42,7 +43,7 @@ enum Retention {
     /// Launch-time sweep for the 24 h policy: recording-*.pcm (+ sidecar and
     /// recovery record) older than 24 h in the transcripts dir. Exact names,
     /// no globs. A capture without its processed marker was never
-    /// transcribed; it stays for RecordingRecovery.
+    /// transcribed, and one with chunk checkpoints has gaps to redo; both stay.
     static func cleanupOldRecordings(in directory: String, policy: RetentionPolicy, now: Date = Date()) {
         guard policy == .keep24h else { return }
         let fm = FileManager.default
@@ -54,6 +55,7 @@ enum Retention {
             var isDir: ObjCBool = false
             guard fm.fileExists(atPath: audioPath, isDirectory: &isDir), !isDir.boolValue,
                   fm.fileExists(atPath: ProcessedMarker.path(forTranscript: transcript)),
+                  !fm.fileExists(atPath: ChunkedTranscription.workDirectory(forAudio: audioPath)),
                   let modified = (try? fm.attributesOfItem(atPath: audioPath))?[.modificationDate] as? Date,
                   modified < cutoff
             else { continue }

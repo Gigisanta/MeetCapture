@@ -41,9 +41,9 @@ final class SettingsTests: XCTestCase {
         store.set("zipformer-en", forKey: Settings.Key.asrModel.rawValue)
         XCTAssertEqual(Settings.asrModel, Settings.Default.asrModel, "switching back also resolves the engine default")
         store.set("bogus", forKey: Settings.Key.retention.rawValue)
+        XCTAssertEqual(Settings.retention, .keep24h, "the default keeps a day to retranscribe")
+        store.set("deleteAfterHandoff", forKey: Settings.Key.retention.rawValue)
         XCTAssertEqual(Settings.retention, .deleteAfterHandoff)
-        store.set("24h", forKey: Settings.Key.retention.rawValue)
-        XCTAssertEqual(Settings.retention, .keep24h)
     }
 
     func testAppPathsHonourTestOutputDir() {

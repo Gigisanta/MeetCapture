@@ -111,6 +111,9 @@ enum Strings {
     static let retranscription = "Re-transcripción"
     static func errorRecording(_ reason: String) -> String { "No se pudo grabar: \(reason)" }
     static func errorTranscription(_ reason: String) -> String { "Falló la transcripción: \(reason)" }
+    static func errorPartialTranscript(_ chunks: Int) -> String {
+        "La transcripción quedó con \(chunks) fragmento(s) sin texto; se conserva el audio para retranscribir"
+    }
     static func errorImport(_ reason: String) -> String { "Falló la importación: \(reason)" }
 
     // Settings

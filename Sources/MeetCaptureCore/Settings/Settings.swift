@@ -27,7 +27,8 @@ enum Settings {
     enum Default {
         static let autoRecord = true
         static let notifyHermes = true
-        static let retention = RetentionPolicy.deleteAfterHandoff
+        /// A day to retranscribe (a better engine, a gap) before the audio goes.
+        static let retention = RetentionPolicy.keep24h
         static let maxRecordingDuration: Double = 10_800
         static let engine = ASREngine.whisper
         static let asrModel = "medium-q5_0"

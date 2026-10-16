@@ -1,6 +1,6 @@
 // TranscriptionJob.swift
-// Whole-file transcription of one audio file with the configured engine:
-// PCM/WAV → 16 kHz mono WAV → sherpa (fallback whisper) → diarization.
+// Transcription of one audio file with the configured engine:
+// PCM/WAV → 16 kHz mono WAV → sherpa or chunked whisper → diarization.
 // Runs entirely off the main actor; reports coarse progress.
 
 import Foundation
@@ -36,6 +36,8 @@ struct TranscriptionJob: Sendable {
         var engineUsed: ASREngine
         var modelUsed: String
         var audioDurationSec: Double? = nil
+        /// Chunks no engine could transcribe; the caller keeps the audio.
+        var failedChunks = 0
     }
 
     func run(progress: @escaping @Sendable (Double) -> Void) async throws -> Outcome {
@@ -54,6 +56,7 @@ struct TranscriptionJob: Sendable {
         var segments: [Segment]? = nil
         var engineUsed = engine
         var modelUsed = model
+        var failedChunks = 0
 
         if engine == .sherpa {
             segments = await sherpa?.transcribe(wav: wav, model: model)
@@ -69,9 +72,17 @@ struct TranscriptionJob: Sendable {
             }
             modelUsed = URL(fileURLWithPath: selected.path).deletingPathExtension().lastPathComponent
                 .replacingOccurrences(of: "ggml-", with: "")
-            segments = try await cli.transcribe(
-                wav: wav, modelPath: selected.path, language: language, prompt: prompt,
-                vadModelPath: whisperModels.vadModelPath)
+            let modelPath = selected.path, vad = whisperModels.vadModelPath
+            let language = language, prompt = prompt
+            let chunked = try await ChunkedTranscription.run(
+                wav: wav, sourceAudio: audioPath,
+                engine: { chunk, useGPU in
+                    try await cli.transcribe(wav: chunk, modelPath: modelPath, language: language,
+                                             prompt: prompt, vadModelPath: vad, useGPU: useGPU)
+                },
+                progress: { progress(0.3 + 0.5 * $0) })
+            segments = chunked.segments
+            failedChunks = chunked.failedChunks
         }
         progress(0.8)
         try Task.checkCancellation()
@@ -83,6 +94,6 @@ struct TranscriptionJob: Sendable {
         }
         progress(1.0)
         return Outcome(segments: result, engineUsed: engineUsed, modelUsed: modelUsed,
-                       audioDurationSec: audioDuration)
+                       audioDurationSec: audioDuration, failedChunks: failedChunks)
     }
 }

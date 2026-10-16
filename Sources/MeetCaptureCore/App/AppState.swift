@@ -118,6 +118,7 @@ final class AppState: ObservableObject {
     private var activeCapturePath: String?
     private var recoveringPath: String?
     private var recoveryTask: Task<Void, Never>?
+    private var recoveryRetryTask: Task<Void, Never>?
     private var systemAudioHeard = false
     private var lastLevelCheck: TimeInterval = 0
     private let logger = AppInfo.logger("AppState")
@@ -385,7 +386,8 @@ final class AppState: ObservableObject {
             session: session, segments: [], transcriptPath: transcriptPath, capturePath: audioPath,
             durableAudioPath: durableAudioPath, engine: Settings.engine, model: Settings.asrModel,
             language: Settings.asrLanguage, applyRetention: applyRetention,
-            retention: Settings.retention, meetingsDir: paths.meetingsDir, audioEndedAt: Date())
+            retention: Settings.retention, meetingsDir: paths.meetingsDir,
+            audioEndedAt: applyRetention ? RecordingRecovery.modificationDate(audioPath) : Date())
         do {
             let progressSink: @Sendable (Double) -> Void = { [weak self] progress in
                 guard let self else { return }
@@ -397,7 +399,16 @@ final class AppState: ObservableObject {
             finalInput.engine = outcome.engineUsed
             finalInput.model = outcome.modelUsed
             finalInput.audioDurationSec = outcome.audioDurationSec
+            // A gap in the transcript keeps the audio for a later retranscription.
+            if outcome.failedChunks > 0 { finalInput.applyRetention = false }
             let result = try await postProcessor.run(finalInput)
+            if outcome.failedChunks > 0 {
+                // The checkpoints let a retranscription redo only the gaps.
+                errorMessage = Strings.errorPartialTranscript(outcome.failedChunks)
+            } else {
+                ChunkedTranscription.removeWork(forAudio: audioPath)
+            }
+            Retention.cleanupOldRecordings(in: paths.transcriptsDir, policy: Settings.retention)
 
             lastTranscriptPath = transcriptPath
             lastSegments = outcome.segments
@@ -424,6 +435,12 @@ final class AppState: ObservableObject {
             errorMessage = Strings.errorTranscription(error.localizedDescription)
             phase = .idle
             self.session = nil
+            // A capture that failed is a recovery like any other: count it
+            // and retry later, resuming from the chunks already done.
+            if applyRetention {
+                RecordingRecovery.recordFailure(audioPath: audioPath, reason: error.localizedDescription)
+                scheduleRecoveryRetry(attempts: RecordingRecovery.attempts(forAudio: audioPath))
+            }
         }
     }
 
@@ -515,7 +532,10 @@ final class AppState: ObservableObject {
                 engine: outcome.engineUsed, model: outcome.modelUsed, language: Settings.asrLanguage,
                 applyRetention: true, retention: Settings.retention, meetingsDir: paths.meetingsDir,
                 audioDurationSec: outcome.audioDurationSec, audioEndedAt: recording.endedAt)
-            let result = try await postProcessor.run(input)
+            var finalInput = input
+            if outcome.failedChunks > 0 { finalInput.applyRetention = false }
+            let result = try await postProcessor.run(finalInput)
+            if outcome.failedChunks == 0 { ChunkedTranscription.removeWork(forAudio: recording.audioPath) }
             try? FileManager.default.removeItem(atPath: RecordingRecovery.attemptsPath(forAudio: recording.audioPath))
             logger.info("grabación recuperada: \(result.pendingPath, privacy: .public)")
         } catch is CancellationError {
@@ -525,8 +545,23 @@ final class AppState: ObservableObject {
             // The attempt was already counted when it started.
             RecordingRecovery.recordFailure(audioPath: recording.audioPath, reason: error.localizedDescription,
                                             countsAsAttempt: false)
+            scheduleRecoveryRetry(attempts: RecordingRecovery.attempts(forAudio: recording.audioPath))
         }
         recoveringPath = nil
+    }
+
+    /// Automatic retry after 5, 20 and 60 min; `RecordingRecovery.automatic`
+    /// stops picking a capture once it reaches the attempt cap.
+    private func scheduleRecoveryRetry(attempts: Int) {
+        let delays: [UInt64] = [300, 1_200, 3_600]
+        guard attempts >= 1, attempts <= delays.count else { return }
+        recoveryRetryTask?.cancel()
+        recoveryRetryTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: delays[attempts - 1] * 1_000_000_000)
+            guard let self, !Task.isCancelled else { return }
+            self.recoveryRetryTask = nil
+            self.recoverRecordings(automaticOnly: true)
+        }
     }
 
     // MARK: - History

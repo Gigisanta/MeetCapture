@@ -72,15 +72,13 @@ final class ASRRegressionTests: XCTestCase {
                        [Segment(start: 0, end: 1, text: "uno")])
     }
 
-    func testWhisperCLIRetriesATransientFakeProcessFailure() async throws {
-        let dir = TestSupport.makeTempDir(self, "asr-retry")
-        let state = dir + "/attempt"
+    func testWhisperCLIRunsOnceAndTheCPUFallbackPassesNoGPU() async throws {
+        let dir = TestSupport.makeTempDir(self, "asr-cpu")
+        let argsLog = dir + "/args"
         let fake = dir + "/fake-whisper"
         TestSupport.writeExecutable("""
-            if [ ! -f "\(state)" ]; then
-              echo first > "\(state)"
-              exit 7
-            fi
+            echo "$@" >> "\(argsLog)"
+            case "$*" in *--no-gpu*) ;; *) exit 7 ;; esac
             out=""
             previous=""
             for arg in "$@"; do
@@ -93,11 +91,18 @@ final class ASRRegressionTests: XCTestCase {
         var data = PCMToWAV.header(dataSize: 2)
         data.append(contentsOf: [0, 0])
         try data.write(to: wav)
+        let cli = WhisperCLI(executable: fake)
 
-        let segments = try await WhisperCLI(executable: fake).transcribe(
-            wav: wav, modelPath: "fake-model", language: "es", prompt: "", vadModelPath: nil, threads: 1)
+        do {
+            _ = try await cli.transcribe(wav: wav, modelPath: "m", language: "es", prompt: "",
+                                         vadModelPath: nil, threads: 1)
+            XCTFail("a GPU failure is reported, not retried in place")
+        } catch is ProcessRunnerError {}
+        let segments = try await cli.transcribe(wav: wav, modelPath: "m", language: "es", prompt: "",
+                                                vadModelPath: nil, useGPU: false, threads: 1)
 
         XCTAssertEqual(segments, [Segment(start: 0, end: 1, text: "ok")])
-        XCTAssertEqual(try String(contentsOfFile: state, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines), "first")
+        let runs = try String(contentsOfFile: argsLog, encoding: .utf8).split(separator: "\n")
+        XCTAssertEqual(runs.count, 2, "exactly one process per call")
     }
 }

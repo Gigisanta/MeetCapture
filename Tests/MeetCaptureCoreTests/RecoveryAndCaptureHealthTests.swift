@@ -16,7 +16,7 @@ final class RecoveryAndCaptureHealthTests: XCTestCase {
         return path
     }
 
-    func testFindReturnsOnlyUnprocessedCapturesOldestFirst() throws {
+    func testFindReturnsOnlyUnprocessedCapturesNewestFirst() throws {
         let dir = TestSupport.makeTempDir(self, "recovery")
         let now = Date()
         let newer = try makeCapture(dir, "recording-2", modified: now.addingTimeInterval(-60))
@@ -36,8 +36,8 @@ final class RecoveryAndCaptureHealthTests: XCTestCase {
 
         let found = RecordingRecovery.find(in: dir, excluding: [busy])
 
-        XCTAssertEqual(found.map(\.audioPath), [older, newer])
-        XCTAssertEqual(found.first?.transcriptPath, "\(dir)/recording-1.txt")
+        XCTAssertEqual(found.map(\.audioPath), [newer, older], "today's meeting never waits behind an orphan")
+        XCTAssertEqual(found.last?.transcriptPath, "\(dir)/recording-1.txt")
     }
 
     func testAutomaticRecoveryIsLimitedToRecentCapturesUnderTheRetryCap() throws {

@@ -21,8 +21,8 @@ enum RecordingRecovery {
     /// surprise summaries.
     static let automaticWindow: TimeInterval = 48 * 3600
     static let maxAutomaticAttempts = 3
-    /// Under 3 s of 16 kHz stereo s16le there is nothing to transcribe.
-    static let minimumBytes = 16_000 * 4 * 3
+    /// Under 10 s of 16 kHz stereo s16le there is no meeting to transcribe.
+    static let minimumBytes = 16_000 * 4 * 10
 
     static func transcriptPath(forAudio audioPath: String) -> String {
         String(audioPath.dropLast(".pcm".count)) + ".txt"
@@ -30,8 +30,8 @@ enum RecordingRecovery {
 
     static func attemptsPath(forAudio audioPath: String) -> String { audioPath + ".recovery.json" }
 
-    /// Recordings with a valid sidecar and no processed marker, oldest
-    /// first. `excluding` holds captures still in use.
+    /// Recordings with a valid sidecar and no processed marker, newest
+    /// first: today's meeting never waits behind an old orphan. `excluding` holds captures still in use.
     static func find(in directory: String, excluding: Set<String> = [], now: Date = Date()) -> [RecoverableRecording] {
         let fm = FileManager.default
         guard let names = try? fm.contentsOfDirectory(atPath: directory) else { return [] }
@@ -54,7 +54,7 @@ enum RecordingRecovery {
                                         startedAt: min(startedAt ?? endedAt, endedAt), endedAt: endedAt,
                                         attempts: attempts(forAudio: audioPath))
         }
-        .sorted { $0.endedAt < $1.endedAt }
+        .sorted { $0.endedAt > $1.endedAt }
     }
 
     /// The pipeline writes the transcript before the marker, so a recent
@@ -70,6 +70,10 @@ enum RecordingRecovery {
         recordings.filter {
             now.timeIntervalSince($0.endedAt) <= automaticWindow && $0.attempts < maxAutomaticAttempts
         }
+    }
+
+    static func modificationDate(_ path: String) -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date
     }
 
     static func attempts(forAudio audioPath: String) -> Int {

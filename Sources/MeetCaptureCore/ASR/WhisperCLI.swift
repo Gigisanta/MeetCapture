@@ -49,8 +49,11 @@ struct WhisperCLI: Sendable {
         return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }.map(WhisperCLI.init)
     }
 
+    /// One run on one (short) WAV. Callers chunk long audio and decide
+    /// what to retry; `useGPU: false` keeps working while the GPU is busy.
     func transcribe(wav: URL, modelPath: String, language: String, prompt: String,
-                    vadModelPath: String?, threads: Int = WhisperModels.threads) async throws -> [Segment] {
+                    vadModelPath: String?, useGPU: Bool = true,
+                    threads: Int = WhisperModels.threads) async throws -> [Segment] {
         let stem = wav.deletingPathExtension().path
         var args = [
             "-m", modelPath,
@@ -63,39 +66,26 @@ struct WhisperCLI: Sendable {
             "--no-prints",
         ]
         if let vad = vadModelPath { args += ["--vad", "--vad-model", vad] }
-        if ProcessInfo.processInfo.environment["MEETCAPTURE_WHISPER_CPU_ONLY"] == "1" {
+        if !useGPU || ProcessInfo.processInfo.environment["MEETCAPTURE_WHISPER_CPU_ONLY"] == "1" {
             args.append("--no-gpu")
         }
-        let timeout = ProcessRunner.timeout(forAudioSeconds: PCMToWAV.wavDurationSeconds(wav.path))
-        let spec = ProcessSpec(executable: executable, arguments: args, timeout: timeout)
+        let spec = ProcessSpec(executable: executable, arguments: args,
+                               timeout: Self.timeout(forAudioSeconds: PCMToWAV.wavDurationSeconds(wav.path)))
         Signposts.asr.emitEvent("whisper-cli start")
         let jsonURL = URL(fileURLWithPath: stem + ".json")
+        try? FileManager.default.removeItem(at: jsonURL)
         defer { try? FileManager.default.removeItem(at: jsonURL) }
-        var lastRetryableError: Error?
-        for attempt in 0..<2 {
-            try? FileManager.default.removeItem(at: jsonURL)
-            do {
-                try await ProcessRunner.runChecked(spec)
-            } catch let error as ProcessRunnerError {
-                lastRetryableError = error
-                switch error {
-                case .failed(_, _, _), .timedOut(_, _):
-                    if attempt == 0 { continue }
-                case .launchFailed(_, _):
-                    throw error
-                }
-                throw error
-            }
-            guard let data = try? Data(contentsOf: jsonURL) else {
-                lastRetryableError = WhisperError.outputMissing
-                if attempt == 0 { continue }
-                throw WhisperError.outputMissing
-            }
-            let segments = WhisperHallucinations.filter(SegmentJSON.parseWhisper(data))
-            guard !segments.isEmpty else { throw WhisperError.emptyOutput }
-            return segments
-        }
-        throw lastRetryableError ?? WhisperError.outputMissing
+        try await ProcessRunner.runChecked(spec)
+        guard let data = try? Data(contentsOf: jsonURL) else { throw WhisperError.outputMissing }
+        let segments = WhisperHallucinations.filter(SegmentJSON.parseWhisper(data))
+        guard !segments.isEmpty else { throw WhisperError.emptyOutput }
+        return segments
+    }
+
+    /// Per chunk: a 5 min chunk runs in ~25 s on an idle GPU, so 60 s plus
+    /// 2x real time only trips on a process that is stuck, not slow.
+    static func timeout(forAudioSeconds seconds: Double) -> TimeInterval {
+        60 + 2 * max(0, seconds)
     }
 }
 
