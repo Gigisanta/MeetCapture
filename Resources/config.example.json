@@ -1,0 +1,9 @@
+{
+  "whitelistedEmails": [
+    "you@example.com",
+    "teammate@example.com"
+  ],
+  "domainPrompt": "Names, companies and jargon that whisper should spell correctly.",
+  "python": "~/.meetcapture/venv/bin/python3",
+  "scriptsDir": "~/src/MeetCapture/scripts"
+}

@@ -1,0 +1,607 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MeetCapture | Meeting audio, made searchable</title>
+<meta name="description" content="MeetCapture is a native macOS app for local meeting transcription and searchable history, with optional summaries you can configure.">
+<link rel="canonical" href="https://meetcapture.maat.work/">
+<meta name="theme-color" content="#0b0b11">
+<meta name="color-scheme" content="dark">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="MeetCapture">
+<meta property="og:title" content="MeetCapture | Meeting audio, made searchable">
+<meta property="og:description" content="A native macOS app for local meeting transcription and searchable history.">
+<meta property="og:url" content="https://meetcapture.maat.work/">
+<meta property="og:image" content="https://meetcapture.maat.work/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="favicon.ico" sizes="any">
+<link rel="icon" href="favicon-mw-32.png" type="image/png" sizes="32x32">
+<link rel="icon" href="icon-mw.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="mask-icon" href="mask-mw.svg" color="#0b0b11">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="preload" href="fonts/sora.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/hanken.woff2" as="font" type="font/woff2" crossorigin>
+<style>
+@font-face {
+  font-family: "Sora";
+  src: url("fonts/sora.woff2") format("woff2");
+  font-weight: 400 800;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Hanken Grotesk";
+  src: url("fonts/hanken.woff2") format("woff2");
+  font-weight: 200 800;
+  font-display: swap;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("fonts/jetbrains.woff2") format("woff2");
+  font-weight: 100 800;
+  font-display: swap;
+}
+
+:root {
+  color-scheme: dark;
+  --bg: #0b0b11;
+  --surface: #111119;
+  --surface-raised: #171720;
+  --line: rgba(244, 240, 255, 0.1);
+  --line-strong: rgba(244, 240, 255, 0.18);
+  --text: #f5f2fc;
+  --text-muted: #bcb8c9;
+  --text-subtle: #9691a5;
+  --accent: #b2a0ff;
+  --accent-strong: #7955e8;
+  --sans: "Hanken Grotesk", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --display: "Sora", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --mono: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+  --radius: 12px;
+  --radius-large: 22px;
+  --page: 1160px;
+}
+
+* { box-sizing: border-box; }
+html {
+  scroll-behavior: smooth;
+  background: var(--bg);
+  -webkit-text-size-adjust: 100%;
+  scroll-padding-top: 1rem;
+}
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text-muted);
+  font-family: var(--sans);
+  font-size: 1.0625rem;
+  line-height: 1.6;
+  font-weight: 400;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+img { display: block; max-width: 100%; }
+a { color: inherit; }
+a:hover { color: var(--text); }
+a:focus-visible, summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 5px;
+  border-radius: 3px;
+}
+h1, h2, h3, p, figure { margin: 0; }
+h1, h2, h3 {
+  color: var(--text);
+  font-family: var(--display);
+  font-weight: 600;
+}
+.wrap { width: min(100% - 3.5rem, var(--page)); margin-inline: auto; }
+.skip-link {
+  position: absolute;
+  z-index: 10;
+  top: 0.75rem;
+  left: 0.75rem;
+  padding: 0.65rem 0.9rem;
+  transform: translateY(-160%);
+  border-radius: 7px;
+  background: var(--text);
+  color: var(--bg);
+  font-weight: 700;
+}
+.skip-link:focus { transform: translateY(0); }
+
+/* Navigation */
+.site-header { border-bottom: 1px solid var(--line); }
+.header-inner {
+  min-height: 82px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 2rem;
+}
+.brand {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 0.7rem;
+  color: var(--text);
+  text-decoration: none;
+}
+.brand img { width: 30px; height: 30px; border-radius: 8px; }
+.brand span {
+  font-family: var(--display);
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: -0.04em;
+}
+.primary-nav { display: flex; align-items: center; gap: clamp(1.2rem, 3vw, 2.5rem); }
+.primary-nav a, .header-source {
+  color: var(--text-muted);
+  font-size: 0.9375rem;
+  text-decoration: none;
+  transition: color 150ms ease;
+}
+.primary-nav a:hover, .header-source:hover { color: var(--text); }
+.header-source {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.55rem 0.85rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  color: var(--text);
+}
+.header-source svg, .text-link svg, .button svg { width: 16px; height: 16px; flex: 0 0 auto; }
+
+/* Hero */
+.hero {
+  position: relative;
+  overflow: hidden;
+  border-bottom: 1px solid var(--line);
+  background:
+    radial-gradient(ellipse at 78% 45%, rgba(111, 78, 203, 0.13), transparent 43%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.012), transparent 72%);
+}
+.hero::before {
+  position: absolute;
+  top: 8%;
+  right: -15%;
+  width: 68vw;
+  height: 68vw;
+  max-width: 920px;
+  max-height: 920px;
+  border: 1px solid rgba(178, 160, 255, 0.055);
+  border-radius: 50%;
+  content: "";
+  pointer-events: none;
+}
+.hero-grid {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1.03fr) minmax(320px, 0.97fr);
+  align-items: center;
+  gap: clamp(3rem, 7vw, 7rem);
+  padding-block: clamp(4.5rem, 8vw, 7.5rem);
+}
+.hero-copy { max-width: 620px; }
+.eyebrow, .section-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.65rem;
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  line-height: 1.4;
+  text-transform: uppercase;
+}
+.eyebrow-mark {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 14px rgba(178, 160, 255, 0.6);
+}
+.hero h1 {
+  max-width: 11ch;
+  margin-top: 1.5rem;
+  font-size: clamp(3.25rem, 4.6vw, 4.3rem);
+  line-height: 1.02;
+  letter-spacing: -0.075em;
+}
+.hero h1 span { color: var(--accent); }
+.hero-lede {
+  max-width: 34rem;
+  margin-top: 1.5rem;
+  color: var(--text-muted);
+  font-size: clamp(1.1rem, 1.6vw, 1.25rem);
+  line-height: 1.55;
+}
+.hero-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 1.35rem; margin-top: 2rem; }
+.button {
+  display: inline-flex;
+  min-height: 50px;
+  align-items: center;
+  justify-content: center;
+  gap: 0.65rem;
+  padding: 0.75rem 1.05rem;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: var(--accent-strong);
+  color: #fff;
+  font-family: var(--display);
+  font-size: 0.875rem;
+  font-weight: 600;
+  text-decoration: none;
+  transition: background-color 150ms ease, transform 150ms ease;
+}
+.button:hover { background: #6845d0; color: #fff; }
+.button:active { transform: translateY(1px); }
+.text-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  color: var(--text-muted);
+  font-size: 0.9375rem;
+  text-decoration: none;
+  transition: color 150ms ease;
+}
+.text-link:hover { color: var(--text); }
+.hero-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.2rem;
+  margin: 2.7rem 0 0;
+  padding: 1.1rem 0 0;
+  border-top: 1px solid var(--line);
+  color: var(--text-subtle);
+  font-size: 0.875rem;
+  list-style: none;
+}
+.hero-meta li { display: inline-flex; align-items: center; gap: 0.5rem; }
+.hero-meta li::before { width: 4px; height: 4px; border-radius: 50%; background: var(--accent); content: ""; }
+.product-figure { position: relative; width: min(100%, 440px); justify-self: end; }
+.product-figure::before {
+  position: absolute;
+  inset: 8% -8% 12% 14%;
+  z-index: 0;
+  border: 1px solid rgba(178, 160, 255, 0.13);
+  border-radius: 32px;
+  content: "";
+  transform: rotate(4deg);
+}
+.product-frame {
+  position: relative;
+  z-index: 1;
+  padding: 12px;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-large);
+  background: #17171f;
+  box-shadow: 0 36px 90px -48px rgba(0, 0, 0, 0.92), 0 0 60px rgba(115, 83, 210, 0.12);
+}
+.frame-label {
+  display: flex;
+  min-height: 35px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0 0.4rem 0.65rem;
+  color: var(--text-subtle);
+  font-family: var(--mono);
+  font-size: 0.61rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.frame-label span:last-child { color: var(--accent); }
+.product-screen {
+  overflow: hidden;
+  aspect-ratio: 0.86;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 13px;
+  background: #202024;
+}
+.product-frame img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center bottom;
+}
+.product-figure figcaption {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 0.9rem;
+  color: var(--text-subtle);
+  font-size: 0.8125rem;
+}
+
+/* Capabilities */
+.capabilities { border-bottom: 1px solid var(--line); }
+.section-wrap { padding-block: clamp(4rem, 7.5vw, 7rem); }
+.section-heading {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(250px, 0.55fr);
+  align-items: end;
+  gap: 2.5rem;
+  margin-bottom: 3.5rem;
+}
+.section-heading h2, .install-copy h2 {
+  max-width: 17ch;
+  margin-top: 1rem;
+  font-size: clamp(2.1rem, 4vw, 3.4rem);
+  line-height: 1.12;
+  letter-spacing: -0.06em;
+}
+.section-heading > p { max-width: 27rem; color: var(--text-subtle); }
+.capability-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border-top: 1px solid var(--line-strong);
+}
+.capability {
+  min-width: 0;
+  padding: 1.5rem clamp(1rem, 2.5vw, 2.2rem) 0 0;
+}
+.capability + .capability { padding-left: clamp(1rem, 2.5vw, 2.2rem); border-left: 1px solid var(--line); }
+.capability-number { color: var(--accent); font-family: var(--mono); font-size: 0.75rem; }
+.capability h3 { margin-top: 1.25rem; font-size: 1.15rem; letter-spacing: -0.035em; }
+.capability p { max-width: 23rem; margin-top: 0.7rem; color: var(--text-subtle); font-size: 0.98rem; line-height: 1.65; }
+.local-note {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: start;
+  gap: 1rem;
+  margin-top: 3.25rem;
+  padding: 1.2rem 1.4rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.025);
+}
+.local-note svg { width: 21px; height: 21px; margin-top: 0.15rem; color: var(--accent); }
+.local-note p { color: var(--text-muted); font-size: 0.9375rem; }
+.local-note strong { color: var(--text); font-weight: 600; }
+
+/* Installation */
+.install { border-bottom: 1px solid var(--line); background: #0e0e15; }
+.install-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+  align-items: center;
+  gap: clamp(3rem, 8vw, 8rem);
+}
+.install-copy h2 { max-width: 12ch; }
+.install-copy > p { max-width: 28rem; margin-top: 1.15rem; color: var(--text-subtle); }
+.requirements {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  margin-top: 1.5rem;
+  color: var(--text-muted);
+  font-size: 0.875rem;
+}
+.requirements svg { width: 17px; height: 17px; color: var(--accent); }
+.install-code-wrap { min-width: 0; }
+pre {
+  margin: 0;
+  padding: clamp(1rem, 2.6vw, 1.65rem);
+  overflow-x: auto;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: #09090e;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: clamp(0.71rem, 1.2vw, 0.84rem);
+  line-height: 1.9;
+  tab-size: 2;
+}
+pre code { font: inherit; }
+.install-footnote { margin-top: 1rem; color: var(--text-subtle); font-size: 0.875rem; }
+.install-footnote code { color: var(--text-muted); font-family: var(--mono); font-size: 0.9em; }
+.install-footnote a { color: var(--text-muted); text-decoration-color: var(--line-strong); text-underline-offset: 0.2em; }
+.install-footnote a:hover { color: var(--text); text-decoration-color: var(--accent); }
+
+/* Footer */
+.footer-inner {
+  display: flex;
+  min-height: 94px;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1.25rem 2rem;
+  color: var(--text-subtle);
+  font-size: 0.875rem;
+}
+.footer-brand { display: inline-flex; align-items: center; gap: 0.6rem; color: var(--text-muted); text-decoration: none; }
+.footer-brand img { width: 22px; height: 22px; border-radius: 6px; }
+.footer-links { display: flex; flex-wrap: wrap; gap: 0.65rem 1.35rem; }
+.footer-links a { color: var(--text-subtle); text-decoration: none; }
+.footer-links a:hover { color: var(--text); }
+
+@media (max-width: 940px) {
+  .hero-grid { grid-template-columns: minmax(0, 1fr) minmax(280px, 0.82fr); gap: 2.5rem; }
+  .hero h1 { font-size: clamp(3.1rem, 5.4vw, 4.2rem); }
+  .section-heading { grid-template-columns: 1fr 0.8fr; }
+}
+@media (max-width: 760px) {
+  .wrap { width: min(100% - 2.5rem, var(--page)); }
+  .header-inner { min-height: 0; flex-wrap: wrap; gap: 0; padding-block: 1rem 0; }
+  .brand { min-height: 38px; }
+  .header-source { min-height: 38px; padding-inline: 0.7rem; }
+  .primary-nav { order: 3; width: 100%; justify-content: space-between; gap: 1rem; margin-top: 0.7rem; padding-block: 0.7rem 0.8rem; border-top: 1px solid var(--line); }
+  .primary-nav a { font-size: 0.875rem; }
+  .hero-grid { grid-template-columns: 1fr; gap: 3.5rem; padding-block: 4.5rem 4rem; }
+  .hero-copy { max-width: 640px; }
+  .hero h1 { max-width: 10ch; font-size: clamp(3.25rem, 11vw, 5.1rem); }
+  .hero-lede { max-width: 37rem; }
+  .hero-meta { margin-top: 2rem; }
+  .product-figure { width: min(100%, 440px); justify-self: center; }
+  .product-figure::before { inset: 7% -4% 10% 10%; }
+  .section-heading { grid-template-columns: 1fr; gap: 1rem; margin-bottom: 2.5rem; }
+  .section-heading h2 { max-width: 18ch; }
+  .section-heading > p { max-width: 38rem; }
+  .capability-grid { grid-template-columns: 1fr; }
+  .capability, .capability + .capability { display: grid; grid-template-columns: 2.5rem minmax(0, 1fr); column-gap: 1rem; padding: 1.3rem 0; border-left: 0; border-bottom: 1px solid var(--line); }
+  .capability-number { grid-row: span 2; padding-top: 0.22rem; }
+  .capability h3 { margin-top: 0; }
+  .capability p { max-width: 40rem; margin-top: 0.35rem; }
+  .local-note { margin-top: 2rem; }
+  .install-grid { grid-template-columns: 1fr; gap: 2rem; }
+  .install-copy h2 { max-width: 16ch; }
+  pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+}
+@media (max-width: 420px) {
+  .wrap { width: min(100% - 2rem, var(--page)); }
+  .brand { gap: 0.55rem; }
+  .brand img { width: 27px; height: 27px; }
+  .brand span { font-size: 0.94rem; }
+  .header-source { font-size: 0.84rem; }
+  .primary-nav { gap: 0.5rem; }
+  .primary-nav a { font-size: 0.82rem; }
+  .hero-grid { padding-top: 3.75rem; }
+  .hero h1 { font-size: clamp(3rem, 12.8vw, 3.5rem); }
+  .hero-actions { gap: 1rem; }
+  .button { min-height: 48px; }
+  .hero-meta { gap: 0.45rem 0.9rem; font-size: 0.8125rem; }
+  .product-frame { padding: 8px; border-radius: 17px; }
+  .frame-label { font-size: 0.53rem; }
+  .product-figure figcaption { font-size: 0.75rem; }
+  .local-note { padding: 1rem; }
+  .footer-inner { align-items: flex-start; flex-direction: column; justify-content: center; padding-block: 1.5rem; }
+  .footer-links { gap: 0.6rem 1rem; }
+}
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { transition-duration: 0.01ms !important; }
+}
+</style>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="site-header">
+  <div class="wrap header-inner">
+    <a class="brand" href="#top" aria-label="MeetCapture home">
+      <img src="icon-mw.svg" alt="" width="30" height="30">
+      <span>MeetCapture</span>
+    </a>
+    <nav class="primary-nav" aria-label="Main navigation">
+      <a href="#capabilities">How it works</a>
+      <a href="#install">Install</a>
+    </nav>
+    <a class="header-source" href="https://github.com/Gigisanta/MeetCapture">
+      GitHub
+      <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4.5 11.5 11.25 4.75M5 4.75h6.25V11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </a>
+  </div>
+</header>
+
+<main id="main">
+  <section class="hero" id="top" aria-labelledby="hero-title">
+    <div class="wrap hero-grid">
+      <div class="hero-copy">
+        <p class="eyebrow"><span class="eyebrow-mark" aria-hidden="true"></span> A native app for macOS</p>
+        <h1 id="hero-title">Meeting audio, <span>made searchable.</span></h1>
+        <p class="hero-lede">MeetCapture transcribes meeting audio on your Mac and keeps a searchable history close at hand. It lives only in your menu bar; click its icon to open the controls in a popover.</p>
+        <div class="hero-actions">
+          <a class="button" href="#install">
+            Get started
+            <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 8h9m-3.5-3.5L12 8l-3.5 3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </a>
+          <a class="text-link" href="https://github.com/Gigisanta/MeetCapture">
+            Explore the project
+            <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4.5 11.5 11.25 4.75M5 4.75h6.25V11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </a>
+        </div>
+        <ul class="hero-meta" aria-label="MeetCapture details">
+          <li>Local transcription</li>
+          <li>Searchable history</li>
+          <li>Menu-bar app with popover controls</li>
+        </ul>
+      </div>
+      <figure class="product-figure">
+        <div class="product-frame">
+          <div class="frame-label"><span>MeetCapture / macOS</span><span>Product preview</span></div>
+          <div class="product-screen">
+            <img src="assets/popover.png" alt="Illustrative MeetCapture popover using sample meeting titles and transcript text; it shows a live transcript, stop control, history search field, and recent meeting rows." width="720" height="1070" fetchpriority="high" decoding="async">
+          </div>
+        </div>
+        <figcaption><span>Interface preview · sample content</span><span>Native macOS app</span></figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section class="capabilities" id="capabilities" aria-labelledby="capabilities-title">
+    <div class="wrap section-wrap">
+      <div class="section-heading">
+        <div>
+          <p class="section-kicker">Made for a local workflow</p>
+          <h2 id="capabilities-title">Keep the details. Find them when you need them.</h2>
+        </div>
+        <p>MeetCapture brings transcription, meeting history, and optional follow-up tools together in one native Mac app.</p>
+      </div>
+      <div class="capability-grid">
+        <article class="capability">
+          <span class="capability-number">01</span>
+          <h3>Transcribe on your Mac</h3>
+          <p>Whisper is the default for full transcripts. Optional sherpa-onnx adds live transcription while a session is in progress.</p>
+        </article>
+        <article class="capability">
+          <span class="capability-number">02</span>
+          <h3>Search your history</h3>
+          <p>Keep meeting transcripts in a searchable local history. You can also import audio and transcribe it from the app.</p>
+        </article>
+        <article class="capability">
+          <span class="capability-number">03</span>
+          <h3>Choose what to add</h3>
+          <p>Add optional speaker labels and summaries to your workflow. The summary dispatcher supports OpenAI-compatible endpoints.</p>
+        </article>
+      </div>
+      <aside class="local-note" aria-label="How data is processed">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3 19 6v5.2c0 4.7-3 8-7 9.8-4-1.8-7-5.1-7-9.8V6l7-3Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="m9 12 2 2 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <p><strong>Audio transcription runs locally.</strong> Summary generation uses your configured endpoint, with a local route as the default.</p>
+      </aside>
+    </div>
+  </section>
+
+  <section class="install" id="install" aria-labelledby="install-title">
+    <div class="wrap section-wrap install-grid">
+      <div class="install-copy">
+        <p class="section-kicker">Get started</p>
+        <h2 id="install-title">Set up MeetCapture on your Mac.</h2>
+        <p>Install the transcription engine, fetch its model, then build and launch MeetCapture.</p>
+        <p class="requirements">
+          <svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M5 15.5c-1.5-1.1-2-3.2-1.3-5 .7-1.8 2.3-2.8 4.3-2.8.4-1.9 2-3.2 4-3.2 2.3 0 4.1 1.8 4.1 4.1v.3c1.2.5 2 1.7 2 3.1 0 1.9-1.5 3.5-3.5 3.5H5Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="m10 9.5-2 3h2l-.4 2.2 2.4-3.2h-2l.4-2Z" fill="currentColor"/></svg>
+          Apple Silicon · macOS 14.4 or newer
+        </p>
+      </div>
+      <div class="install-code-wrap">
+        <pre><code>brew install whisper-cpp
+git clone https://github.com/Gigisanta/MeetCapture.git
+cd MeetCapture
+./scripts/fetch-models.sh --whisper
+./install.sh</code></pre>
+        <p class="install-footnote">Optional: <code>./scripts/setup-venv.sh</code> enables live transcription and speaker labels. <a href="https://github.com/Gigisanta/MeetCapture#readme">Read the setup details</a>.</p>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap footer-inner">
+    <a class="footer-brand" href="https://maat.work">
+      <img src="icon-mw.svg" alt="" width="22" height="22">
+      <span>MeetCapture by MaatWork</span>
+    </a>
+    <nav class="footer-links" aria-label="Footer navigation">
+      <a href="https://github.com/Gigisanta/MeetCapture">Source</a>
+      <a href="https://github.com/Gigisanta/MeetCapture/blob/main/LICENSE">MIT License</a>
+      <a href="privacy.html">Privacy, cookies &amp; services</a>
+      <a href="https://maat.work">MaatWork</a>
+    </nav>
+  </div>
+</footer>
+</body>
+</html>

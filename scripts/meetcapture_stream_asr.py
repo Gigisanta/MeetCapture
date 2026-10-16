@@ -83,16 +83,16 @@ def main():
     buf = bytearray()
     audio_sec = 0.0          # total audio fed so far
     seg_start = 0.0          # audio time when the current endpoint-segment began
+    segment_has_audio = False
     last_partial = ""        # last text we emitted as partial
     last_partial_t = 0.0
-    last_emit_sec = 0.0
-    pending_final = ""       # final text seen at endpoint, awaiting silence flush
 
     def feed(samples):
         """Feed a chunk of float samples, decode, emit partials/finals."""
-        nonlocal audio_sec, seg_start, last_partial, last_partial_t, pending_final
+        nonlocal audio_sec, seg_start, segment_has_audio, last_partial, last_partial_t
         stream.accept_waveform(SAMPLE_RATE, samples)
         audio_sec += len(samples) / SAMPLE_RATE
+        segment_has_audio = True
         while recognizer.is_ready(stream):
             recognizer.decode_stream(stream)
         text = recognizer.get_result(stream).strip()
@@ -107,8 +107,20 @@ def main():
                 emit({"type": "final", "text": final, "start": round(seg_start, 3), "end": round(now, 3)})
                 seg_start = now
             recognizer.reset(stream)
+            segment_has_audio = False
             last_partial = ""
-            pending_final = ""
+
+    def pcm_samples(piece):
+        """Convert an even-sized little-endian Int16 PCM piece to floats."""
+        if np is not None:
+            return (np.frombuffer(piece, dtype=np.int16).astype(np.float32) / 32768.0).tolist()
+        return [int.from_bytes(piece[i : i + 2], "little", signed=True) / 32768.0
+                for i in range(0, len(piece), 2)]
+
+    def feed_pcm(piece):
+        """Feed one complete PCM piece, if any."""
+        if piece:
+            feed(pcm_samples(piece))
 
     try:
         while True:
@@ -121,12 +133,7 @@ def main():
                 del buf[: chunk_samples * 2]
                 # Int16 LE -> float32 [-1, 1] (numpy path ~50x faster than
                 # per-sample int.from_bytes — keeps live RTF well under 1.0)
-                if np is not None:
-                    samples = (np.frombuffer(piece, dtype=np.int16).astype(np.float32) / 32768.0).tolist()
-                else:
-                    samples = [int.from_bytes(piece[i : i + 2], "little", signed=True) / 32768.0
-                               for i in range(0, len(piece), 2)]
-                feed(samples)
+                feed_pcm(piece)
     except KeyboardInterrupt:
         pass
     except Exception as exc:  # noqa: BLE001
@@ -135,8 +142,26 @@ def main():
 
     # EOF: drain trailing audio
     try:
+        # The regular loop deliberately waits for complete configured chunks.
+        # Feed the final complete sample(s) before closing the online stream so
+        # short recordings and the tail after the last chunk are decoded too.
+        if len(buf) % 2:
+            raise ValueError(
+                "PCM truncado al EOF: quedan %d bytes sin completar" % len(buf)
+            )
+        feed_pcm(bytes(buf))
+        buf.clear()
+
+        # Match sherpa's online-decode-files lookahead padding and EOF order.
+        # Padding is inference context, not captured time or a new utterance.
+        if segment_has_audio:
+            stream.accept_waveform(SAMPLE_RATE, [0.0] * int(0.66 * SAMPLE_RATE))
+        stream.input_finished()
+        while recognizer.is_ready(stream):
+            recognizer.decode_stream(stream)
+
         final = recognizer.get_result(stream).strip()
-        if final:
+        if final and segment_has_audio:
             emit({"type": "final", "text": final, "start": round(seg_start, 3), "end": round(audio_sec, 3)})
     except Exception as exc:  # noqa: BLE001
         emit({"type": "error", "message": f"drain error: {exc}"})

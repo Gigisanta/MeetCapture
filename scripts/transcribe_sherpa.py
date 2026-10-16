@@ -180,41 +180,35 @@ def main():
 
     segments = []
     t0 = time.time()
-    fed = 0
-    pos = 0
     n = len(samples)
-    # 1) Alimentar todo el audio en ventanas del VAD
-    while pos < n:
-        chunk = samples[pos : pos + window]
-        pos += len(chunk)
-        fed += len(chunk)
-        vad.accept_waveform(chunk)
-    # 2) Drenar segmentos de voz completos (patrón oficial sherpa-onnx:
-    #    empty() es MÉTODO en 1.13.x; front = utterance finalizada de la cola,
-    #    FIFO cronológica; is_speech_detected() NO aplica acá)
+
+    def drain_vad():
+        while not vad.empty():
+            seg = vad.front
+            # Copy before pop: samples points into the VAD's owned buffer.
+            seg_start = seg.start / 16000.0
+            seg_data = list(seg.samples)
+            seg_end = min(n / 16000.0, seg_start + len(seg_data) / 16000.0)
+            vad.pop()
+            stream = recognizer.create_stream()
+            stream.accept_waveform(16000, seg_data)
+            # Follow sherpa's online-decode-files EOF contract. Without the
+            # lookahead padding and input_finished(), final words are lost.
+            stream.accept_waveform(16000, [0.0] * 10560)  # 0.66 seconds
+            stream.input_finished()
+            while recognizer.is_ready(stream):
+                recognizer.decode_stream(stream)
+            text = recognizer.get_result(stream).strip()
+            if text:
+                segments.append({"start": round(seg_start, 3),
+                                 "end": round(seg_end, 3), "text": text})
+
+    # Consume completed utterances while feeding, keeping the VAD queue bounded.
+    for pos in range(0, n, window):
+        vad.accept_waveform(samples[pos : pos + window])
+        drain_vad()
     vad.flush()
-    cursor = 0.0  # la cola es cronológica: timestamps hacia adelante
-    while not vad.empty():
-        seg = vad.front
-        samples_len = len(seg.samples)
-        seg_start = cursor
-        seg_end = cursor + samples_len / 16000.0
-        # ¡pop() VACÍA el buffer zero-copy de seg.samples! Copiar antes de pop.
-        seg_data = list(seg.samples)
-        vad.pop()
-        stream = recognizer.create_stream()
-        stream.accept_waveform(16000, seg_data)
-        while recognizer.is_ready(stream):
-            recognizer.decode_stream(stream)
-        text = recognizer.get_result(stream).strip()
-        if text:
-            segments.append(
-                {"start": round(seg_start, 3), "end": round(seg_end, 3), "text": text}
-            )
-        cursor = seg_end
-    # 3) Cola final (tras flush debería estar vacía; por seguridad)
-    while not vad.empty():
-        vad.pop()
+    drain_vad()
 
     elapsed = time.time() - t0
     segments.sort(key=lambda s: s["start"])
