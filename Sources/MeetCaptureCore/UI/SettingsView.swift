@@ -13,11 +13,8 @@ struct SettingsView: View {
     @AppStorage(Settings.Key.notifyHermes.rawValue) private var notifyHermes = Settings.Default.notifyHermes
     @AppStorage(Settings.Key.retention.rawValue) private var retention = Settings.Default.retention.rawValue
     @AppStorage(Settings.Key.maxRecordingDuration.rawValue) private var maxRecordingDuration = Settings.Default.maxRecordingDuration
-    @AppStorage(Settings.Key.asrModel.rawValue) private var asrModel = Settings.Default.asrModel
     @AppStorage(Settings.Key.asrLanguage.rawValue) private var asrLanguage = Settings.Default.asrLanguage
     @AppStorage(Settings.Key.diarize.rawValue) private var diarize = Settings.Default.diarize
-    @AppStorage(Settings.Key.sherpaPythonPath.rawValue) private var sherpaPythonPath = Settings.Default.sherpaPythonPath
-    @AppStorage(Settings.Key.scriptsDir.rawValue) private var scriptsDir = Settings.Default.scriptsDir
     @AppStorage(Settings.Key.micOnlyMode.rawValue) private var micOnlyMode = Settings.Default.micOnlyMode
     @AppStorage(Settings.Key.inputDeviceUID.rawValue) private var inputDeviceUID = Settings.Default.inputDeviceUID
 
@@ -87,40 +84,17 @@ struct SettingsView: View {
 
     private var asr: some View {
         Form {
-            TextField(S.model, text: $asrModel)
-            help(S.modelHelp)
+            LabeledContent(S.engine) { Text(S.engineValue).font(.caption).foregroundStyle(.secondary) }
             Picker(S.language, selection: $asrLanguage) {
                 Text(S.spanish).tag("es")
                 Text(S.english).tag("en")
                 Text(S.autoDetect).tag("auto")
             }
             Toggle(S.diarize, isOn: $diarize)
-            Divider()
-            LabeledContent(S.toolchain) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(appState.toolchain.pythonDescription)
-                    Text(appState.toolchain.scriptsDescription)
-                }
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            HStack {
-                Button(S.choosePython) { choose(directories: false) { sherpaPythonPath = $0 } }
-                Button(S.chooseScripts) { choose(directories: true) { scriptsDir = $0 } }
-                Button(S.resetToolchain) {
-                    sherpaPythonPath = ""
-                    scriptsDir = ""
-                    Task { await appState.refreshToolchain() }
-                }
-            }
-            .controlSize(.small)
-            help(S.toolchainHelp)
+            help(S.diarizeHelp)
+            help(S.aliasesHelp)
         }
         .padding()
-        .onChange(of: sherpaPythonPath) { _, _ in Task { await appState.refreshToolchain() } }
-        .onChange(of: scriptsDir) { _, _ in Task { await appState.refreshToolchain() } }
     }
 
     // MARK: - Resumen
@@ -178,7 +152,6 @@ struct SettingsView: View {
                     localConfig = LocalConfig.load()
                     appState.calendarService.whitelist = Set(localConfig.whitelistedEmails)
                     appState.calendarService.refreshMeetings()
-                    Task { await appState.refreshToolchain() }
                 }
             }
             .controlSize(.small)
@@ -195,6 +168,7 @@ struct SettingsView: View {
             Text(AppInfo.name).font(.title2)
             Text("v\(AppInfo.version)").font(.caption).foregroundStyle(.secondary)
             Text(S.aboutTagline).font(.caption).multilineTextAlignment(.center)
+            Text(S.modelsCredit).font(.caption2).foregroundStyle(.secondary).multilineTextAlignment(.center)
             HStack(spacing: 16) {
                 Link(S.website, destination: AppInfo.websiteURL)
                 Link(S.source, destination: AppInfo.repositoryURL)
@@ -220,15 +194,6 @@ struct SettingsView: View {
         }
     }
 
-    private func choose(directories: Bool, _ apply: (String) -> Void) {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = directories
-        panel.canChooseFiles = !directories
-        panel.allowsMultipleSelection = false
-        panel.showsHiddenFiles = true
-        if panel.runModal() == .OK, let url = panel.url { apply(url.path) }
-    }
-
     private func editConfig() {
         let path = AppPaths.current.configFile
         if !FileManager.default.fileExists(atPath: path) {
@@ -240,9 +205,7 @@ struct SettingsView: View {
                 let template = """
                 {
                   "whitelistedEmails": [],
-                  "domainPrompt": "",
-                  "python": "",
-                  "scriptsDir": ""
+                  "aliases": {}
                 }
                 """
                 try? template.write(toFile: path, atomically: true, encoding: .utf8)

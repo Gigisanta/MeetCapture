@@ -1,35 +1,11 @@
 # scripts/
 
-These scripts are either bundled runtime helpers or setup helpers. They are
-not the QA harness; checks that need a built app, fixtures, or a human display
-live in `qa/`.
-
-## Bundled runtime helpers
-
-`build.sh` copies exactly this file into the app bundle:
-
-| Script | Caller | Contract |
-| --- | --- | --- |
-| `speaker_diarize.py` | `TranscriptionJob` after transcription | `--audio <wav> --segments <json> --out <json>`; reads the wrapped `segments` payload and writes segments with optional speaker labels. |
-
-The diarizer needs a Python interpreter that can import `sherpa_onnx` and
-the diarization models. Transcription uses the bundled or Homebrew
-`whisper-cli` and does not require Python.
-
-For scripts, `ToolchainResolver` checks Settings › ASR, `config.json`,
-`$MEETCAPTURE_SCRIPTS_DIR`, and then `Contents/Resources/scripts` in the
-bundle. For Python, it checks Settings › ASR, `config.json`,
-`$MEETCAPTURE_PYTHON`, `~/.meetcapture/venv/bin/python3`, and executable
-`python3` candidates on `PATH`. Automatic candidates are validated with
-`import sherpa_onnx`; an explicit configured path remains visible for
-diagnostics even when validation fails.
-
-## Setup helpers
+Maintainer helpers. The app bundles no scripts and runs no Python; speech
+models download at runtime (see [`docs/THIRD_PARTY.md`](../docs/THIRD_PARTY.md)).
+Checks that need a built app, fixtures, or a human display live in `qa/`.
 
 | Script | Purpose |
 | --- | --- |
-| `setup-venv.sh` | Creates `~/.meetcapture/venv` from `requirements.txt` and prints the interpreter path. |
-| `fetch-models.sh` | Downloads Whisper and diarization models into the per-user model directory. |
 | `version.sh` | Prints the version from `Resources/Info.plist`; `--check` rejects other version literals in tracked release files. |
 | `deploy-site.sh` | Publishes `site/` to Vercel for maintainers who have separately authorized that external action. |
 
@@ -46,5 +22,5 @@ records with the original `--reference` text, defaults `MEETCAPTURE_MAX_WER` to
 captured PCM plus format sidecar. Its CLI remains `--app`, `--mode`, `--input`,
 `--reference`, and `--output`, with the existing optional `--max-wer` and
 `--required-words` arguments. For the capture diagnostic, the inherited
-`MEETCAPTURE_CHECK_MIC_ONLY=1` opt-in selects microphone-only mixing and the
+`MEETCAPTURE_CHECK_MIC_ONLY=1` opt-in selects microphone-only capture and the
 report carries `micOnly:true`; the default remains `false`.

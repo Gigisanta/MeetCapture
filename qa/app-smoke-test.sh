@@ -92,30 +92,17 @@ else
     FAIL=$((FAIL + 1))
 fi
 
-# 5. whisper-cli bundled
+# 5. Bundled resources: the config template, and no external engines
 echo ""
-echo "[5] Whisper CLI"
-if [ -x "$APP_BUNDLE/Contents/Resources/whisper-cli" ] \
-    && "$APP_BUNDLE/Contents/Resources/whisper-cli" --help >/dev/null 2>&1; then
-    green "  ✅ whisper-cli bundled and launches"
+echo "[5] Bundled resources"
+if [ -f "$APP_BUNDLE/Contents/Resources/config.example.json" ] \
+    && [ ! -e "$APP_BUNDLE/Contents/Resources/whisper-cli" ] \
+    && [ ! -e "$APP_BUNDLE/Contents/Resources/scripts" ] \
+    && [ ! -e "$APP_BUNDLE/Contents/Frameworks" ]; then
+    green "  ✅ config.example.json bundled, no whisper-cli or python scripts"
     PASS=$((PASS + 1))
 else
-    red "  ✗ whisper-cli missing or unable to load its libraries"
-    FAIL=$((FAIL + 1))
-fi
-
-# 5b. Runtime python scripts + config template
-echo ""
-echo "[5b] Bundled resources"
-MISSING=""
-for r in scripts/speaker_diarize.py config.example.json; do
-    [ -f "$APP_BUNDLE/Contents/Resources/$r" ] || MISSING="$MISSING $r"
-done
-if [ -z "$MISSING" ]; then
-    green "  ✅ scripts and config.example.json bundled"
-    PASS=$((PASS + 1))
-else
-    red "  ✗ missing:$MISSING"
+    red "  ✗ config template missing or a removed engine is still bundled"
     FAIL=$((FAIL + 1))
 fi
 
@@ -255,17 +242,19 @@ fi
 stop_open_probes
 SMOKE_PID=""
 
-# 8. Recommended local Spanish model
+# 8. Speech models (downloaded by install.sh or on first use)
 echo ""
-echo "[8] Whisper model"
+echo "[8] Speech models"
+MODELS="$HOME/Library/Application Support/FluidAudio/Models"
 if [ -n "${CI:-}" ]; then
-    green "  ✅ Local model not required on the ephemeral CI runner"
+    green "  ✅ Local models not required on the ephemeral CI runner"
     PASS=$((PASS + 1))
-elif [ -s "$HOME/.whisper/models/ggml-medium-q5_0.bin" ]; then
-    green "  ✅ medium Q5 model available"
+elif [ -n "$(ls -A "$MODELS/parakeet-ultra" 2>/dev/null)" ] \
+    && [ -n "$(ls -A "$MODELS/speaker-diarization" 2>/dev/null)" ]; then
+    green "  ✅ Parakeet and diarization models available"
     PASS=$((PASS + 1))
 else
-    red "  ✗ medium Q5 model missing"
+    red "  ✗ models missing: run MEETCAPTURE_PREFETCH_MODELS=1 on the app binary"
     FAIL=$((FAIL + 1))
 fi
 

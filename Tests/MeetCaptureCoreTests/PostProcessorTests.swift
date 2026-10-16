@@ -12,7 +12,7 @@ final class PostProcessorTests: XCTestCase {
         let input = PostProcessInput(
             session: session, segments: [Segment(start: 0, end: 1, text: "hola", speaker: "A")],
             transcriptPath: dir + "/recording-1.txt", capturePath: capture, durableAudioPath: capture,
-            engine: .whisper, model: "medium-q5_0", language: "es", applyRetention: true,
+            engine: .parakeet, model: "medium-q5_0", language: "es", applyRetention: true,
             retention: .deleteAfterHandoff, meetingsDir: dir)
         let result = try await PostProcessor(store: store).run(input, now: TestSupport.fixedDate.addingTimeInterval(30))
 
@@ -39,7 +39,7 @@ final class PostProcessorTests: XCTestCase {
         let input = PostProcessInput(session: MeetingSession(startedAt: TestSupport.fixedDate),
             segments: [Segment(start: 0, end: 5, text: "audio real")], transcriptPath: dir + "/result.txt",
             capturePath: dir + "/audio.wav", durableAudioPath: dir + "/audio.wav",
-            engine: .whisper, model: "fixture", language: "es", applyRetention: false,
+            engine: .parakeet, model: "fixture", language: "es", applyRetention: false,
             retention: .keep, meetingsDir: dir, audioDurationSec: 5.639875, audioEndedAt: end)
         let result = try await PostProcessor(store: MeetingStore(path: dir + "/history.db"))
             .run(input, now: end.addingTimeInterval(120))

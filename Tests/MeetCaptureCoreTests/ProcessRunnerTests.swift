@@ -41,10 +41,4 @@ final class ProcessRunnerTests: XCTestCase {
             XCTFail("expected a launch error")
         } catch {}
     }
-
-    func testAudioProportionalTimeoutIsClamped() {
-        XCTAssertEqual(ProcessRunner.timeout(forAudioSeconds: 0), 30)
-        XCTAssertEqual(ProcessRunner.timeout(forAudioSeconds: 600), 130)
-        XCTAssertEqual(ProcessRunner.timeout(forAudioSeconds: 36_000), 600)
-    }
 }

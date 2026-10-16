@@ -154,7 +154,7 @@ footer .wrap { min-height: 84px; }
 
     <section aria-labelledby="app-title">
       <h2 id="app-title">The macOS app</h2>
-      <p>MeetCapture captures and transcribes audio on your Mac and stores searchable meeting history locally. Audio and Calendar access remain subject to the permissions managed by macOS; this notice does not change those permissions or the app's capture and consent behavior.</p>
+      <p>MeetCapture captures and transcribes audio on your Mac and stores searchable meeting history locally. The first time it transcribes, it downloads its speech models (about 0.6 GB) from Hugging Face; after that it needs no network, and audio and transcripts never leave the Mac. Audio and Calendar access remain subject to the permissions managed by macOS; this notice does not change those permissions or the app's capture and consent behavior.</p>
       <p>Summaries are optional. When the summary dispatcher runs, it sends the meeting title and date, transcript text, notes, and any configured tag-vocabulary names to the OpenAI-compatible endpoint in your local MeetCapture configuration. The default endpoint is <code>http://127.0.0.1:8080/v1</code>; if you change it to a remote service, that service receives the request and its own privacy terms apply. The dispatcher sends text, not the raw audio file. An optional post-summary script that you configure receives a summary JSON file that also contains your notes; that script may pass its contents to another service.</p>
       <p>Audio retention follows the app's retention setting and the summary configuration. This page does not promise a fixed retention period for local files; review the current settings before recording.</p>
     </section>

@@ -46,7 +46,7 @@ final class RecoveryAndCaptureHealthTests: XCTestCase {
         _ = try makeCapture(dir, "recording-2", modified: now.addingTimeInterval(-3 * 86_400))
         let exhausted = try makeCapture(dir, "recording-3", modified: now.addingTimeInterval(-60))
         for _ in 0..<RecordingRecovery.maxAutomaticAttempts {
-            RecordingRecovery.recordFailure(audioPath: exhausted, reason: "whisper failed")
+            RecordingRecovery.recordFailure(audioPath: exhausted, reason: "engine failed")
         }
 
         let all = RecordingRecovery.find(in: dir)
@@ -59,7 +59,7 @@ final class RecoveryAndCaptureHealthTests: XCTestCase {
         let dir = TestSupport.makeTempDir(self, "recovery-count")
         let audio = try makeCapture(dir, "recording-1")
         RecordingRecovery.recordFailure(audioPath: audio, reason: "attempt started")
-        RecordingRecovery.recordFailure(audioPath: audio, reason: "whisper failed", countsAsAttempt: false)
+        RecordingRecovery.recordFailure(audioPath: audio, reason: "engine failed", countsAsAttempt: false)
         XCTAssertEqual(RecordingRecovery.attempts(forAudio: audio), 1)
     }
 
@@ -105,25 +105,6 @@ final class RecoveryAndCaptureHealthTests: XCTestCase {
         let path = dir + "/capture.pcm"
         try stereo(Array(repeating: (100, 100), count: 8_000)).write(to: URL(fileURLWithPath: path))
         XCTAssertNil(ChannelLevels.measureTail(path: path, seconds: 10))
-    }
-
-    // MARK: - Mixing and whisper output
-
-    func testMixKeepsFullLevelWhenOneChannelIsSilentAndClamps() {
-        XCTAssertEqual(PCMToWAV.mix(0, 8_000), 8_000)
-        XCTAssertEqual(PCMToWAV.mix(-8_000, 0), -8_000)
-        XCTAssertEqual(PCMToWAV.mix(30_000, 30_000), Int16.max)
-        XCTAssertEqual(PCMToWAV.mix(-30_000, -30_000), Int16.min)
-    }
-
-    func testKnownHallucinationsAreDropped() {
-        let segments = [
-            Segment(start: 0, end: 2, text: " La traducción es la misma.", speaker: nil),
-            Segment(start: 2, end: 5, text: "Gracias por ver el video!", speaker: nil),
-            Segment(start: 5, end: 9, text: "Revisemos la cartera de Juan.", speaker: nil),
-            Segment(start: 9, end: 10, text: " ... ", speaker: nil),
-        ]
-        XCTAssertEqual(WhisperHallucinations.filter(segments).map(\.text), ["Revisemos la cartera de Juan."])
     }
 
     // MARK: - Menu-bar placement

@@ -16,7 +16,7 @@ final class PipelineRegressionTests: XCTestCase {
             transcriptPath: directory + "/recording.txt",
             capturePath: capture,
             durableAudioPath: capture,
-            engine: .whisper,
+            engine: .parakeet,
             model: "fake",
             language: "es",
             applyRetention: true,
@@ -225,7 +225,7 @@ final class PipelineRegressionTests: XCTestCase {
         let firstInput = PostProcessInput(
             session: firstSession, segments: [Segment(start: 0, end: 1, text: "first")],
             transcriptPath: first.transcriptPath, capturePath: first.durableAudioPath,
-            durableAudioPath: first.durableAudioPath, engine: .whisper, model: "fake", language: "es",
+            durableAudioPath: first.durableAudioPath, engine: .parakeet, model: "fake", language: "es",
             applyRetention: true, retention: .deleteAfterHandoff, meetingsDir: dir)
         let firstResult = try await post.run(firstInput, now: now.addingTimeInterval(30))
 
@@ -244,7 +244,7 @@ final class PipelineRegressionTests: XCTestCase {
         let secondInput = PostProcessInput(
             session: secondSession, segments: [Segment(start: 0, end: 1, text: "second")],
             transcriptPath: second.transcriptPath, capturePath: second.durableAudioPath,
-            durableAudioPath: second.durableAudioPath, engine: .whisper, model: "fake", language: "es",
+            durableAudioPath: second.durableAudioPath, engine: .parakeet, model: "fake", language: "es",
             applyRetention: true, retention: .deleteAfterHandoff, meetingsDir: dir)
         let secondResult = try await post.run(secondInput, now: now.addingTimeInterval(30))
 

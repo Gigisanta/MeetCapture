@@ -9,12 +9,9 @@ struct LocalConfig: Equatable, Sendable {
     /// Emails treated as "internal": calendar events only count as meetings
     /// when at least one attendee is outside this list.
     var whitelistedEmails: [String] = []
-    /// whisper.cpp initial prompt (names, companies, jargon) for spelling.
-    var domainPrompt: String? = nil
-    /// Python interpreter with sherpa-onnx installed (diarization).
-    var python: String? = nil
-    /// Directory holding speaker_diarize.py.
-    var scriptsDir: String? = nil
+    /// Spelling fixes: canonical form → what the recognizer writes instead,
+    /// e.g. {"AppSheet": ["app sheet"]}. A single string counts as one variant.
+    var aliases: [String: [String]] = [:]
 
     static let empty = LocalConfig()
 
@@ -34,9 +31,13 @@ struct LocalConfig: Equatable, Sendable {
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
                 .filter { !$0.isEmpty }
         }
-        config.domainPrompt = nonEmpty(root["domainPrompt"])
-        config.python = nonEmpty(root["python"]).map(expandTilde)
-        config.scriptsDir = nonEmpty(root["scriptsDir"]).map(expandTilde)
+        if let aliases = root["aliases"] as? [String: Any] {
+            for (key, value) in aliases {
+                guard let canonical = nonEmpty(key) else { continue }
+                let variants = (value as? [Any] ?? [value]).compactMap(nonEmpty)
+                config.aliases[canonical] = variants
+            }
+        }
         return config
     }
 
@@ -47,7 +48,4 @@ struct LocalConfig: Equatable, Sendable {
         return s
     }
 
-    static func expandTilde(_ path: String) -> String {
-        (path as NSString).expandingTildeInPath
-    }
 }

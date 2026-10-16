@@ -11,14 +11,11 @@ struct AppPaths: Sendable, Equatable {
     let transcriptsDir: String
     let importsDir: String
     let databasePath: String
-    /// ~/.meetcapture: config.json, summary.json, optional venv.
+    /// ~/.meetcapture: config.json, summary.json.
     let configDir: String
-    /// ~/.whisper/models (whisper ggml models + Silero VAD).
-    let whisperModelsDir: String
 
     var configFile: String { configDir + "/config.json" }
     var summaryConfigFile: String { configDir + "/summary.json" }
-    var venvPython: String { configDir + "/venv/bin/python3" }
 
     static let current = AppPaths(
         environment: ProcessInfo.processInfo.environment,
@@ -37,7 +34,6 @@ struct AppPaths: Sendable, Equatable {
             databasePath = home + "/meetings/meetcapture.db"
         }
         configDir = home + "/.meetcapture"
-        whisperModelsDir = home + "/.whisper/models"
     }
 
     /// Creates a directory with 0700 permissions if missing.

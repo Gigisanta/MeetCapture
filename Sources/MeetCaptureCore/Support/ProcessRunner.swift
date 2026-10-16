@@ -1,7 +1,7 @@
 // ProcessRunner.swift
-// One harness for every external process (whisper-cli, python scripts,
-// afconvert): drained pipes, proportional timeout, SIGTERM → SIGKILL,
-// timeout detected by terminationReason, task cancellation forwarded.
+// One harness for every external process (afconvert, afplay): drained
+// pipes, SIGTERM → SIGKILL on timeout (detected by terminationReason),
+// task cancellation forwarded.
 
 import Foundation
 
@@ -53,13 +53,6 @@ enum ProcessRunnerError: LocalizedError {
 enum ProcessRunner {
     /// Seconds between SIGTERM and SIGKILL when a process ignores the timeout.
     static let killGrace: TimeInterval = 5
-
-    /// Timeout proportional to the audio being processed: 30 s base plus
-    /// 10 s per minute of audio, clamped to 30…600 s.
-    static func timeout(forAudioSeconds seconds: Double) -> TimeInterval {
-        let raw = 30.0 + (seconds / 60.0).rounded(.down) * 10.0
-        return min(600, max(30, raw))
-    }
 
     /// Runs the process to completion. Launch failures and task cancellation
     /// throw; exit status and timeouts are reported in the result.

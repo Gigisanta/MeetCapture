@@ -1,6 +1,6 @@
 // Segment.swift
-// One timed transcript segment. `speaker` is filled by diarization
-// (nil when diarization is off, unavailable, or the diarizer answered "?").
+// One timed transcript segment (a word while transcribing, a speaker turn in
+// the transcript). `speaker` is "Gio", "Participante N" or nil.
 
 import Foundation
 
@@ -19,7 +19,7 @@ struct Segment: Codable, Equatable, Sendable {
 }
 
 enum ASREngine: String, Sendable {
-    case whisper
+    case parakeet
 }
 
 enum TranscriptFormatter {

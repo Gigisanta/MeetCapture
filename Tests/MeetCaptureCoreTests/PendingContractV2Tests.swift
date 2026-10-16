@@ -7,7 +7,7 @@ final class PendingContractV2Tests: XCTestCase {
     private func contract(segments: [Segment], audioPath: String = "/nonexistent/recording.pcm") -> PendingContractV2 {
         PendingContractV2(session: session, endedAt: TestSupport.fixedDate.addingTimeInterval(90.5),
                           transcriptPath: "/tmp/x.txt", transcriptText: TranscriptFormatter.text(for: segments),
-                          audioPath: audioPath, engine: .whisper, model: "medium-q5_0", language: "es",
+                          audioPath: audioPath, engine: .parakeet, model: "medium-q5_0", language: "es",
                           segments: segments)
     }
 

@@ -1,0 +1,136 @@
+import XCTest
+@testable import MeetCaptureCore
+
+/// Fixed diarization, or a failure; counts calls to prove the cache.
+actor FakeDiarizer: SpeakerDiarizing {
+    private let result: [SpeakerSpan]?
+    private(set) var calls = 0
+    init(_ result: [SpeakerSpan]?) { self.result = result }
+    func spans(in wav: URL) async throws -> [SpeakerSpan] {
+        calls += 1
+        guard let result else { throw DiarizationError.unsupportedOS }
+        return result
+    }
+}
+
+final class TranscriptionJobTests: XCTestCase {
+    private let rate = ChunkedTranscription.sampleRate
+
+    /// A capture as the recorder writes it: interleaved int16 L/R at 16 kHz plus its sidecar.
+    private func capture(_ dir: String, left: [Int16], right: [Int16], strategy: String = "global") throws -> String {
+        let path = dir + "/recording-1.pcm"
+        var frames: [Int16] = []
+        for (l, r) in zip(left, right) { frames += [l, r] }
+        try frames.withUnsafeBufferPointer { Data(buffer: $0) }.write(to: URL(fileURLWithPath: path))
+        try AudioFormatSidecar.capture(tapStrategy: strategy, tapInfo: "test").write(forAudio: path)
+        return path
+    }
+
+    /// Independent noise for Gio: not correlated with the remote tone, so the gate keeps it.
+    private func gio(_ seconds: Int) -> [Int16] {
+        var state: UInt32 = 7
+        return (0..<(seconds * rate)).map { _ in
+            state = state &* 1_664_525 &+ 1_013_904_223
+            return Int16(truncatingIfNeeded: Int32(state >> 16) - 32_768) / 4
+        }
+    }
+
+    func testDualChannelCaptureBecomesGioAndNumberedParticipants() async throws {
+        let dir = TestSupport.makeTempDir(self, "job-dual")
+        let audio = try capture(dir, left: WAVFixture.tone(seconds: 4), right: gio(4))
+        // Call 0 is the remote channel, call 1 the mic.
+        let recognizer = FakeRecognizer { call, _ in
+            call == 0
+                ? [Segment(start: 0.0, end: 0.4, text: "Hola"), Segment(start: 0.5, end: 0.9, text: "app sheet"),
+                   Segment(start: 3.0, end: 3.3, text: "listo")]
+                : [Segment(start: 1.5, end: 1.9, text: "Buenas"), Segment(start: 3.1, end: 3.3, text: "listo")]
+        }
+        let diarizer = FakeDiarizer([SpeakerSpan(start: 0, end: 1, speaker: "B"),
+                                     SpeakerSpan(start: 2.8, end: 4, speaker: "A")])
+        let job = TranscriptionJob(audioPath: audio, captureSampleRate: 16_000, language: "es", diarize: true,
+                                   aliases: ["AppSheet": ["app sheet"]], recognizer: recognizer, diarizer: diarizer)
+        let outcome = try await job.run { _ in }
+
+        XCTAssertEqual(TranscriptFormatter.text(for: outcome.segments),
+                       "[Participante 1]: Hola AppSheet\n[Gio]: Buenas\n[Participante 2]: listo",
+                       "the mic's echo of \"listo\" is dropped")
+        XCTAssertEqual(outcome.engineUsed, .parakeet)
+        XCTAssertEqual(outcome.modelUsed, ParakeetEngine.modelName)
+        XCTAssertEqual(outcome.failedChunks, 0)
+        XCTAssertEqual(outcome.audioDurationSec ?? 0, 4, accuracy: 0.01)
+        let work = ChunkedTranscription.workDirectory(forAudio: audio)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: work + "/system.wav"), "channel WAVs are derived data")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: work + "/mic.wav"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: audio), "the capture itself is kept")
+
+        // A rerun resumes from the checkpoints and the cached diarization.
+        let again = try await TranscriptionJob(audioPath: audio, captureSampleRate: 16_000, language: "es",
+                                               diarize: true, recognizer: FakeRecognizer { _, _ in [] },
+                                               diarizer: diarizer).run { _ in }
+        XCTAssertEqual(again.segments.map(\.speaker), ["Participante 1", "Gio", "Participante 2"])
+        let diarizations = await diarizer.calls
+        XCTAssertEqual(diarizations, 1)
+    }
+
+    func testFailedDiarizationFallsBackToOneParticipant() async throws {
+        let dir = TestSupport.makeTempDir(self, "job-nodiar")
+        let audio = try capture(dir, left: WAVFixture.tone(seconds: 2), right: gio(2))
+        let recognizer = FakeRecognizer { call, _ in
+            [Segment(start: call == 0 ? 0 : 1, end: call == 0 ? 0.5 : 1.5, text: call == 0 ? "remoto" : "local")]
+        }
+        let outcome = try await TranscriptionJob(audioPath: audio, captureSampleRate: 16_000, language: "es",
+                                                 diarize: true, recognizer: recognizer,
+                                                 diarizer: FakeDiarizer(nil)).run { _ in }
+        XCTAssertEqual(TranscriptFormatter.text(for: outcome.segments), "[Participante]: remoto\n[Gio]: local")
+    }
+
+    func testSilentSystemChannelTranscribesTheMicAloneWithoutLabels() async throws {
+        let dir = TestSupport.makeTempDir(self, "job-silent-tap")
+        let audio = try capture(dir, left: [Int16](repeating: 3, count: 2 * rate), right: gio(2))
+        let recognizer = FakeRecognizer { _, _ in [Segment(start: 0, end: 0.5, text: "solo")] }
+        let diarizer = FakeDiarizer([])
+        let outcome = try await TranscriptionJob(audioPath: audio, captureSampleRate: 16_000, language: "es",
+                                                 diarize: false, recognizer: recognizer,
+                                                 diarizer: diarizer).run { _ in }
+        XCTAssertEqual(TranscriptFormatter.text(for: outcome.segments), "solo")
+        let calls = await recognizer.calls
+        XCTAssertEqual(calls, 1, "one channel, one chunk")
+    }
+
+    func testMicOnlyCaptureUsesTheLeftChannelOnly() throws {
+        let dir = TestSupport.makeTempDir(self, "job-miconly")
+        let audio = try capture(dir, left: gio(1), right: gio(1), strategy: "mic-only")
+        let work = dir + "/work"
+        try AppPaths.ensurePrivateDirectory(work)
+        let layout = try ChannelReader.prepare(audioPath: audio, captureSampleRate: 16_000, workDirectory: work)
+        XCTAssertEqual(layout, .single(URL(fileURLWithPath: work + "/audio.wav")))
+        XCTAssertNil(layout.mic)
+        ChannelReader.cleanup(layout, original: audio)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: work), [])
+    }
+
+    func testImported16kWAVIsReadInPlaceAndKept() throws {
+        let dir = TestSupport.makeTempDir(self, "job-import")
+        let wav = URL(fileURLWithPath: dir + "/import.wav")
+        try WAVFixture.write(gio(1), to: wav)
+        let layout = try ChannelReader.prepare(audioPath: wav.path, captureSampleRate: 48_000, workDirectory: dir)
+        XCTAssertEqual(layout, .single(wav))
+        ChannelReader.cleanup(layout, original: wav.path)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: wav.path))
+    }
+
+    func testLegacyWhisperCheckpointsAreDiscarded() async throws {
+        let dir = TestSupport.makeTempDir(self, "job-legacy")
+        let audio = try capture(dir, left: WAVFixture.tone(seconds: 2), right: gio(2))
+        let work = ChunkedTranscription.workDirectory(forAudio: audio)
+        try AppPaths.ensurePrivateDirectory(work)
+        TestSupport.write(#"{"version":1,"audioBytes":1,"boundaries":[0,1]}"#, to: work + "/manifest.json")
+        TestSupport.write(#"[{"start":0,"end":1,"text":"whisper viejo"}]"#, to: work + "/chunk-000.json")
+        let outcome = try await TranscriptionJob(audioPath: audio, captureSampleRate: 16_000, language: "es",
+                                                 diarize: false,
+                                                 recognizer: FakeRecognizer { _, _ in [Segment(start: 0, end: 1, text: "nuevo")] },
+                                                 diarizer: FakeDiarizer([])).run { _ in }
+        XCTAssertFalse(outcome.segments.map(\.text).contains("whisper viejo"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: work + "/chunk-000.json"))
+    }
+}

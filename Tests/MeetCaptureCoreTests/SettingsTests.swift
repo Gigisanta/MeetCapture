@@ -12,7 +12,7 @@ final class SettingsTests: XCTestCase {
 
     func testClampsAndFallbacks() {
         let store = UserDefaults.standard
-        let keys = [Settings.Key.maxRecordingDuration, .asrModel, .retention]
+        let keys = [Settings.Key.maxRecordingDuration, .asrLanguage, .retention]
         let saved: [String: Any] = Dictionary(uniqueKeysWithValues: keys.compactMap { key in
             store.object(forKey: key.rawValue).map { (key.rawValue, $0) }
         })
@@ -26,12 +26,10 @@ final class SettingsTests: XCTestCase {
         XCTAssertEqual(Settings.maxRecordingDuration, 1_800)
         store.set(999_999.0, forKey: Settings.Key.maxRecordingDuration.rawValue)
         XCTAssertEqual(Settings.maxRecordingDuration, 28_800)
-        store.set("  ", forKey: Settings.Key.asrModel.rawValue)
-        XCTAssertEqual(Settings.asrModel, Settings.Default.asrModel, "empty model falls back to the default")
-        store.set("zipformer-es", forKey: Settings.Key.asrModel.rawValue)
-        XCTAssertEqual(Settings.asrModel, Settings.Default.asrModel, "a retired sherpa model cannot disable transcription")
-        store.set("large-v3-turbo", forKey: Settings.Key.asrModel.rawValue)
-        XCTAssertEqual(Settings.asrModel, "large-v3-turbo", "custom selections must survive")
+        store.set("", forKey: Settings.Key.asrLanguage.rawValue)
+        XCTAssertEqual(Settings.asrLanguage, Settings.Default.asrLanguage, "empty language falls back to the default")
+        store.set("en", forKey: Settings.Key.asrLanguage.rawValue)
+        XCTAssertEqual(Settings.asrLanguage, "en")
         store.set("bogus", forKey: Settings.Key.retention.rawValue)
         XCTAssertEqual(Settings.retention, .keep24h, "the default keeps a day to retranscribe")
         store.set("deleteAfterHandoff", forKey: Settings.Key.retention.rawValue)
@@ -48,18 +46,16 @@ final class SettingsTests: XCTestCase {
         let d = AppPaths(environment: [:], home: "/Users/x")
         XCTAssertEqual(d.meetingsDir, "/Users/x/meetings")
         XCTAssertEqual(d.transcriptsDir, "/Users/x/meetings/transcripts")
-        XCTAssertEqual(d.venvPython, "/Users/x/.meetcapture/venv/bin/python3")
     }
 
     func testLocalConfigParsingIsTolerant() {
         XCTAssertEqual(LocalConfig.parse(Data("[]".utf8)), .empty)
         XCTAssertEqual(LocalConfig.parse(Data("{".utf8)), .empty)
-        let json = #"{"whitelistedEmails":[" A@B.com ","", "c@d.e"],"domainPrompt":" ","python":"~/venv/bin/python3","extra":1}"#
+        let json = #"{"whitelistedEmails":[" A@B.com ","", "c@d.e"],"aliases":{"AppSheet":["app sheet"," "],"CEDEAR":"sedear"," ":["x"],"FCI":7},"domainPrompt":"obra","extra":1}"#
         let c = LocalConfig.parse(Data(json.utf8))
         XCTAssertEqual(c.whitelistedEmails, ["a@b.com", "c@d.e"])
-        XCTAssertNil(c.domainPrompt)
-        XCTAssertEqual(c.python, NSHomeDirectory() + "/venv/bin/python3")
-        XCTAssertNil(c.scriptsDir)
+        XCTAssertEqual(c.aliases, ["AppSheet": ["app sheet"], "CEDEAR": ["sedear"], "FCI": []],
+                       "a string is one variant; blanks and non-strings are dropped")
     }
 
     func testSummaryConfigMergesIntoExistingFile() throws {

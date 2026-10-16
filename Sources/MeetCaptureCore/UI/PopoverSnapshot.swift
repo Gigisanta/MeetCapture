@@ -255,7 +255,7 @@ private final class UIFixtureState: ObservableObject, PopoverStateModel {
     private static func summary(id: String, title: String, startedAt: Date, speakers: Int) -> MeetingSummary {
         MeetingSummary(
             id: id, title: title, startedAt: startedAt, endedAt: startedAt.addingTimeInterval(1_800),
-            durationSec: 1_800, engine: "whisper", model: "medium-q5_0", language: "es",
+            durationSec: 1_800, engine: "parakeet", model: ParakeetEngine.modelName, language: "es",
             transcriptPath: "/fixture/\(id).txt", summaryPath: nil, speakerCount: speakers)
     }
 }

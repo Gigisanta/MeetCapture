@@ -546,7 +546,7 @@ pre code { font: inherit; }
         <article class="capability">
           <span class="capability-number">01</span>
           <h3>Transcribe on your Mac</h3>
-          <p>Whisper is the default for full transcripts. Optional sherpa-onnx adds live transcription while a session is in progress.</p>
+          <p>After each call, NVIDIA Parakeet transcribes your microphone and the call audio separately on the Neural Engine, leaving the GPU free for a local model.</p>
         </article>
         <article class="capability">
           <span class="capability-number">02</span>
@@ -556,7 +556,7 @@ pre code { font: inherit; }
         <article class="capability">
           <span class="capability-number">03</span>
           <h3>Choose what to add</h3>
-          <p>Add optional speaker labels and summaries to your workflow. The summary dispatcher supports OpenAI-compatible endpoints.</p>
+          <p>Your side is labeled apart from the call, and optional diarization separates the other participants. The summary dispatcher supports OpenAI-compatible endpoints.</p>
         </article>
       </div>
       <aside class="local-note" aria-label="How data is processed">
@@ -571,19 +571,17 @@ pre code { font: inherit; }
       <div class="install-copy">
         <p class="section-kicker">Get started</p>
         <h2 id="install-title">Set up MeetCapture on your Mac.</h2>
-        <p>Install the transcription engine, fetch its model, then build and launch MeetCapture.</p>
+        <p>Build and launch MeetCapture. The speech models download on first use.</p>
         <p class="requirements">
           <svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M5 15.5c-1.5-1.1-2-3.2-1.3-5 .7-1.8 2.3-2.8 4.3-2.8.4-1.9 2-3.2 4-3.2 2.3 0 4.1 1.8 4.1 4.1v.3c1.2.5 2 1.7 2 3.1 0 1.9-1.5 3.5-3.5 3.5H5Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="m10 9.5-2 3h2l-.4 2.2 2.4-3.2h-2l.4-2Z" fill="currentColor"/></svg>
           Apple Silicon · macOS 14.4 or newer
         </p>
       </div>
       <div class="install-code-wrap">
-        <pre><code>brew install whisper-cpp
-git clone https://github.com/Gigisanta/MeetCapture.git
+        <pre><code>git clone https://github.com/Gigisanta/MeetCapture.git
 cd MeetCapture
-./scripts/fetch-models.sh --whisper
 ./install.sh</code></pre>
-        <p class="install-footnote">Optional: <code>./scripts/setup-venv.sh</code> enables live transcription and speaker labels. <a href="https://github.com/Gigisanta/MeetCapture#readme">Read the setup details</a>.</p>
+        <p class="install-footnote">Speaker separation needs macOS 15. <a href="https://github.com/Gigisanta/MeetCapture#readme">Read the setup details</a>.</p>
       </div>
     </div>
   </section>

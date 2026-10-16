@@ -7,6 +7,37 @@ semantic versioning. The single source of the current version is
 
 ## [Unreleased]
 
+Planned as 7.0.0 (`scripts/version.sh` bumps it at release).
+
+### Removed
+- Whisper: `whisper-cli`, the ggml models in `~/.whisper/models`,
+  `scripts/fetch-models.sh`, `WhisperModels`, `SegmentJSON`, the Homebrew
+  `whisper-cpp` requirement and its bundling (`tools/packaging/bundle_macho.py`).
+- The Python diarizer: `scripts/speaker_diarize.py` (sherpa-onnx),
+  `scripts/setup-venv.sh`, `requirements.txt` and `~/.meetcapture/venv`. The
+  app runs no Python; the summary dispatcher is unchanged.
+- Live transcription.
+- `ToolchainResolver`, the `domainPrompt`, `python` and `scriptsDir` keys of
+  `config.json`, the `asrModel` setting, and the proportional timeout helper
+  in `ProcessRunner`, which now only runs `afconvert` and `afplay`.
+
+### Added
+- NVIDIA Parakeet TDT 0.6B "ultra" through the FluidAudio Swift package
+  (pinned revision), on the Neural Engine so it does not compete with a local
+  LLM for the GPU. Each channel is transcribed separately; the models
+  download once to `~/Library/Application Support/FluidAudio`. Licenses and
+  attribution in `docs/THIRD_PARTY.md` and Settings › Acerca de.
+- Bleed gate: 0.5 s microphone windows that only repeat the call audio coming
+  out of the speakers are muted before transcription; double talk is kept.
+- FluidAudio offline diarization (pyannote community-1, VBx) on the call
+  channel on macOS 15 and newer: `Participante 1..N` by order of appearance,
+  `Gio` for the microphone, one `Participante` without diarization.
+- `aliases` in `config.json`: canonical spelling → variants, applied whole-word
+  and case-insensitively to the merged transcript.
+- Per-channel checkpoints in `<audio>.work/remote/` and `<audio>.work/mic/`
+  (manifest version 2) plus a cached `diarization.json`; a chunk failing twice
+  becomes `[fragmento sin transcribir …]` and the audio is kept.
+
 ### Fixed
 - Run as a menu-bar-only app (`LSUIElement`) with a square template-icon
   status item that reflects the phase. Detect when macOS does not host the
@@ -29,20 +60,11 @@ semantic versioning. The single source of the current version is
 - Always capture system audio through the global tap, because the targeted
   tap missed browser GPU helpers (Safari `WebKit.GPU`) and Teams 2. Recognise
   those processes as call apps.
-- Mix stereo to mono by clamped sum instead of averaging, so a silent channel
-  no longer halves the voice level. Drop `--carry-initial-prompt` and filter
-  known Whisper silence hallucinations ("La traducción es la misma.",
-  "Gracias por ver…").
 - Serialize recording start/stop, preserve actionable errors, and run history
   searches outside the main actor.
-- Give each job and live recording a unique identity, and publish summary
+- Give each job and recording a unique identity, and publish summary
   handoffs only after transcript, history and processing metadata are durable.
 - Reject empty transcripts and malformed audio instead of marking them complete.
-- Preserve the last streaming audio chunk, flush the recognizer at EOF, and
-  avoid duplicate final events. Process short live-ASR events immediately,
-  bound the feed queue and discard audio/events from replaced recognizers.
-- Validate automatic Python candidates, preserve explicit selections, and keep
-  cancelled checks out of the toolchain cache. Resolve default models per engine.
 - Terminate descendant process groups on cancellation and timeout, including
   children still holding output pipes after their parent exits.
 - Preserve microphone-only levels and allocate enough resampler output for
@@ -52,8 +74,6 @@ semantic versioning. The single source of the current version is
 - Confine summary input paths to the meetings directory, and preserve imported
   transcripts when their audio was already deleted after handoff. Keep each
   retranscription in its own artifact so earlier history remains intact.
-- Bundle Whisper's libraries and GGML plugins with their licenses, preserve
-  shared library identities, and verify that the packaged CLI actually starts.
 - Verify the selected app bundle through a decoded UI snapshot and provide an
   isolated window for interactive regression checks.
 - Clear a prior operation error when a new operation is accepted and cancel
@@ -72,6 +92,10 @@ semantic versioning. The single source of the current version is
   into the durable imports directory.
 
 ### Changed
+- Transcription splits the stereo capture into a system and a microphone
+  WAV instead of mixing it to mono. Mic-only captures, imports and meetings
+  whose system channel stayed silent use a single channel.
+- CI no longer installs `whisper-cpp` or runs the packaging tests.
 - Keep installer backups as zipped bundles in `~/meetings/.backups`, so
   LaunchServices no longer registers old copies under the same bundle id.
 - Sign with `MEETCAPTURE_SIGN_IDENTITY` and the hardened runtime when set
@@ -79,9 +103,6 @@ semantic versioning. The single source of the current version is
   that macOS may ask for permissions again.
 - `qa/visual-test.sh` refuses to run while MeetCapture is open instead of
   killing the user's instance.
-- Keep the live ASR child cold at idle startup; the existing demand policy
-  starts it for calls, imminent meetings and recordings instead of loading a
-  model merely because live transcription is enabled.
 - Compact the streaming PCM resampler by indexed windows instead of moving its
   pending array for each output sample. The converted WAV bytes and duration
   remain unchanged on the measured voice corpus.

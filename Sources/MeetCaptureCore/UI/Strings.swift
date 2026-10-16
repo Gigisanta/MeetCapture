@@ -139,19 +139,15 @@ enum Strings {
         static let granted = "Concedido"
         static let required = "Pendiente"
 
-        static let model = "Modelo"
-        static let modelHelp = "Whisper: tiny, base, small, medium-q5_0 (recomendado), large-v3-turbo. Corre al terminar la grabación."
+        static let engine = "Motor"
+        static let engineValue = "Parakeet TDT 0.6B en el Neural Engine, por canal; corre al terminar la grabación."
         static let language = "Idioma"
         static let spanish = "Español (es)"
         static let english = "Inglés (en)"
         static let autoDetect = "Detectar"
         static let diarize = "Identificar hablantes"
-        static let diarizeHelp = "Etiqueta cada segmento con su hablante (sherpa-onnx). Si no está disponible, la transcripción sale sin etiquetas."
-        static let toolchain = "Herramientas"
-        static let choosePython = "Elegir python…"
-        static let chooseScripts = "Elegir carpeta de scripts…"
-        static let resetToolchain = "Volver a detectar"
-        static let toolchainHelp = "Orden de búsqueda: estos ajustes, config.json, variables de entorno, ~/.meetcapture/venv, PATH. Instalación: scripts/setup-venv.sh."
+        static let diarizeHelp = "Tu micrófono sale como Gio; el audio de la llamada se separa en Participante 1, 2… Sin diarización queda como Participante."
+        static let aliasesHelp = "Correcciones de nombres y siglas: \"aliases\" en config.json (pestaña Calendario › Editar config.json)."
 
         static let summaryHelp = "El resumen lo genera el dispatcher (tools/summary) leyendo ~/.meetcapture/summary.json."
         static let tagVocabularyDir = "Carpeta de etiquetas (opcional)"
@@ -174,5 +170,6 @@ enum Strings {
         static let aboutTagline = "Transcripción local de llamadas: Meet, Zoom, Teams, WhatsApp y más."
         static let website = "Sitio"
         static let source = "Código"
+        static let modelsCredit = "Modelos: NVIDIA Parakeet TDT y pyannote, vía FluidAudio (CC-BY-4.0)."
     }
 }

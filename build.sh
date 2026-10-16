@@ -38,7 +38,7 @@ while [ $# -gt 0 ]; do
             echo "  --staging-dir <path> Build to an explicit disposable directory"
             echo "  --sign <identity>   Sign with given identity (default: ad-hoc '-')"
             echo ""
-            echo "Models are not downloaded here: see scripts/fetch-models.sh."
+            echo "Speech models download on first use (see docs/THIRD_PARTY.md)."
             echo ""
             echo "Examples:"
             echo "  ./build.sh                                    # use install.sh"
@@ -97,34 +97,6 @@ echo "  Binary: $(du -h "$APP_BUNDLE/Contents/MacOS/$APP_NAME" | cut -f1)"
 cp "$REPO_DIR/Resources/Info.plist" "$APP_BUNDLE/Contents/"
 cp "$APP_ICON" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
 
-# Bundle whisper-cli binary
-WHISPER_CLI="$(command -v whisper-cli 2>/dev/null || true)"
-if [ -z "$WHISPER_CLI" ]; then
-    for p in "$(brew --prefix 2>/dev/null)/bin/whisper-cli" /opt/homebrew/bin/whisper-cli /usr/local/bin/whisper-cli; do
-        [ -x "$p" ] && { WHISPER_CLI="$p"; break; }
-    done
-fi
-if [ -n "$WHISPER_CLI" ] && [ -x "$WHISPER_CLI" ]; then
-    python3 "$REPO_DIR/tools/packaging/bundle_macho.py" "$WHISPER_CLI" \
-        "$APP_BUNDLE/Contents/Resources/whisper-cli" \
-        "$APP_BUNDLE/Contents/Frameworks" --identity "$SIGN_IDENTITY"
-    echo "  Bundled: whisper-cli ($WHISPER_CLI)"
-else
-    echo "  ⚠️  WARNING: whisper-cli not found — transcription will FAIL at runtime."
-    echo "      Install it:  brew install whisper-cpp"
-fi
-
-# Bundle the runtime python script (diarization). The app resolves it
-# through ToolchainResolver:
-# Settings › ASR → ~/.meetcapture/config.json → $MEETCAPTURE_SCRIPTS_DIR →
-# Contents/Resources/scripts (this copy).
-RUNTIME_SCRIPTS=(speaker_diarize.py)
-mkdir -p "$APP_BUNDLE/Contents/Resources/scripts"
-for s in "${RUNTIME_SCRIPTS[@]}"; do
-    cp "$REPO_DIR/scripts/$s" "$APP_BUNDLE/Contents/Resources/scripts/"
-done
-echo "  Bundled: ${#RUNTIME_SCRIPTS[@]} python scripts"
-
 # Template for ~/.meetcapture/config.json (Settings › Calendario › Editar config.json)
 cp "$REPO_DIR/Resources/config.example.json" "$APP_BUNDLE/Contents/Resources/"
 
@@ -132,13 +104,6 @@ cp "$REPO_DIR/Resources/config.example.json" "$APP_BUNDLE/Contents/Resources/"
 # Hardened runtime (-o runtime) is only applied when signing with a REAL identity,
 # not ad-hoc ('-'). Ad-hoc signed hardened runtime breaks on macOS 15+ with
 # code signing rejection even for basic entitlements.
-if [ -x "$APP_BUNDLE/Contents/Resources/whisper-cli" ]; then
-    "$APP_BUNDLE/Contents/Resources/whisper-cli" --help >/dev/null 2>&1 || {
-        echo "ERROR: bundled whisper-cli cannot launch"
-        exit 1
-    }
-fi
-
 SIGN_FLAGS=(
     --force
     --sign "$SIGN_IDENTITY"

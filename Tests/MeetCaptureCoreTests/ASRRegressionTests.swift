@@ -1,14 +1,8 @@
+import FluidAudio
 import XCTest
 @testable import MeetCaptureCore
 
 final class ASRRegressionTests: XCTestCase {
-    func testWhisperUsesTheVerifiedBundleBeforeMachineInstallations() {
-        let dir = TestSupport.makeTempDir(self, "bundled-whisper")
-        let cli = dir + "/whisper-cli"
-        TestSupport.writeExecutable("exit 0", to: cli)
-        XCTAssertEqual(WhisperCLI.locate(bundleResourcePath: dir)?.executable, cli)
-    }
-
     func testFloat32AtTargetRateKeepsTheFinalSample() throws {
         let dir = TestSupport.makeTempDir(self, "asr-last-sample")
         let input = dir + "/one.pcm"
@@ -24,24 +18,25 @@ final class ASRRegressionTests: XCTestCase {
         XCTAssertEqual(PCMToWAV.wavDurationSeconds(output.path), 1.0 / 16_000, accuracy: 0.000_001)
     }
 
-    func testInt16InputIsResampledAndMixedBeforeWritingWAV() throws {
+    func testInt16ChannelsAreResampledSeparately() throws {
         let dir = TestSupport.makeTempDir(self, "asr-resample")
         let input = dir + "/stereo.pcm"
         var frames: [Int16] = []
         for _ in 0..<3 { frames += [1000, 3000] }
         try frames.withUnsafeBufferPointer { Data(buffer: $0) }
             .write(to: URL(fileURLWithPath: input))
-        let output = URL(fileURLWithPath: dir + "/stereo.wav")
+        let outputs = [URL(fileURLWithPath: dir + "/l.wav"), URL(fileURLWithPath: dir + "/r.wav")]
 
         try PCMToWAV.convert(inputPath: input,
                              format: .int16Interleaved(channels: 2, sampleRate: 48_000),
-                             outputURL: output)
+                             outputURLs: outputs)
 
-        let data = try Data(contentsOf: output)
-        XCTAssertEqual(data.count, PCMToWAV.headerSize + 2, "three 48 kHz frames become one 16 kHz frame")
-        let bytes = [UInt8](data.dropFirst(PCMToWAV.headerSize))
-        let sample = Int16(littleEndian: Int16(bitPattern: UInt16(bytes[0]) | UInt16(bytes[1]) << 8))
-        XCTAssertEqual(sample, 4000)
+        for (output, expected) in zip(outputs, [Int16(1000), 3000]) {
+            let data = try Data(contentsOf: output)
+            XCTAssertEqual(data.count, PCMToWAV.headerSize + 2, "three 48 kHz frames become one 16 kHz frame")
+            let bytes = [UInt8](data.dropFirst(PCMToWAV.headerSize))
+            XCTAssertEqual(Int16(littleEndian: Int16(bitPattern: UInt16(bytes[0]) | UInt16(bytes[1]) << 8)), expected)
+        }
     }
 
     func testTruncatedAndUnknownPCMFormatsFailActionably() throws {
@@ -61,48 +56,24 @@ final class ASRRegressionTests: XCTestCase {
         try sidecar.write(forAudio: sidecarAudio)
         XCTAssertEqual(PCMToWAV.inputFormat(forAudio: sidecarAudio, captureSampleRate: 16_000),
                        .unsupported(sampleFormat: "s24le"))
-        XCTAssertThrowsError(try PCMToWAV.prepare(audioPath: sidecarAudio, captureSampleRate: 16_000)) { error in
+        XCTAssertThrowsError(try ChannelReader.prepare(audioPath: sidecarAudio, captureSampleRate: 16_000,
+                                                       workDirectory: dir)) { error in
             XCTAssertTrue(error.localizedDescription.contains("s24le"))
         }
     }
 
-    func testWhisperCanonicalOutputDoesNotDuplicateLegacySegments() {
-        let json = #"{"transcription":[{"offsets":{"from":0,"to":1000},"text":"uno"}],"segments":[{"start":0,"end":1,"text":"uno"}]}"#
-        XCTAssertEqual(SegmentJSON.parseWhisper(Data(json.utf8)),
-                       [Segment(start: 0, end: 1, text: "uno")])
-    }
-
-    func testWhisperCLIRunsOnceAndTheCPUFallbackPassesNoGPU() async throws {
-        let dir = TestSupport.makeTempDir(self, "asr-cpu")
-        let argsLog = dir + "/args"
-        let fake = dir + "/fake-whisper"
-        TestSupport.writeExecutable("""
-            echo "$@" >> "\(argsLog)"
-            case "$*" in *--no-gpu*) ;; *) exit 7 ;; esac
-            out=""
-            previous=""
-            for arg in "$@"; do
-              if [ "$previous" = "-of" ]; then out="$arg.json"; fi
-              previous="$arg"
-            done
-            printf '%s' '{"transcription":[{"offsets":{"from":0,"to":1000},"text":"ok"}]}' > "$out"
-            """, to: fake)
-        let wav = URL(fileURLWithPath: dir + "/input.wav")
-        var data = PCMToWAV.header(dataSize: 2)
-        data.append(contentsOf: [0, 0])
-        try data.write(to: wav)
-        let cli = WhisperCLI(executable: fake)
-
-        do {
-            _ = try await cli.transcribe(wav: wav, modelPath: "m", language: "es", prompt: "",
-                                         vadModelPath: nil, threads: 1)
-            XCTFail("a GPU failure is reported, not retried in place")
-        } catch is ProcessRunnerError {}
-        let segments = try await cli.transcribe(wav: wav, modelPath: "m", language: "es", prompt: "",
-                                                vadModelPath: nil, useGPU: false, threads: 1)
-
-        XCTAssertEqual(segments, [Segment(start: 0, end: 1, text: "ok")])
-        let runs = try String(contentsOfFile: argsLog, encoding: .utf8).split(separator: "\n")
-        XCTAssertEqual(runs.count, 2, "exactly one process per call")
+    func testParakeetTokensBecomeTimedWords() {
+        func t(_ token: String, _ start: Double, _ end: Double) -> TokenTiming {
+            TokenTiming(token: token, tokenId: 0, startTime: start, endTime: end, confidence: 1)
+        }
+        let words = ParakeetEngine.words(from: [
+            t("▁Ho", 0.0, 0.2), t("la", 0.2, 0.4), t(",", 0.4, 0.45),
+            t("▁", 0.5, 0.5), t("CE", 0.6, 0.7), t("DEAR", 0.7, 0.9),
+            t(" mañana", 1.0, 1.4), t(".", 1.4, 1.5),
+        ])
+        XCTAssertEqual(words, [Segment(start: 0, end: 0.45, text: "Hola,"),
+                               Segment(start: 0.6, end: 0.9, text: "CEDEAR"),
+                               Segment(start: 1.0, end: 1.5, text: "mañana.")])
+        XCTAssertEqual(ParakeetEngine.words(from: []), [])
     }
 }

@@ -16,18 +16,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install whisper-cpp
-        run: brew install whisper-cpp
-
       - name: Build (release)
         run: swift build -c release
 
       - name: Unit tests
         run: swift test
-
-      - name: Mach-O packaging regression tests
-        if: matrix.os == 'macos-14'
-        run: python3 -m unittest discover -s tools/packaging -p 'test_*.py' -v
 
       - name: Bundle (staging)
         run: ./build.sh --staging-dir /tmp/mc-stage
@@ -65,8 +58,7 @@ jobs:
 
       - name: Python syntax and unit tests
         run: |
-          python3 -m py_compile scripts/*.py tools/asr/*.py tools/packaging/*.py tools/summary/*.py tools/legacy/*.py
-          python3 -m unittest discover -s tools/asr -p 'test_*.py' -v
+          python3 -m py_compile qa/*.py tools/summary/*.py tools/legacy/*.py
           python3 tools/summary/test_dispatcher.py
           python3 tools/summary/test_real_summary_check.py
           python3 tools/legacy/test_legacy_privacy_migration.py

@@ -7,9 +7,11 @@ MeetCapture is a native macOS menu-bar app for recording calls, transcribing
 them locally, and keeping the resulting meeting history on the Mac. It has no
 main window or Dock icon. Opening the app from Finder or Spotlight shows its
 controls below the menu-bar icon; later, click that icon to reopen them.
-Opening the app again while it is running also shows the controls. It is one native process when idle; live ASR and whole-file
-transcription start local child processes only when needed. Summary generation
-uses a separate Python dispatcher; its default MLX route is the local gateway at
+Opening the app again while it is running also shows the controls. It is one
+native process with no Python: transcription and speaker labels run in-process
+on the Neural Engine through [FluidAudio](https://github.com/FluidInference/FluidAudio),
+so they do not compete with a local LLM for the GPU. Summary generation uses a
+separate Python dispatcher; its default MLX route is the local gateway at
 `http://127.0.0.1:8080/v1`, unless you configure another endpoint.
 
 Website: https://meetcapture.maat.work
@@ -21,12 +23,15 @@ Website: https://meetcapture.maat.work
   left is system audio and right is the microphone; microphone-only mode
   carries the microphone on both channels.
 - **Transcript after the call.** There is no live transcription. After
-  capture, `whisper-cli` transcribes ~5 min chunks, GPU first and CPU as a
-  fallback, checkpointing each one so a timeout, crash or quit resumes
-  instead of starting over. The model is recorded in the handoff.
-- **Speaker labels.** Diarization is optional. When enabled and its models are
-  available, the segments receive speaker labels; missing labels remain
-  unassigned.
+  capture, each channel is transcribed separately with NVIDIA Parakeet TDT
+  0.6B in ~5 min chunks, checkpointed per channel so a crash or quit resumes
+  instead of starting over. Where the remote voice leaks from the speakers
+  into the microphone, a bleed gate mutes it before transcription. The model
+  is recorded in the handoff.
+- **Speaker labels.** The microphone channel is labeled `Gio`. With "Identificar
+  hablantes" on (macOS 15 or newer), the call channel is diarized into
+  `Participante 1`, `Participante 2`… by order of appearance; otherwise it is
+  one `Participante`. Transcript lines read `[Gio]: text`.
 - **Summaries.** The canonical dispatcher at
   `tools/summary/meetcapture_summary_dispatcher.py` consumes each `.pending`
   handoff and writes JSON, HTML and a portable Markdown note with decisions,
@@ -45,20 +50,17 @@ the summary dispatcher removes handoff audio after a successful summary unless
 
 ## Requirements
 
-- Apple Silicon Mac, macOS 14.4 or newer.
-- `whisper-cli` from `brew install whisper-cpp` for the Whisper engine.
+- Apple Silicon Mac, macOS 14.4 or newer; speaker diarization needs macOS 15.
+- Network once: the speech models (about 0.6 GB) download on first use to
+  `~/Library/Application Support/FluidAudio/`.
 - Permissions when requested: Microphone, Screen and System Audio Recording,
   Calendar, and Notifications. Calendar auto-recording is optional.
-- Optional diarization support: Python 3.11 with the packages
-  from `requirements.txt`, normally created by `scripts/setup-venv.sh`.
 
 ## Install
 
 ```bash
-brew install whisper-cpp
 git clone https://github.com/Gigisanta/MeetCapture.git
 cd MeetCapture
-./scripts/fetch-models.sh --whisper
 ./install.sh
 ```
 
@@ -71,24 +73,16 @@ zipped bundles in `~/meetings/.backups/` for manual recovery. Run `qa/app-smoke-
 real pipeline checks separately; a successful launch alone does not prove
 capture, transcription, import, SQLite publication, or summary delivery.
 
-Optional diarization setup:
-
-```bash
-./scripts/setup-venv.sh
-./scripts/fetch-models.sh --diarization
-```
-
-The app resolves the interpreter and scripts through Settings, config,
-environment, the per-user venv, and the bundle. Settings › ASR shows the
-selected toolchain.
-
 ## Configuration
 
 Personal configuration stays outside the repository in `~/.meetcapture/`:
 
 - `config.json` (see `Resources/config.example.json`) contains
-  `whitelistedEmails`, `domainPrompt`, and optional `python` and
-  `scriptsDir`. Settings › Calendario opens it.
+  `whitelistedEmails` and optional `aliases`, which map a canonical spelling
+  to what the recognizer writes instead, for example
+  `{"AppSheet": ["app sheet"], "CEDEAR": ["cedear", "sedear"]}`. Aliases
+  replace whole words, ignore case, and apply to the merged transcript.
+  Settings › Calendario opens it.
 - `summary.json` contains `endpoint`, `api_key`, `model`, `max_tokens`,
   `keep_audio`, `dry_run`, and optional `tag_vocabulary_dir`. Settings › Resumen
   edits it. When a Markdown notes directory is configured, the dispatcher
@@ -96,8 +90,9 @@ Personal configuration stays outside the repository in `~/.meetcapture/`:
   the directory contents are not copied to the summary endpoint. Keep any real
   credential there; never put it in the repository or a test fixture.
 
-Models are downloaded by the operator and are never bundled from this
-repository. The model licenses are listed with the download helpers.
+Models are downloaded at runtime and are never bundled from this repository.
+Their licenses and the required attribution are in
+[`docs/THIRD_PARTY.md`](docs/THIRD_PARTY.md).
 
 ## Summaries
 
@@ -201,11 +196,10 @@ separate QA bundle with CUA. The interface is:
 - The import case exercises two imports and one re-transcription through real
   AppState, SQLite, and `.pending` publication.
 - The capture case exercises AppState, AV/Core Audio, `afplay`, a real PCM
-  recording with its format sidecar, conversion to an isolated WAV for CPU
-  Whisper, and CPU Whisper itself. Set `MEETCAPTURE_WHISPER_CPU_ONLY=1` for
-  this check. Diarization and live ASR are explicitly disabled here; streaming
-  ASR is checked separately. If microphone permission blocks the run, classify
-  it as exit `77` and do not claim a real-call result.
+  recording with its format sidecar, the per-channel WAV split, and Parakeet
+  itself. The models must already be downloaded or the first run needs
+  network. Diarization is explicitly disabled here. If microphone permission
+  blocks the run, classify it as exit `77` and do not claim a real-call result.
 - The `ui` case opens `PopoverContent` with real `AppState`, real engines,
   isolated history, and volatile settings, with `allowsSettings:false` so
   `SettingsView` cannot read or write normal preferences. CUA exercises the
@@ -245,17 +239,18 @@ See [`qa/README.md`](qa/README.md) for the current check matrix and
    before reinstalling with `./install.sh`; the installer refuses to replace
    a running bundle. On macOS 26, run the strict hosted-icon smoke check above
    to separate an on-screen item from an AppKit-only proxy.
-2. **No transcript, `whisper-cli not found`.** Install `whisper-cpp` and
-   rebuild; the bundle includes the CLI when it is available during build.
-3. **Model not found.** Run `./scripts/fetch-models.sh --whisper` and check
-   the model directory shown in Settings › ASR.
-4. **Speakers are unassigned.** Fetch the diarization models and enable
-   speaker labels in Settings › ASR.
-5. **A handoff remains in retry or failed state.** Inspect the endpoint in
+2. **No transcript on the first meeting.** The speech models download on first
+   use; a failed download keeps the audio. Check the network: recent
+   recordings are retried at the next launch, older ones with "Transcribir".
+3. **Everyone on the call is one `Participante`.** Enable "Identificar
+   hablantes" in Settings › ASR. Diarization is skipped on macOS 14.
+4. **A handoff remains in retry or failed state.** Inspect the endpoint in
    `~/.meetcapture/summary.json` and the private summary log; use
    `--retry-failed` only after fixing the underlying cause.
-6. **The left channel is silent.** Grant Screen and System Audio Recording in
+5. **The left channel is silent.** Grant Screen and System Audio Recording in
    System Settings › Privacy and restart the app; the process tap requires it.
+   A meeting whose system channel stayed silent is transcribed from the
+   microphone alone.
 
 ## License
 

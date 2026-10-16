@@ -46,7 +46,6 @@ public enum RealPipelineCheck {
             // Highest-priority volatile domain: no user's saved preferences are
             // changed, and every operational setting is explicit for this run.
             var settings = Settings.defaults
-            settings[Settings.Key.asrModel.rawValue] = "medium-q5_0"
             settings[Settings.Key.asrLanguage.rawValue] = env["MEETCAPTURE_CHECK_LANGUAGE"] ?? "es"
             settings[Settings.Key.notifyHermes.rawValue] = false
             settings[Settings.Key.autoRecord.rawValue] = false

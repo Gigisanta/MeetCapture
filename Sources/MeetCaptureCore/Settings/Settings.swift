@@ -11,11 +11,8 @@ enum Settings {
         case notifyHermes
         case retention
         case maxRecordingDuration
-        case asrModel
         case asrLanguage
         case diarize
-        case sherpaPythonPath
-        case scriptsDir
         case micOnlyMode
         case inputDeviceUID
     }
@@ -26,11 +23,8 @@ enum Settings {
         /// A day to retranscribe (a better engine, a gap) before the audio goes.
         static let retention = RetentionPolicy.keep24h
         static let maxRecordingDuration: Double = 10_800
-        static let asrModel = "medium-q5_0"
         static let asrLanguage = "es"
         static let diarize = true
-        static let sherpaPythonPath = ""
-        static let scriptsDir = ""
         static let micOnlyMode = false
         static let inputDeviceUID = ""
     }
@@ -41,11 +35,8 @@ enum Settings {
             Key.notifyHermes.rawValue: Default.notifyHermes,
             Key.retention.rawValue: Default.retention.rawValue,
             Key.maxRecordingDuration.rawValue: Default.maxRecordingDuration,
-            Key.asrModel.rawValue: Default.asrModel,
             Key.asrLanguage.rawValue: Default.asrLanguage,
             Key.diarize.rawValue: Default.diarize,
-            Key.sherpaPythonPath.rawValue: Default.sherpaPythonPath,
-            Key.scriptsDir.rawValue: Default.scriptsDir,
             Key.micOnlyMode.rawValue: Default.micOnlyMode,
             Key.inputDeviceUID.rawValue: Default.inputDeviceUID,
         ]
@@ -81,26 +72,9 @@ enum Settings {
         return min(max(value, 1_800), 28_800)
     }
 
-    /// Model as typed in Settings; empty or a retired sherpa model id
-    /// falls back to the default.
-    static var asrModel: String {
-        let value = string(.asrModel, default: "")
-        return value.isEmpty || value.hasPrefix("zipformer-") ? Default.asrModel : value
-    }
-
     static var asrLanguage: String {
         let value = string(.asrLanguage, default: Default.asrLanguage)
         return value.isEmpty ? Default.asrLanguage : value
-    }
-
-    static var sherpaPythonPath: String? {
-        let value = string(.sherpaPythonPath, default: "")
-        return value.isEmpty ? nil : value
-    }
-
-    static var scriptsDir: String? {
-        let value = string(.scriptsDir, default: "")
-        return value.isEmpty ? nil : value
     }
 
     static var inputDeviceUID: String? {

@@ -8,7 +8,7 @@ whole system healthy.
 | Script | Evidence | Needs | Does not prove |
 | --- | --- | --- | --- |
 | `installer-test.sh` | Disposable installer fixtures for clean install, replacement, rollback and refusal to replace a running bundle. | macOS shell tools and a temporary directory | Real capture, ASR or the user's production installation. |
-| `app-smoke-test.sh` | The selected bundle's files, signature, version, bundled CLI/resources, isolated render, and process liveness. Its guarded `/tmp` LaunchServices probe checks status-button, popover click and Finder reopen. With `MEETCAPTURE_REQUIRE_HOSTED_ICON=1`, it additionally requires a new on-screen Control Center window aligned with the status button on macOS 26. | a built `.app` and a graphical macOS session; for strict mode, close any other MeetCapture instance first | Visibility on every display or Space, operational startup, permissions, capture, transcription, SQLite, `.pending`, or summary delivery. The probe constructs `AppState` but skips services. |
+| `app-smoke-test.sh` | The selected bundle's files, signature, version, bundled resources, isolated render, and process liveness. Its guarded `/tmp` LaunchServices probe checks status-button, popover click and Finder reopen. With `MEETCAPTURE_REQUIRE_HOSTED_ICON=1`, it additionally requires a new on-screen Control Center window aligned with the status button on macOS 26. | a built `.app` and a graphical macOS session; for strict mode, close any other MeetCapture instance first | Visibility on every display or Space, operational startup, permissions, capture, transcription, SQLite, `.pending`, or summary delivery. The probe constructs `AppState` but skips services. |
 | `capture-selftest.sh` | The QA wrapper for the real `import` and `capture` contract below. | a built `.app`, disposable output directory, WAV and platform prerequisites | A WER result unless the wrapper's reference check also passes; UI and diarization are separate checks. |
 | `gen_test_corpus.sh` | A disposable two-speaker WAV and reference text generated with macOS voices. | macOS voices and `afconvert` | A real app recording or a production microphone path. |
 | `visual-test.sh` | A screenshot of the normal popover, or a headless synthetic render with `--headless`. | a built `.app`; Accessibility for interactive mode | Functional state transitions. The headless path uses `PopoverSnapshot` and synthetic state. |
@@ -89,8 +89,8 @@ variables and acceptance behavior are fixed:
   AppState, SQLite, and `.pending` publication. The input is the known WAV.
 - `capture` runs AppState with AV/Core Audio, plays the known WAV through
   `afplay`, records raw PCM plus its format sidecar, converts that capture to
-  an isolated WAV, and runs real Whisper on CPU. Set
-  `MEETCAPTURE_WHISPER_CPU_ONLY=1` explicitly. Setting
+  isolated channel WAVs, and transcribes them with Parakeet; the models must
+  be downloaded already or the first run needs network. Setting
   `MEETCAPTURE_CHECK_MIC_ONLY=1` selects the microphone-only branch and the
   report records `micOnly: true`; the default is `false`, so the normal
   contract remains microphone plus system audio. Diarization is disabled for
@@ -118,6 +118,6 @@ used as a replacement. An error must not be reported as a successful check.
 Fixture counts do not establish system health; current local evidence and
 pending hardware/ASR limits are recorded in `CHANGELOG.md`.
 
-If real Whisper produces no segments, the harness must exit `1`, publish no
+If real transcription produces no segments, the harness must exit `1`, publish no
 `.pending` handoff, and retain the input audio. That state is a failed check,
 not a passing counter.

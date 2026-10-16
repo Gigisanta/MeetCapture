@@ -22,7 +22,7 @@ final class AppStateRegressionTests: XCTestCase {
             recordingDriver: backend.driver,
             transcriptionRunner: { _, _ in
                 TranscriptionJob.Outcome(segments: [Segment(start: 0, end: 1, text: "Hablamos del plan")],
-                                         engineUsed: .whisper, modelUsed: "fixture")
+                                         engineUsed: .parakeet, modelUsed: "fixture")
             })
         state.startRecording()
         try await waitUntil { backend.isRecording }
@@ -61,7 +61,7 @@ final class AppStateRegressionTests: XCTestCase {
                 progress(1)
                 return TranscriptionJob.Outcome(
                     segments: [Segment(start: 0, end: 1, text: "audio entregado", speaker: "A")],
-                    engineUsed: .whisper, modelUsed: "fixture")
+                    engineUsed: .parakeet, modelUsed: "fixture")
             })
 
         appState.startRecording()
@@ -168,7 +168,7 @@ final class AppStateRegressionTests: XCTestCase {
                 transcriptions.increment()
                 return TranscriptionJob.Outcome(
                     segments: [Segment(start: 0, end: 1, text: "no debe publicarse")],
-                    engineUsed: .whisper, modelUsed: "fixture")
+                    engineUsed: .parakeet, modelUsed: "fixture")
             },
             errorDismissalDelay: 300)
 
@@ -264,7 +264,7 @@ final class AppStateRegressionTests: XCTestCase {
         }
         let appState = AppState(paths: paths, store: store, transcriptionRunner: { _, _ in
             TranscriptionJob.Outcome(segments: [Segment(start: 0, end: 1, text: "fixture")],
-                                     engineUsed: .whisper, modelUsed: "fixture")
+                                     engineUsed: .parakeet, modelUsed: "fixture")
         })
         appState.lastAudioPath = audio
         appState.errorMessage = "previous transcription failed"
@@ -291,7 +291,7 @@ final class AppStateRegressionTests: XCTestCase {
         defer { defaults.setVolatileDomain(previous, forName: UserDefaults.argumentDomain) }
         let appState = AppState(paths: paths, store: store, transcriptionRunner: { _, _ in
             TranscriptionJob.Outcome(segments: [Segment(start: 0, end: 1, text: "recovered")],
-                                     engineUsed: .whisper, modelUsed: "fixture", audioDurationSec: 1)
+                                     engineUsed: .parakeet, modelUsed: "fixture", audioDurationSec: 1)
         }, errorDismissalDelay: 300)
         await appState.importAudio(url: URL(fileURLWithPath: outputDir + "/missing.wav"))
         XCTAssertNotNil(appState.errorMessage)
@@ -319,7 +319,7 @@ final class AppStateRegressionTests: XCTestCase {
             recordingDriver: backend.driver,
             transcriptionRunner: { _, _ in
                 await MainActor.run { transcriptions += 1 }
-                return TranscriptionJob.Outcome(segments: [], engineUsed: .whisper, modelUsed: "fixture")
+                return TranscriptionJob.Outcome(segments: [], engineUsed: .parakeet, modelUsed: "fixture")
             })
         state.startRecording()
         try await waitUntil { backend.isRecording }
@@ -347,7 +347,7 @@ final class AppStateRegressionTests: XCTestCase {
             transcriptionRunner: { job, _ in
                 XCTAssertEqual(job.audioPath, orphan)
                 return TranscriptionJob.Outcome(segments: [Segment(start: 0, end: 1, text: "Recuperado")],
-                                                engineUsed: .whisper, modelUsed: "fixture")
+                                                engineUsed: .parakeet, modelUsed: "fixture")
             })
 
         state.recoverRecordings(automaticOnly: true)

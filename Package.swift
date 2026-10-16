@@ -22,9 +22,16 @@ let package = Package(
         .executable(name: "MeetCapture", targets: ["MeetCapture"]),
         .library(name: "MeetCaptureCore", targets: ["MeetCaptureCore"]),
     ],
+    dependencies: [
+        // Parakeet ASR + offline diarization on the ANE. Pinned by revision:
+        // no tagged release (latest v0.9.1) has the Parakeet ultra model.
+        .package(url: "https://github.com/FluidInference/FluidAudio.git",
+                 revision: "bd11ac8da17a944a7291a2c76e9a172eb275f629"),
+    ],
     targets: [
         .target(
             name: "MeetCaptureCore",
+            dependencies: [.product(name: "FluidAudio", package: "FluidAudio")],
             path: "Sources/MeetCaptureCore",
             swiftSettings: strictConcurrency,
             linkerSettings: [.linkedLibrary("sqlite3")]

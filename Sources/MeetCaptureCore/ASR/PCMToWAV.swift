@@ -1,7 +1,7 @@
 // PCMToWAV.swift
-// Converts a raw capture (.pcm + sidecar) or any PCM stream to the
-// 16 kHz mono int16 WAV every engine consumes. Streaming, 64 KB chunks,
-// header patched after the data so the length is always right.
+// Converts a raw capture (.pcm + sidecar) into one 16 kHz mono int16 WAV per
+// channel. Streaming, 64 KB chunks, header patched after the data so the
+// length is always right.
 
 import AVFoundation
 import Foundation
@@ -10,7 +10,7 @@ enum PCMToWAV {
     static let targetSampleRate = 16_000
     static let headerSize = 44
     /// RIFF's 32-bit chunk size includes 36 bytes beyond the PCM data.
-    private static let maxWAVSamples = Int((UInt32.max - 36) / 2)
+    static let maxWAVSamples = Int((UInt32.max - 36) / 2)
 
     enum InputFormat: Equatable, Sendable {
         case float32Mono(sampleRate: Int)
@@ -33,18 +33,6 @@ enum PCMToWAV {
             case .tooLarge: return "El audio supera el tamaño máximo de un WAV"
             }
         }
-    }
-
-    static func makeTempURL() -> URL {
-        FileManager.default.temporaryDirectory
-            .appendingPathComponent("meetcapture-whole-\(UUID().uuidString).wav")
-    }
-
-    /// Mixes the system (L) and mic (R) channels by summing with a clamp.
-    /// Averaging halved each voice (−6 dB), which is all whisper gets when
-    /// the other channel is silent — the usual case in a call.
-    static func mix(_ left: Int16, _ right: Int16) -> Int16 {
-        Int16(clamping: Int32(left) + Int32(right))
     }
 
     /// Format of a capture file: sidecar when present, else the legacy float32 mono at `captureSampleRate`.
@@ -87,117 +75,100 @@ enum PCMToWAV {
         return try? AVAudioFile(forReading: url)
     }
 
-    /// Returns the input itself when it is already a 16k mono WAV, otherwise
-    /// a fresh temp WAV (caller removes it with `cleanup`).
-    static func prepare(audioPath: String, captureSampleRate: Double) throws -> URL {
-        if is16kMonoWAV(audioPath) { return URL(fileURLWithPath: audioPath) }
-        let out = makeTempURL()
-        do {
-            try convert(inputPath: audioPath,
-                        format: inputFormat(forAudio: audioPath, captureSampleRate: captureSampleRate),
-                        outputURL: out)
-        } catch {
-            try? FileManager.default.removeItem(at: out)
-            throw error
+    /// First channel only; see `convert(inputPath:format:outputURLs:)`.
+    @discardableResult
+    static func convert(inputPath: String, format: InputFormat, outputURL: URL) throws -> [Int] {
+        try convert(inputPath: inputPath, format: format, outputURLs: [outputURL])
+    }
+
+    /// Streams channel i of the input into `outputURLs[i]` as a 16 kHz mono
+    /// int16 WAV (mono input fills only the first) and returns each output's
+    /// peak |sample|. Channels are never mixed: L and R carry different people.
+    @discardableResult
+    static func convert(inputPath: String, format: InputFormat, outputURLs: [URL]) throws -> [Int] {
+        let channels: Int, sampleRate: Int, isFloat: Bool
+        switch format {
+        case .float32Mono(let rate): channels = 1; sampleRate = rate; isFloat = true
+        case .int16Interleaved(let count, let rate):
+            guard count > 0 else { throw ConversionError.invalidChannels }
+            channels = count; sampleRate = rate; isFloat = false
+        case .unsupported(let sampleFormat): throw ConversionError.unsupportedFormat(sampleFormat)
         }
-        return out
-    }
+        let outputs = Array(outputURLs.prefix(channels))
+        guard !outputs.isEmpty else { throw ConversionError.invalidChannels }
 
-    static func cleanup(_ wavURL: URL, original: String) {
-        guard wavURL.path != original else { return }
-        try? FileManager.default.removeItem(at: wavURL)
-    }
-
-    static func convert(inputPath: String, format: InputFormat, outputURL: URL) throws {
         let input = try FileHandle(forReadingFrom: URL(fileURLWithPath: inputPath))
         defer { try? input.close() }
+        var resamplers = try outputs.map { _ in try StreamingLinearResampler(sourceRate: sampleRate) }
+        var writers = try outputs.map { try WAVWriter(url: $0) }
+        defer { for writer in writers { try? writer.handle.close() } }
 
-        FileManager.default.createFile(atPath: outputURL.path, contents: nil)
-        let output = try FileHandle(forWritingTo: outputURL)
-        defer { try? output.close() }
-        try output.write(contentsOf: header(dataSize: 0))
-
-        let chunkBytes = 64 * 1024
-        var samplesWritten = 0
-        func emit(_ samples: [Int16]) throws {
-            guard !samples.isEmpty else { return }
-            guard samples.count <= maxWAVSamples - samplesWritten else {
-                throw ConversionError.tooLarge
+        let sampleBytes = isFloat ? MemoryLayout<Float>.size : MemoryLayout<Int16>.size
+        let frameBytes = channels * sampleBytes
+        var remainder = Data()
+        while true {
+            try Task.checkCancellation()
+            let next = try input.read(upToCount: 64 * 1024) ?? Data()
+            if next.isEmpty { break }
+            remainder.append(next)
+            let frames = remainder.count / frameBytes
+            guard frames > 0 else { continue }
+            var values = outputs.map { _ in [Float]() }
+            for c in values.indices { values[c].reserveCapacity(frames) }
+            try remainder.withUnsafeBytes { raw in
+                for frame in 0..<frames {
+                    for c in outputs.indices {
+                        let offset = frame * frameBytes + c * sampleBytes
+                        if isFloat {
+                            let bits = UInt32(littleEndian: raw.loadUnaligned(fromByteOffset: offset, as: UInt32.self))
+                            let value = Float(bitPattern: bits) * 32767
+                            guard value.isFinite else { throw ConversionError.invalidData }
+                            values[c].append(value)
+                        } else {
+                            values[c].append(Float(Int16(littleEndian: raw.loadUnaligned(
+                                fromByteOffset: offset, as: Int16.self))))
+                        }
+                    }
+                }
             }
-            try output.write(contentsOf: samples.withUnsafeBytes { Data($0) })
+            remainder.removeFirst(frames * frameBytes)
+            for c in outputs.indices { try writers[c].write(resamplers[c].append(values[c])) }
+        }
+        guard remainder.isEmpty else { throw ConversionError.invalidData }
+        for c in outputs.indices {
+            try writers[c].write(resamplers[c].finish())
+            try writers[c].finish()
+        }
+        return writers.map(\.peak)
+    }
+
+    /// Streaming 16 kHz mono WAV: header patched once the length is known.
+    private struct WAVWriter {
+        let handle: FileHandle
+        var samplesWritten = 0
+        var peak = 0
+
+        init(url: URL) throws {
+            FileManager.default.createFile(atPath: url.path, contents: nil)
+            handle = try FileHandle(forWritingTo: url)
+            try handle.write(contentsOf: PCMToWAV.header(dataSize: 0))
+        }
+
+        mutating func write(_ samples: [Int16]) throws {
+            guard !samples.isEmpty else { return }
+            guard samples.count <= PCMToWAV.maxWAVSamples - samplesWritten else { throw ConversionError.tooLarge }
+            for sample in samples { peak = max(peak, abs(Int(sample))) }
+            try handle.write(contentsOf: samples.withUnsafeBytes { Data($0) })
             samplesWritten += samples.count
         }
 
-        switch format {
-        case .float32Mono(let sampleRate):
-            var resampler = try StreamingLinearResampler(sourceRate: sampleRate)
-            var remainder = Data()
-            while true {
-                try Task.checkCancellation()
-                let chunk = try input.read(upToCount: chunkBytes) ?? Data()
-                if chunk.isEmpty { break }
-                remainder.append(chunk)
-                let count = remainder.count / MemoryLayout<Float>.size
-                guard count > 0 else { continue }
-                var values = [Float](); values.reserveCapacity(count)
-                try remainder.withUnsafeBytes { raw in
-                    for i in 0..<count {
-                        let bits = UInt32(littleEndian: raw.loadUnaligned(
-                            fromByteOffset: i * MemoryLayout<Float>.size, as: UInt32.self))
-                        let value = Float(bitPattern: bits) * 32767
-                        guard value.isFinite else { throw ConversionError.invalidData }
-                        values.append(value)
-                    }
-                }
-                remainder.removeFirst(count * MemoryLayout<Float>.size)
-                try emit(resampler.append(values))
-            }
-            guard remainder.isEmpty else { throw ConversionError.invalidData }
-            try emit(resampler.finish())
-
-        case .int16Interleaved(let channels, let sampleRate):
-            guard channels > 0 else { throw ConversionError.invalidChannels }
-            var resampler = try StreamingLinearResampler(sourceRate: sampleRate)
-            let frameBytes = channels * MemoryLayout<Int16>.size
-            var remainder = Data()
-            while true {
-                try Task.checkCancellation()
-                let next = try input.read(upToCount: chunkBytes) ?? Data()
-                if next.isEmpty && remainder.isEmpty { break }
-                remainder.append(next)
-                let frames = remainder.count / frameBytes
-                if frames > 0 {
-                    var values = [Float](); values.reserveCapacity(frames)
-                    remainder.withUnsafeBytes { raw in
-                        for frame in 0..<frames {
-                            let offset = frame * frameBytes
-                            let left = Int32(Int16(littleEndian: raw.loadUnaligned(
-                                fromByteOffset: offset, as: Int16.self)))
-                            let right = channels > 1
-                                ? Int32(Int16(littleEndian: raw.loadUnaligned(
-                                    fromByteOffset: offset + 2, as: Int16.self)))
-                                : left
-                            values.append(Float(channels > 1 ? Int32(mix(Int16(left), Int16(right))) : left))
-                        }
-                    }
-                    remainder.removeFirst(frames * frameBytes)
-                    try emit(resampler.append(values))
-                }
-                if next.isEmpty { break }
-            }
-            guard remainder.isEmpty else { throw ConversionError.invalidData }
-            try emit(resampler.finish())
-
-        case .unsupported(let sampleFormat):
-            throw ConversionError.unsupportedFormat(sampleFormat)
+        func finish() throws {
+            let dataSize = UInt32(samplesWritten * 2)
+            try handle.seek(toOffset: 0)
+            try handle.write(contentsOf: PCMToWAV.header(dataSize: dataSize))
+            try handle.truncate(atOffset: UInt64(PCMToWAV.headerSize) + UInt64(dataSize))
+            try handle.synchronize()
         }
-
-        guard samplesWritten <= maxWAVSamples else { throw ConversionError.tooLarge }
-        let dataSize = UInt32(samplesWritten * 2)
-        try output.seek(toOffset: 0)
-        try output.write(contentsOf: header(dataSize: dataSize))
-        try output.truncate(atOffset: UInt64(headerSize) + UInt64(dataSize))
-        try output.synchronize()
     }
 
     private struct StreamingLinearResampler {

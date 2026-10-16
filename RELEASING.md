@@ -25,7 +25,7 @@
    requires a new on-screen Control Center window aligned with the button.
    The graphical check below still covers each display and Space in use.
    It does not establish real capture, import, operational AppState, SQLite,
-   `.pending`, Whisper, or summary behavior. CI also runs shell/Python syntax
+   `.pending`, transcription, or summary behavior. CI also runs shell/Python syntax
    and repository hygiene checks; those checks do not replace the real
    pipeline harness.
 
@@ -50,8 +50,10 @@
    MEETCAPTURE_CHECK_INPUT=<WAV>
    MEETCAPTURE_CHECK_REPORT=<JSON inside TEST_OUTPUT_DIR>
    MEETCAPTURE_CHECK_MIC_ONLY=1  # optional capture branch; default false
-   MEETCAPTURE_WHISPER_CPU_ONLY=1  # capture mode
    ```
+
+   Both modes transcribe with Parakeet. Download the models beforehand (any
+   normal transcription does it) or allow network on the first run.
 
    Set `MEETCAPTURE_CHECK_MIC_ONLY=1` only when checking the microphone-only
    diagnostic branch; the resulting report must say `micOnly:true`. It does
@@ -82,9 +84,8 @@
    `import` must cover two imports and one re-transcription through real
    AppState, SQLite, and `.pending` publication. `capture` must use AppState,
    AV/Core Audio, `afplay`, a real PCM recording plus format sidecar, convert
-   that recording to an isolated WAV for CPU Whisper, and run CPU Whisper.
-   Diarization and live ASR are explicitly disabled for this check; streaming
-   ASR has its own evidence. `ui` must open `PopoverContent` with real AppState,
+   that recording into isolated channel WAVs, and transcribe them with
+   Parakeet. Diarization is explicitly disabled for this check. `ui` must open `PopoverContent` with real AppState,
    real engines, isolated history, and volatile settings with
    `allowsSettings:false`; CUA exercises known-WAV import through
    `NSOpenPanel`, re-transcription, search matches/non-matches, and error

@@ -79,7 +79,6 @@ final class AppState: ObservableObject {
             }
         }
     }
-    @Published var toolchain: Toolchain = .unavailable
     @Published private(set) var recordingOrigin: RecordingOrigin?
     @Published private(set) var isStartingRecording = false
     /// A channel of the current capture that has delivered only digital
@@ -159,7 +158,6 @@ final class AppState: ObservableObject {
         callDetector.start()
         Retention.cleanupOldRecordings(in: paths.transcriptsDir, policy: Settings.retention)
         refreshHistory()
-        await refreshToolchain()
         recoverRecordings(automaticOnly: true)
     }
 
@@ -207,11 +205,6 @@ final class AppState: ObservableObject {
                 if granted, let origin { self.startRecording(origin: origin) }
             }
         }
-    }
-
-    /// Re-resolves python + scripts (Settings › ASR changes, startup).
-    func refreshToolchain() async {
-        toolchain = await ToolchainResolver.validated(ToolchainResolver.resolve())
     }
 
     // MARK: - Recording
@@ -351,19 +344,21 @@ final class AppState: ObservableObject {
 
     // MARK: - Transcription
 
+    private func makeJob(audioPath: String, captureSampleRate: Double) -> TranscriptionJob {
+        TranscriptionJob(audioPath: audioPath, captureSampleRate: captureSampleRate,
+                         language: Settings.asrLanguage, diarize: Settings.diarize,
+                         aliases: LocalConfig.load(path: paths.configFile).aliases)
+    }
+
     private func transcribe(session: MeetingSession, audioPath: String, durableAudioPath: String,
                             transcriptPath: String, applyRetention: Bool) async {
         errorMessage = nil
         phase = .transcribing
         transcriptionProgress = 0
-        let prompt = LocalConfig.load(path: paths.configFile).domainPrompt ?? WhisperCLI.defaultPrompt
-        let job = TranscriptionJob(
-            audioPath: audioPath, captureSampleRate: recordingDriver.currentSampleRate(),
-            model: Settings.asrModel, language: Settings.asrLanguage,
-            diarize: Settings.diarize, prompt: prompt, toolchain: toolchain)
+        let job = makeJob(audioPath: audioPath, captureSampleRate: recordingDriver.currentSampleRate())
         let input = PostProcessInput(
             session: session, segments: [], transcriptPath: transcriptPath, capturePath: audioPath,
-            durableAudioPath: durableAudioPath, engine: .whisper, model: Settings.asrModel,
+            durableAudioPath: durableAudioPath, engine: .parakeet, model: ParakeetEngine.modelName,
             language: Settings.asrLanguage, applyRetention: applyRetention,
             retention: Settings.retention, meetingsDir: paths.meetingsDir,
             audioEndedAt: applyRetention ? RecordingRecovery.modificationDate(audioPath) : Date())
@@ -477,7 +472,7 @@ final class AppState: ObservableObject {
         recoveryTask = Task { @MainActor [weak self] in
             guard let self else { return }
             for recording in targets where !Task.isCancelled {
-                // One whisper at a time: wait for the foreground job.
+                // One job at a time: wait for the foreground one.
                 while self.phase == .transcribing, !Task.isCancelled {
                     try? await Task.sleep(nanoseconds: 2_000_000_000)
                 }
@@ -498,11 +493,7 @@ final class AppState: ObservableObject {
         // Count the attempt up front so a crash mid-job also counts.
         RecordingRecovery.recordFailure(audioPath: recording.audioPath, reason: "attempt started")
         let session = MeetingSession(startedAt: recording.startedAt, title: Strings.recoveredRecording)
-        let prompt = LocalConfig.load(path: paths.configFile).domainPrompt ?? WhisperCLI.defaultPrompt
-        let job = TranscriptionJob(
-            audioPath: recording.audioPath, captureSampleRate: 16_000,
-            model: Settings.asrModel, language: Settings.asrLanguage,
-            diarize: Settings.diarize, prompt: prompt, toolchain: toolchain)
+        let job = makeJob(audioPath: recording.audioPath, captureSampleRate: 16_000)
         do {
             let outcome = try await transcriptionRunner(job) { _ in }
             let input = PostProcessInput(

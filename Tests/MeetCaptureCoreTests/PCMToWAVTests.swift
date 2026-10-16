@@ -18,14 +18,6 @@ final class PCMToWAVTests: XCTestCase {
         XCTAssertFalse(PCMToWAV.is16kMonoWAV(dir + "/invalid.wav"))
         XCTAssertEqual(PCMToWAV.wavDurationSeconds(dir + "/invalid.wav"), 0)
 }
-    func testTempURLsAreUniqueAndInterpolated() {
-        let a = PCMToWAV.makeTempURL(), b = PCMToWAV.makeTempURL()
-        XCTAssertNotEqual(a, b)
-        XCTAssertFalse(a.lastPathComponent.contains("\\("), "UUID must be interpolated, not escaped")
-        XCTAssertTrue(a.lastPathComponent.hasPrefix("meetcapture-whole-"))
-        XCTAssertEqual(a.pathExtension, "wav")
-    }
-
     func testFloat32MonoIsResampledTo16kInt16WithValidHeader() throws {
         let dir = TestSupport.makeTempDir(self, "wav")
         let input = dir + "/in.pcm"
@@ -47,19 +39,23 @@ final class PCMToWAVTests: XCTestCase {
         XCTAssertEqual(dataSize, 32_000, "data chunk size must be patched after streaming")
     }
 
-    func testInt16StereoIsSummedToMono() throws {
+    func testInt16StereoIsSplitIntoOneWAVPerChannel() throws {
         let dir = TestSupport.makeTempDir(self, "wav2")
         let input = dir + "/in.pcm"
-        // 10 frames at 16 kHz: L = 1000, R = 3000 → mono 4000 (sum, not average).
+        // 10 frames at 16 kHz: L = 1000, R = 3000. L and R are different people: never mixed.
         var frames = [Int16]()
-        for _ in 0..<10 { frames += [1000, 3000] }
+        for _ in 0..<10 { frames += [1000, -3000] }
         try frames.withUnsafeBufferPointer { Data(buffer: $0) }.write(to: URL(fileURLWithPath: input))
-        let out = URL(fileURLWithPath: dir + "/out.wav")
-        try PCMToWAV.convert(inputPath: input, format: .int16Interleaved(channels: 2, sampleRate: 16_000), outputURL: out)
-        let data = try Data(contentsOf: out)
-        let mono = data.dropFirst(PCMToWAV.headerSize).withUnsafeBytes { Array($0.bindMemory(to: Int16.self)) }
-        XCTAssertEqual(mono.count, 10)
-        XCTAssertEqual(Set(mono), [4000])
+        let outs = [URL(fileURLWithPath: dir + "/l.wav"), URL(fileURLWithPath: dir + "/r.wav")]
+        let peaks = try PCMToWAV.convert(inputPath: input, format: .int16Interleaved(channels: 2, sampleRate: 16_000),
+                                         outputURLs: outs)
+        XCTAssertEqual(peaks, [1000, 3000])
+        for (out, value) in zip(outs, [Int16(1000), -3000]) {
+            let data = try Data(contentsOf: out)
+            let mono = data.dropFirst(PCMToWAV.headerSize).withUnsafeBytes { Array($0.bindMemory(to: Int16.self)) }
+            XCTAssertEqual(mono.count, 10)
+            XCTAssertEqual(Set(mono), [value])
+        }
     }
 
     func testSidecarSelectsInputFormat() throws {
@@ -73,18 +69,6 @@ final class PCMToWAVTests: XCTestCase {
         let sidecar = try XCTUnwrap(AudioFormatSidecar.read(forAudio: audio))
         XCTAssertEqual(sidecar.schema, AudioFormatSidecar.currentSchema)
         XCTAssertEqual(AudioFormatSidecar.path(forAudio: audio), audio + ".format.json")
-    }
-
-    func testPrepareReturnsOriginalFor16kWAVAndCleanupKeepsIt() throws {
-        let dir = TestSupport.makeTempDir(self, "prep")
-        let wav = dir + "/a.wav"
-        var data = PCMToWAV.header(dataSize: 4)
-        data.append(contentsOf: [0, 0, 0, 0])
-        try data.write(to: URL(fileURLWithPath: wav))
-        let url = try PCMToWAV.prepare(audioPath: wav, captureSampleRate: 48_000)
-        XCTAssertEqual(url.path, wav)
-        PCMToWAV.cleanup(url, original: wav)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: wav), "passthrough input must not be deleted")
     }
 
     func testStreamingResamplerPreservesBaselinePCMBytes() throws {
@@ -108,21 +92,27 @@ final class PCMToWAVTests: XCTestCase {
         }
         try frames.withUnsafeBufferPointer { Data(buffer: $0) }
             .write(to: URL(fileURLWithPath: int16Input))
-        let int16Output = URL(fileURLWithPath: dir + "/stereo.wav")
+        let split = [URL(fileURLWithPath: dir + "/l.wav"), URL(fileURLWithPath: dir + "/r.wav")]
         try PCMToWAV.convert(inputPath: int16Input,
                              format: .int16Interleaved(channels: 2, sampleRate: 48_000),
-                             outputURL: int16Output)
+                             outputURLs: split)
 
-        let cases: [(URL, String)] = [
-            (floatOutput, "93ae88b5c07ab708e40b9329242e216b0cb95b60973d780bdb0beedcaa6467af"),
-            (int16Output, "ef9a7b7425199d9e149a422bb39902f37f4ee614002262f9f7484ccb3e9387ba"),
-        ]
-        for (output, expectedSHA256) in cases {
-            let data = try Data(contentsOf: output)
-            let hash = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-            XCTAssertEqual(hash, expectedSHA256)
+        let data = try Data(contentsOf: floatOutput)
+        let hash = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        XCTAssertEqual(hash, "93ae88b5c07ab708e40b9329242e216b0cb95b60973d780bdb0beedcaa6467af")
+        // Each split channel is byte-identical to converting that channel alone.
+        for (channel, output) in split.enumerated() {
+            let monoInput = dir + "/mono-\(channel).pcm"
+            let mono = stride(from: channel, to: frames.count, by: 2).map { frames[$0] }
+            try mono.withUnsafeBufferPointer { Data(buffer: $0) }.write(to: URL(fileURLWithPath: monoInput))
+            let reference = URL(fileURLWithPath: dir + "/mono-\(channel).wav")
+            try PCMToWAV.convert(inputPath: monoInput, format: .int16Interleaved(channels: 1, sampleRate: 48_000),
+                                 outputURL: reference)
+            XCTAssertEqual(try Data(contentsOf: output), try Data(contentsOf: reference))
+        }
+        for output in [floatOutput] + split {
             XCTAssertTrue(PCMToWAV.is16kMonoWAV(output.path))
-            XCTAssertEqual(data.count, PCMToWAV.headerSize + 66_668 * 2)
+            XCTAssertEqual(try Data(contentsOf: output).count, PCMToWAV.headerSize + 66_668 * 2)
             XCTAssertEqual(PCMToWAV.wavDurationSeconds(output.path), 66_668.0 / 16_000, accuracy: 0.000_001)
         }
     }
@@ -154,42 +144,41 @@ final class PCMToWAVTests: XCTestCase {
             XCTAssertEqual(PCMToWAV.wavDurationSeconds(output.path), 1.0 / 16_000, accuracy: 0.000_000_1)
         }
         let stereoBytes = try Data(contentsOf: int16Output).dropFirst(PCMToWAV.headerSize)
-        XCTAssertEqual(stereoBytes.withUnsafeBytes { $0.loadUnaligned(as: Int16.self) }.littleEndian, 4_000)
+        XCTAssertEqual(stereoBytes.withUnsafeBytes { $0.loadUnaligned(as: Int16.self) }.littleEndian, 1_000,
+                       "the first output is the left channel alone")
     }
 
     func testInvalidFloatStreamsAreRejectedAndPreparedOutputRollsBack() throws {
         let dir = TestSupport.makeTempDir(self, "wav-invalid-float")
-        let tempDir = FileManager.default.temporaryDirectory
-        func preparedWAVs() throws -> Set<String> {
-            Set(try FileManager.default.contentsOfDirectory(at: tempDir,
-                                                              includingPropertiesForKeys: nil)
-                .map(\.lastPathComponent)
-                .filter { $0.hasPrefix("meetcapture-whole-") && $0.hasSuffix(".wav") })
-        }
+        let work = dir + "/work"
+        try AppPaths.ensurePrivateDirectory(work)
 
-        let before = try preparedWAVs()
         let truncated = dir + "/truncated.pcm"
         try Data([0x00, 0x01, 0x02]).write(to: URL(fileURLWithPath: truncated))
-        XCTAssertThrowsError(try PCMToWAV.prepare(audioPath: truncated, captureSampleRate: 48_000)) { error in
+        XCTAssertThrowsError(try ChannelReader.prepare(audioPath: truncated, captureSampleRate: 48_000,
+                                                       workDirectory: work)) { error in
             guard let conversionError = error as? PCMToWAV.ConversionError,
                   case .invalidData = conversionError else {
                 return XCTFail("expected invalidData for a truncated float sample, got \(error)")
             }
         }
-        XCTAssertEqual(try preparedWAVs(), before, "failed preparation must remove its partial WAV")
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: work), [],
+                       "failed preparation must remove its partial WAV")
 
         let nonFinite = dir + "/nan.pcm"
         var samples = [Float](repeating: 0.25, count: 40_000)
         samples[20_000] = .nan
         try samples.withUnsafeBufferPointer { Data(buffer: $0) }
             .write(to: URL(fileURLWithPath: nonFinite))
-        XCTAssertThrowsError(try PCMToWAV.prepare(audioPath: nonFinite, captureSampleRate: 48_000)) { error in
+        XCTAssertThrowsError(try ChannelReader.prepare(audioPath: nonFinite, captureSampleRate: 48_000,
+                                                       workDirectory: work)) { error in
             guard let conversionError = error as? PCMToWAV.ConversionError,
                   case .invalidData = conversionError else {
                 return XCTFail("expected invalidData for NaN PCM, got \(error)")
             }
         }
-        XCTAssertEqual(try preparedWAVs(), before, "failed preparation must roll back its partial WAV")
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: work), [],
+                       "failed preparation must roll back its partial WAV")
     }
 
 }
