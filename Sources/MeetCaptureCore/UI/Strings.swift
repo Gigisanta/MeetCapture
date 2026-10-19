@@ -98,6 +98,7 @@ enum Strings {
     static let errorNoRecording = "No se encontró la grabación."
     static let errorNoAudio = "No hay audio guardado para re-transcribir."
     static let errorAudioGone = "El audio ya no existe (lo borró la política de retención)."
+    static let errorAudioRecovering = "Esa grabación se está recuperando en segundo plano; esperá a que termine."
     static let retranscription = "Re-transcripción"
     static func errorRecording(_ reason: String) -> String { "No se pudo grabar: \(reason)" }
     static func errorTranscription(_ reason: String) -> String { "Falló la transcripción: \(reason)" }

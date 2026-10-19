@@ -552,22 +552,35 @@ def _finalize_artifacts(backups) -> None:
                 log("no se pudo limpiar backup de artefacto: %s" % e, "WARN")
 
 
-def _checksum_of(path: str):
+def _read_contract(path: str):
     try:
         with open(path, encoding="utf-8") as f:
-            return json.load(f).get("checksum")
-    except (OSError, ValueError, AttributeError):
+            contract = json.load(f)
+        return contract if isinstance(contract, dict) else None
+    except (OSError, ValueError):
         return None
+
+
+def _checksum_of(path: str):
+    return (_read_contract(path) or {}).get("checksum")
 
 
 def is_revision(path: str, done_path: str) -> bool:
     """A handoff whose transcript changed since the acknowledged one.
 
     The app re-publishes a meeting under the same id when a retry fills the
-    gaps of its transcript; the same checksum is a duplicate and is skipped.
+    gaps of its transcript. The same checksum is a duplicate, and one that no
+    longer matches the transcript is a superseded handoff (a stale
+    .pending.retry); both are skipped.
     """
-    new = _checksum_of(path)
-    return isinstance(new, str) and new != _checksum_of(done_path)
+    contract = _read_contract(path) or {}
+    new = contract.get("checksum")
+    if not isinstance(new, str) or new == _checksum_of(done_path):
+        return False
+    try:
+        return sha256_file(resolve(contract.get("transcriptPath"))) == new.lower()
+    except (OSError, TypeError, ValueError):
+        return False
 
 
 def process_file(path: str, cfg: dict) -> None:
@@ -618,6 +631,10 @@ def process_file(path: str, cfg: dict) -> None:
     except OSError as e:
         return fail(path, base, "no se pudo comprobar checksum: %s" % e, permanent=True)
     cksum = contract["checksum"]
+    if actual != cksum.lower() and _checksum_of(path) != cksum:
+        # The app rewrote the transcript and this handoff since we read it.
+        log("%s cambió durante la lectura; queda para la próxima pasada" % name)
+        return
     if actual != cksum.lower():
         return fail(path, base, "checksum mismatch (esperado %s, real %s)" % (cksum, actual), permanent=True)
 
@@ -704,6 +721,12 @@ def process_file(path: str, cfg: dict) -> None:
         return fail(path, base, "escritura de artefactos falló: %s" % e)
 
     # --- ack idempotente + cleanup de audio ---
+    if _checksum_of(path) != cksum:
+        # A revision replaced this handoff while it was being summarized:
+        # acknowledging it would mark the new transcript as done with the old summary.
+        _rollback_artifacts((), (json_path, html_path, md_path), backups)
+        log("%s fue reemplazado durante el resumen; queda para la próxima pasada" % name)
+        return
     try:
         os.chmod(path, 0o600)
         if os.path.exists(done_path) and not revision:

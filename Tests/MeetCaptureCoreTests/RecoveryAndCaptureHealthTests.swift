@@ -71,10 +71,14 @@ final class RecoveryAndCaptureHealthTests: XCTestCase {
         try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-3 * 86_400)],
                                               ofItemAtPath: transcript)
         try ProcessedMarker.write(transcriptPath: transcript, title: "x")
-        try FileManager.default.createDirectory(atPath: ChunkedTranscription.workDirectory(forAudio: gapped),
+        try RecordingRecovery.markGaps(audioPath: gapped, chunks: 1)
+        let rerun = try makeCapture(dir, "recording-meet-2-b")
+        try ProcessedMarker.write(transcriptPath: RecordingRecovery.transcriptPath(forAudio: rerun), title: "x")
+        try FileManager.default.createDirectory(atPath: ChunkedTranscription.workDirectory(forAudio: rerun),
                                                 withIntermediateDirectories: true)
 
-        XCTAssertEqual(RecordingRecovery.find(in: dir).map(\.audioPath), [gapped])
+        XCTAssertEqual(RecordingRecovery.find(in: dir).map(\.audioPath), [gapped],
+                       "checkpoints left by a failed re-run of a complete capture are not gaps")
         XCTAssertEqual(RecordingRecovery.sessionId(forAudio: gapped), "meet-1-a")
         XCTAssertNil(RecordingRecovery.sessionId(forAudio: dir + "/imported.pcm"))
 

@@ -406,6 +406,7 @@ final class AppState: ObservableObject {
             finalInput.model = outcome.modelUsed
             finalInput.audioDurationSec = outcome.audioDurationSec
             finalInput.partial = outcome.failedChunks > 0
+            if finalInput.partial { try RecordingRecovery.markGaps(audioPath: audioPath, chunks: outcome.failedChunks) }
             let result = try await postProcessor.run(finalInput)
             if outcome.failedChunks > 0 {
                 errorMessage = Strings.errorPartialTranscript(outcome.failedChunks)
@@ -482,6 +483,8 @@ final class AppState: ObservableObject {
         guard phase == .idle || phase == .done else { return }
         guard let audio = lastAudioPath else { errorMessage = Strings.errorNoAudio; return }
         guard FileManager.default.fileExists(atPath: audio) else { errorMessage = Strings.errorAudioGone; return }
+        // Two jobs on one capture would share and delete each other's channel WAVs.
+        guard audio != recoveringPath else { errorMessage = Strings.errorAudioRecovering; return }
         if let session = captureSession(audioPath: audio, startedAt: Date(),
                                         fallbackTitle: self.session?.title ?? Strings.retranscription) {
             // A capture is redone in place: same transcript, history row and handoff.
@@ -537,7 +540,8 @@ final class AppState: ObservableObject {
 
     private func recover(_ recording: RecoverableRecording) async {
         // A foreground re-transcription may have completed it meanwhile.
-        guard FileManager.default.fileExists(atPath: recording.audioPath),
+        guard recording.audioPath != activeCapturePath,
+              FileManager.default.fileExists(atPath: recording.audioPath),
               RecordingRecovery.needsTranscript(audioPath: recording.audioPath) else { return }
         recoveringPath = recording.audioPath
         // Count the attempt up front so a crash mid-job also counts.
@@ -557,6 +561,9 @@ final class AppState: ObservableObject {
                 audioDurationSec: outcome.audioDurationSec, audioEndedAt: recording.endedAt)
             var finalInput = input
             finalInput.partial = outcome.failedChunks > 0
+            if finalInput.partial {
+                try RecordingRecovery.markGaps(audioPath: recording.audioPath, chunks: outcome.failedChunks)
+            }
             let result = try await postProcessor.run(finalInput)
             if outcome.failedChunks > 0 {
                 // Handed off with gaps: keep the checkpoints and the attempt

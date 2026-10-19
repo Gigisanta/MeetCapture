@@ -526,6 +526,44 @@ final class AppStateRegressionTests: XCTestCase {
         XCTAssertFalse(RecordingRecovery.hasGaps(audioPath: audio))
     }
 
+    func testRetranscribeWaitsForABackgroundRecoveryOfTheSameCapture() async throws {
+        let outputDir = TestSupport.makeTempDir(self, "app-gap-race")
+        let paths = AppPaths(environment: ["MEETCAPTURE_TEST_OUTPUT_DIR": outputDir], home: outputDir)
+        useSettings([Settings.Key.notifyHermes.rawValue: false])
+        let backend = FakeRecordingBackend()
+        backend.suspendStart = false
+        backend.writesRecoverableCapture = true
+        let store = MeetingStore(path: paths.databasePath)
+        let calls = TranscriptionCallCounter()
+        let gate = TranscriptionCallCounter()
+        let state = AppState(
+            paths: paths, store: store, recordingDriver: backend.driver,
+            transcriptionRunner: { job, _ in
+                calls.increment()
+                try FileManager.default.createDirectory(
+                    atPath: ChunkedTranscription.workDirectory(forAudio: job.audioPath),
+                    withIntermediateDirectories: true)
+                guard calls.value > 1 else { return Self.gappedOutcome }
+                while gate.value == 0 { try await Task.sleep(nanoseconds: 5_000_000) }
+                return Self.completeOutcome
+            },
+            errorDismissalDelay: 300, recoveryRetryDelays: [0.05, 0.05])
+        state.startRecording()
+        try await waitUntil { backend.isRecording }
+        state.stopRecording()
+        try await waitUntil { state.phase == .done }
+        try await waitUntil { calls.value == 2 && state.isRecovering }
+
+        await state.retranscribeLastAudio()
+
+        XCTAssertEqual(calls.value, 2, "no second job on a capture being recovered")
+        XCTAssertEqual(state.errorMessage, Strings.errorAudioRecovering)
+        gate.increment()
+        try await waitUntil { !state.isRecovering }
+        XCTAssertEqual(store.count(), 1)
+        XCTAssertFalse(RecordingRecovery.hasGaps(audioPath: try XCTUnwrap(backend.outputPath)))
+    }
+
     private func waitUntil(_ condition: @escaping @MainActor () -> Bool) async throws {
         let deadline = Date().addingTimeInterval(3)
         while !condition() {

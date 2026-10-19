@@ -110,7 +110,9 @@ and `Settings` only know `Support`. Nothing below `App` touches SwiftUI.
    wakes it on changes to `~/meetings` and every 15 minutes; it does not start
    MeetCapture or capture audio. Transient failures move the file to
    `.pending.retry[.N]` with a backoff of 5 min doubling up to 6 h; after 8
-   attempts it becomes `.pending.failed`, which `--retry-failed` requeues.
+   attempts it becomes `.pending.failed`, which `--retry-failed` requeues. A
+   `.pending` whose checksum differs from its `.done` is a revision (the app
+   filled the gaps) and replaces the summary.
 
 ## Meeting identity
 
@@ -128,7 +130,7 @@ to that id; existing recordings and history keep their original paths.
 | `~/meetings/transcripts/recording-meet-<epoch>-<uuid>.pcm` + `.pcm.format.json` | Capture | ASR, retention | Int16 stereo 16 kHz; sidecar schema `meetcapture.audio.v1` (`sample_rate`, `sample_format`, `channels`, `layout`, `tap_strategy`, `tap_info`). |
 | `<audio>.work/` (`remote/`, `mic/`, `diarization.json`) | ASR | ASR | Per-channel chunk checkpoints (manifest version 2) and the cached diarization; removed once the transcript is handed off. A version 1 layout (top-level `manifest.json`) is discarded. |
 | `~/meetings/transcripts/[recording-]meet-<epoch>-<uuid>.txt` | PostProcessor | dispatcher, popover | Live recordings use the `recording-` prefix; retranscriptions use the job id directly. Imports keep a unique dated basename in `~/meetings/imports/`. One `[speaker]: text` line per turn, for example `[Gio]: …` or `[Participante 2]: …`. |
-| `~/meetings/meet-<epoch>-<uuid>.pending` | PostProcessor | dispatcher | Version 2, 14 sorted keys: `audioPath` (null if deleted), `checksum` (SHA-256 of the transcript text), `durationSec`, `endedAt`, `engine`, `language`, `meetingId`, `model`, `segments` (`start`, `end`, `text`, optional `speaker`), `speakerCount`, `startedAt`, `title`, `transcriptPath`, `version`. Written to a temp file and renamed. |
+| `~/meetings/meet-<epoch>-<uuid>.pending` | PostProcessor | dispatcher | Version 2, 14 sorted keys: `audioPath` (null if deleted or if the transcript has gaps), `checksum` (SHA-256 of the transcript text), `durationSec`, `endedAt`, `engine`, `language`, `meetingId`, `model`, `segments` (`start`, `end`, `text`, optional `speaker`), `speakerCount`, `startedAt`, `title`, `transcriptPath`, `version`. Written to a temp file and renamed. |
 | `<transcript basename>.processed.json` | PostProcessor | app | Schema `meetcapture.processed.v1`: `processed_at`, `transcript_path`, `meeting_title`, `retention`. Makes post-processing idempotent. |
 | `~/meetings/meet-<epoch>-<uuid>.done`, `.summary.json`, `.summary.html` | dispatcher | popover | Acknowledged handoff and the summary. |
 | `~/meetings/meetcapture.db` | MeetingStore | popover | `meetings` table plus `meetings_fts` (FTS5, external content, triggers). `PRAGMA user_version = 2`. Searches use `MATCH` with a prefix on the last token, `LIMIT 50`; `LIKE` is the fallback without FTS5. |

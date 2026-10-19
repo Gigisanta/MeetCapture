@@ -81,18 +81,22 @@ final class PostProcessorTests: XCTestCase {
     func testDaySweepKeepsACaptureWithGapsToRedo() throws {
         let dir = TestSupport.makeTempDir(self, "retention-gaps")
         let done = dir + "/recording-done.pcm", gapped = dir + "/recording-gapped.pcm"
-        for audio in [done, gapped] {
+        let rerun = dir + "/recording-rerun.pcm"
+        for audio in [done, gapped, rerun] {
             TestSupport.write("x", to: audio)
             try ProcessedMarker.write(transcriptPath: RecordingRecovery.transcriptPath(forAudio: audio), title: "x")
             try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-90_000)],
                                                   ofItemAtPath: audio)
         }
-        try FileManager.default.createDirectory(atPath: ChunkedTranscription.workDirectory(forAudio: gapped),
+        try RecordingRecovery.markGaps(audioPath: gapped, chunks: 1)
+        try FileManager.default.createDirectory(atPath: ChunkedTranscription.workDirectory(forAudio: rerun),
                                                 withIntermediateDirectories: true)
 
         Retention.cleanupOldRecordings(in: dir, policy: .keep24h)
 
         XCTAssertFalse(FileManager.default.fileExists(atPath: done))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: rerun), "a failed re-run of a complete capture has no gaps")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: ChunkedTranscription.workDirectory(forAudio: rerun)))
         XCTAssertTrue(FileManager.default.fileExists(atPath: gapped), "a capture with gaps keeps its audio for the retry")
     }
 

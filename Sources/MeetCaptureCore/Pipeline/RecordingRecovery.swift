@@ -42,12 +42,26 @@ enum RecordingRecovery {
         return id.isEmpty ? nil : id
     }
 
-    /// Handed off with gaps: the marker is written, but the chunk checkpoints
-    /// stay until a run transcribes every chunk.
+    /// Lives with the chunk checkpoints, so the run that fills every gap
+    /// removes it along with them.
+    static func gapsPath(forAudio audioPath: String) -> String {
+        ChunkedTranscription.workDirectory(forAudio: audioPath) + "/gaps.json"
+    }
+
+    /// Written before a gapped transcript is handed off: a crash between the
+    /// two leaves an unmarked capture, which is retried as well.
+    static func markGaps(audioPath: String, chunks: Int) throws {
+        try AppPaths.ensurePrivateDirectory(ChunkedTranscription.workDirectory(forAudio: audioPath))
+        try JSONSerialization.data(withJSONObject: ["chunks": chunks])
+            .write(to: URL(fileURLWithPath: gapsPath(forAudio: audioPath)), options: .atomic)
+    }
+
+    /// Handed off with gaps. Checkpoints alone do not count: a re-run of a
+    /// complete capture that failed or was cancelled also leaves them.
     static func hasGaps(audioPath: String) -> Bool {
         let fm = FileManager.default
         return fm.fileExists(atPath: ProcessedMarker.path(forTranscript: transcriptPath(forAudio: audioPath)))
-            && fm.fileExists(atPath: ChunkedTranscription.workDirectory(forAudio: audioPath))
+            && fm.fileExists(atPath: gapsPath(forAudio: audioPath))
     }
 
     /// No complete transcript yet: never handed off, or handed off with gaps.

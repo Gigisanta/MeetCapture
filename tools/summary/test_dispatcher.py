@@ -114,6 +114,50 @@ class DispatcherTests(unittest.TestCase):
                              hashlib.sha256("hola mundo completo\n".encode("utf-8")).hexdigest())
         self.assertNotIn("meet-rev.pcm", self.names(), "the complete handoff releases the audio")
 
+    def test_stale_retry_next_to_a_revision_is_skipped(self):
+        _contract("meet-stale", text="hola [fragmento]\n", with_audio=False)
+        os.replace(os.path.join(MEETINGS, "meet-stale.pending"), os.path.join(MEETINGS, "meet-stale.pending.retry"))
+        stale = os.path.join(MEETINGS, "meet-stale.pending.retry")
+        os.utime(stale, (0, 0))
+        _contract("meet-stale", text="hola completo\n")
+        mod.run_once(self.cfg)
+        self.assertIn("meet-stale.done", self.names())
+        mod.run_once(self.cfg)
+        self.assertNotIn("meet-stale.pending.error", self.names(), "a superseded handoff is not an error")
+        self.assertEqual(mod._checksum_of(os.path.join(MEETINGS, "meet-stale.done")),
+                         hashlib.sha256("hola completo\n".encode("utf-8")).hexdigest())
+
+    def test_handoff_replaced_during_summary_is_not_acknowledged(self):
+        _contract("meet-race", text="viejo\n", with_audio=False)
+        original = mod.dry_run_summary
+
+        def summary_then_revision(contract):
+            _contract("meet-race", text="nuevo\n", with_audio=False)
+            return original(contract)
+
+        with mock.patch.object(mod, "dry_run_summary", side_effect=summary_then_revision):
+            mod.run_once(self.cfg)
+        self.assertNotIn("meet-race.done", self.names())
+        self.assertNotIn("meet-race.summary.json", self.names(), "the old summary is rolled back")
+        mod.run_once(self.cfg)
+        with open(os.path.join(MEETINGS, "meet-race.summary.md"), encoding="utf-8") as f:
+            self.assertIn("nuevo", f.read())
+
+    def test_handoff_rewritten_before_checksum_is_not_an_error(self):
+        path = _contract("meet-rewrite", text="viejo\n", with_audio=False)
+        original = mod.sha256_file
+
+        def rewrite_then_hash(p):
+            _contract("meet-rewrite", text="nuevo\n", with_audio=False)
+            return original(p)
+
+        with mock.patch.object(mod, "sha256_file", side_effect=rewrite_then_hash):
+            mod.run_once(self.cfg)
+        self.assertNotIn("meet-rewrite.pending.error", self.names())
+        self.assertTrue(os.path.exists(path))
+        mod.run_once(self.cfg)
+        self.assertIn("meet-rewrite.done", self.names())
+
     def test_checksum_mismatch_is_permanent_error(self):
         _contract("meet-2", checksum="deadbeef")
         mod.run_once(self.cfg)

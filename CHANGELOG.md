@@ -97,6 +97,16 @@ Planned as 7.0.0 (`scripts/version.sh` bumps it at release).
 - Convert imported audio in a temporary sibling file; cancellation or process
   failure removes the partial output, and only a completed conversion is moved
   into the durable imports directory.
+- A transcript with gaps is retried automatically (three attempts within 48 h
+  of the capture) and only its failed chunks run again. Recovery and
+  Re-transcribir of a capture replace its transcript, history row and
+  `.pending`, keeping the meeting id and title, instead of adding a meeting. A
+  gapped handoff carries `audioPath` null and skips retention, so the audio
+  stays until no gap is left. Re-transcribir refuses while background recovery
+  works on the same capture.
+- Summary dispatcher: a `.pending` whose checksum differs from its `.done` is a
+  revision and replaces the summary; a handoff rewritten while it is read or
+  summarized is left for the next pass instead of being acknowledged.
 
 ### Changed
 - Transcription splits the stereo capture into a system and a microphone
