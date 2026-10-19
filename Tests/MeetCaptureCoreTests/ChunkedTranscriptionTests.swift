@@ -51,10 +51,10 @@ final class ChunkedTranscriptionTests: XCTestCase {
         return url
     }
 
-    private func run(_ wav: URL, _ dir: String, bytes: UInt64 = 1_000,
+    private func run(_ wav: URL, _ dir: String, bytes: UInt64 = 1_000, language: String = "es",
                      _ recognizer: FakeRecognizer) async throws -> ChunkedResult {
         try await ChunkedTranscription.run(wav: wav, workDirectory: dir + "/work/remote", audioBytes: bytes,
-                                           language: "es", recognizer: recognizer) { _ in }
+                                           language: language, recognizer: recognizer) { _ in }
     }
 
     func testCutsMoveToTheQuietestFrameNearEachBoundary() throws {
@@ -104,6 +104,18 @@ final class ChunkedTranscriptionTests: XCTestCase {
                                       Segment(start: 303, end: 304, text: "chau")])
         let secondCalls = await healthy.calls
         XCTAssertEqual(secondCalls, 1, "chunk 0 came from its checkpoint")
+    }
+
+    func testLanguageChangeInvalidatesCheckpoints() async throws {
+        let dir = TestSupport.makeTempDir(self, "chunk-language")
+        let wav = try makeWAV(dir, seconds: 30)
+        _ = try await run(wav, dir, language: "es", FakeRecognizer { _, _ in [Segment(start: 0, end: 1, text: "hola")] })
+
+        let english = FakeRecognizer { _, _ in [Segment(start: 0, end: 1, text: "hello")] }
+        let again = try await run(wav, dir, language: "en", english)
+        XCTAssertEqual(again.words.map(\.text), ["hello"], "chunks in another language are redone")
+        let calls = await english.calls
+        XCTAssertEqual(calls, 1)
     }
 
     func testEveryChunkFailingKeepsTheCaptureRecoverable() async throws {

@@ -35,8 +35,9 @@ Planned as 7.0.0 (`scripts/version.sh` bumps it at release).
 - `aliases` in `config.json`: canonical spelling → variants, applied whole-word
   and case-insensitively to the merged transcript.
 - Per-channel checkpoints in `<audio>.work/remote/` and `<audio>.work/mic/`
-  (manifest version 2) plus a cached `diarization.json`; a chunk failing twice
-  becomes `[fragmento sin transcribir …]` and the audio is kept.
+  (manifest version 3, which records the recognition language; changing the
+  language redoes the chunks) plus a cached `diarization.json`; a chunk failing
+  twice becomes `[fragmento sin transcribir …]` and the audio is kept.
 - `install.sh` downloads and compiles the models (`MEETCAPTURE_PREFETCH_MODELS=1`)
   and refuses to swap the bundle while a `recording-*.pcm` is being written.
   Parakeet loads when a recording starts and is freed after 10 idle minutes.
@@ -113,6 +114,8 @@ Planned as 7.0.0 (`scripts/version.sh` bumps it at release).
 - A capture that used up its automatic attempts shows a warning under the
   pending count in the popover and posts one notification; its audio is kept
   until it is transcribed by hand.
+- Chunk checkpoints record the recognition language; after a language change
+  the chunks are transcribed again instead of reusing the old language.
 
 ### Changed
 - Transcription splits the stereo capture into a system and a microphone

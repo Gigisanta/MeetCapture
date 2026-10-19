@@ -9,11 +9,13 @@ import AVFoundation
 import Foundation
 
 struct ChunkManifest: Codable, Equatable {
-    /// 2: Parakeet words per channel (1 was whisper segments of the mono mix).
-    static let currentVersion = 2
+    /// 3: adds the recognition language. 2: Parakeet words per channel (1 was whisper segments of the mono mix).
+    static let currentVersion = 3
     var version = ChunkManifest.currentVersion
     /// Size of the source audio; a different size means a different capture.
     var audioBytes: UInt64
+    /// Recognition language; chunks transcribed in another language are redone.
+    var language: String
     /// Sample offsets into the channel WAV: first 0, last the total.
     var boundaries: [Int]
 }
@@ -94,13 +96,14 @@ enum ChunkedTranscription {
             .flatMap { try? JSONDecoder().decode(ChunkManifest.self, from: $0) }
         let cuts: [Int]
         if let saved, saved.version == ChunkManifest.currentVersion, saved.audioBytes == audioBytes,
+           saved.language == language,
            saved.boundaries.first == 0, saved.boundaries.last == total {
             cuts = saved.boundaries
         } else {
             try? fm.removeItem(atPath: work)
             try AppPaths.ensurePrivateDirectory(work)
             cuts = try boundaries(totalSamples: total) { try readSamples(file, from: $0, to: $1) }
-            try JSONEncoder().encode(ChunkManifest(audioBytes: audioBytes, boundaries: cuts))
+            try JSONEncoder().encode(ChunkManifest(audioBytes: audioBytes, language: language, boundaries: cuts))
                 .write(to: manifestURL, options: .atomic)
         }
         let count = cuts.count - 1
