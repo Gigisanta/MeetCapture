@@ -107,6 +107,12 @@ Planned as 7.0.0 (`scripts/version.sh` bumps it at release).
 - Summary dispatcher: a `.pending` whose checksum differs from its `.done` is a
   revision and replaces the summary; a handoff rewritten while it is read or
   summarized is left for the next pass instead of being acknowledged.
+- Retry times are saved in `<audio>.recovery.json` (`next_attempt_at`), so the
+  5 and 20 min backoff survives a relaunch or crash, and each capture keeps its
+  own time; a capture that comes due during another recovery runs right after it.
+- A capture that used up its automatic attempts shows a warning under the
+  pending count in the popover and posts one notification; its audio is kept
+  until it is transcribed by hand.
 
 ### Changed
 - Transcription splits the stereo capture into a system and a microphone

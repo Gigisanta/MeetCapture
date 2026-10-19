@@ -113,7 +113,7 @@ final class AppState: ObservableObject {
     private var activeCapturePath: String?
     private var recoveringPath: String?
     private var recoveryTask: Task<Void, Never>?
-    private var recoveryRetryTask: Task<Void, Never>?
+    private var recoveryWakeTask: Task<Void, Never>?
     private let recoveryRetryDelays: [TimeInterval]
     private var systemAudioHeard = false
     private var lastLevelCheck: TimeInterval = 0
@@ -336,6 +336,7 @@ final class AppState: ObservableObject {
                                   applyRetention: true)
             if self.activeCapturePath == audioPath { self.activeCapturePath = nil }
             self.scanRecoverableRecordings()
+            self.scheduleRecoveryWake()
         }
     }
 
@@ -413,8 +414,8 @@ final class AppState: ObservableObject {
                 // A capture with gaps is retried like a failed one; the
                 // checkpoints let the retry redo only the gaps.
                 if applyRetention {
-                    RecordingRecovery.recordFailure(audioPath: audioPath, reason: Self.gapReason(outcome.failedChunks))
-                    scheduleRecoveryRetry(attempts: RecordingRecovery.attempts(forAudio: audioPath))
+                    await recordRecoveryFailure(audioPath: audioPath, reason: Self.gapReason(outcome.failedChunks),
+                                                countsAsAttempt: true, title: session.displayTitle)
                 }
             } else {
                 ChunkedTranscription.removeWork(forAudio: audioPath)
@@ -450,8 +451,8 @@ final class AppState: ObservableObject {
             // A capture that failed is a recovery like any other: count it
             // and retry later, resuming from the chunks already done.
             if applyRetention {
-                RecordingRecovery.recordFailure(audioPath: audioPath, reason: error.localizedDescription)
-                scheduleRecoveryRetry(attempts: RecordingRecovery.attempts(forAudio: audioPath))
+                await recordRecoveryFailure(audioPath: audioPath, reason: error.localizedDescription,
+                                            countsAsAttempt: true, title: session.displayTitle)
             }
         }
     }
@@ -494,6 +495,7 @@ final class AppState: ObservableObject {
                              transcriptPath: RecordingRecovery.transcriptPath(forAudio: audio), applyRetention: true)
             if activeCapturePath == audio { activeCapturePath = nil }
             scanRecoverableRecordings()
+            scheduleRecoveryWake()
             return
         }
         let session = MeetingSession(startedAt: Date(), title: session?.title ?? Strings.retranscription)
@@ -518,7 +520,9 @@ final class AppState: ObservableObject {
         guard recoveryTask == nil else { return }
         let targets = automaticOnly
             ? RecordingRecovery.automatic(recoverableRecordings) : recoverableRecordings
-        guard !targets.isEmpty else { return }
+        guard !targets.isEmpty else { scheduleRecoveryWake(); return }
+        recoveryWakeTask?.cancel()
+        recoveryWakeTask = nil
         isRecovering = true
         recoveryTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -535,6 +539,8 @@ final class AppState: ObservableObject {
             self.recoveryTask = nil
             self.scanRecoverableRecordings()
             self.refreshHistory()
+            guard !Task.isCancelled else { return }
+            self.scheduleRecoveryWake(justTried: Set(targets.map(\.audioPath)))
         }
     }
 
@@ -545,7 +551,8 @@ final class AppState: ObservableObject {
               RecordingRecovery.needsTranscript(audioPath: recording.audioPath) else { return }
         recoveringPath = recording.audioPath
         // Count the attempt up front so a crash mid-job also counts.
-        RecordingRecovery.recordFailure(audioPath: recording.audioPath, reason: "attempt started")
+        RecordingRecovery.recordFailure(audioPath: recording.audioPath, reason: "attempt started",
+                                        retryDelays: recoveryRetryDelays)
         let session = captureSession(audioPath: recording.audioPath, startedAt: recording.startedAt,
                                      fallbackTitle: Strings.recoveredRecording)
             ?? MeetingSession(startedAt: recording.startedAt, title: Strings.recoveredRecording)
@@ -568,9 +575,8 @@ final class AppState: ObservableObject {
             if outcome.failedChunks > 0 {
                 // Handed off with gaps: keep the checkpoints and the attempt
                 // count (already taken) and try again later.
-                RecordingRecovery.recordFailure(audioPath: recording.audioPath,
-                                                reason: Self.gapReason(outcome.failedChunks), countsAsAttempt: false)
-                scheduleRecoveryRetry(attempts: RecordingRecovery.attempts(forAudio: recording.audioPath))
+                await recordRecoveryFailure(audioPath: recording.audioPath, reason: Self.gapReason(outcome.failedChunks),
+                                            countsAsAttempt: false, title: session.displayTitle)
             } else {
                 ChunkedTranscription.removeWork(forAudio: recording.audioPath)
                 try? FileManager.default.removeItem(atPath: RecordingRecovery.attemptsPath(forAudio: recording.audioPath))
@@ -581,24 +587,42 @@ final class AppState: ObservableObject {
         } catch {
             logger.error("recuperación falló: \(error.localizedDescription, privacy: .public)")
             // The attempt was already counted when it started.
-            RecordingRecovery.recordFailure(audioPath: recording.audioPath, reason: error.localizedDescription,
-                                            countsAsAttempt: false)
-            scheduleRecoveryRetry(attempts: RecordingRecovery.attempts(forAudio: recording.audioPath))
+            await recordRecoveryFailure(audioPath: recording.audioPath, reason: error.localizedDescription,
+                                        countsAsAttempt: false, title: session.displayTitle)
         }
         recoveringPath = nil
     }
 
-    /// Automatic retry `recoveryRetryDelays` (5 and 20 min) after the first
-    /// and second failures; the third is the last attempt
-    /// `RecordingRecovery.automatic` allows.
-    private func scheduleRecoveryRetry(attempts: Int) {
-        let delays = recoveryRetryDelays
-        guard attempts >= 1, attempts <= delays.count, attempts < RecordingRecovery.maxAutomaticAttempts else { return }
-        recoveryRetryTask?.cancel()
-        recoveryRetryTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(delays[attempts - 1] * 1_000_000_000))
+    /// Records a failed or gapped attempt with its next retry time; the attempt
+    /// that uses up the automatic ones tells the user once.
+    private func recordRecoveryFailure(audioPath: String, reason: String, countsAsAttempt: Bool, title: String) async {
+        RecordingRecovery.recordFailure(audioPath: audioPath, reason: reason,
+                                        countsAsAttempt: countsAsAttempt, retryDelays: recoveryRetryDelays)
+        if RecordingRecovery.attempts(forAudio: audioPath) == RecordingRecovery.maxAutomaticAttempts,
+           Settings.notifyHermes {
+            await Notifier.recordingExhausted(title: title)
+        }
+    }
+
+    /// One timer for every capture waiting for a retry, aimed at the earliest
+    /// `nextAttemptAt`. A capture the last pass just tried waits at least the first
+    /// retry delay even if its time is already past, so a `.recovery.json` that
+    /// cannot be written never turns into a tight loop.
+    private func scheduleRecoveryWake(justTried: Set<String> = [], now: Date = Date()) {
+        recoveryWakeTask?.cancel()
+        recoveryWakeTask = nil
+        guard recoveryTask == nil else { return }   // the pass schedules when it ends
+        let floor = recoveryRetryDelays.first ?? RecordingRecovery.retryDelays[0]
+        let due = RecordingRecovery.retryable(recoverableRecordings, now: now).compactMap { r -> Date? in
+            guard let next = r.nextAttemptAt else { return nil }
+            return justTried.contains(r.audioPath) ? max(next, now.addingTimeInterval(floor)) : next
+        }.min()
+        guard let due else { return }
+        let delay = max(0, due.timeIntervalSince(now))
+        recoveryWakeTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             guard let self, !Task.isCancelled else { return }
-            self.recoveryRetryTask = nil
+            self.recoveryWakeTask = nil
             self.recoverRecordings(automaticOnly: true)
         }
     }

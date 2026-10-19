@@ -14,6 +14,11 @@ struct RecoverableRecording: Equatable, Sendable {
     /// Last write to the PCM, i.e. when the audio ended.
     var endedAt: Date
     var attempts: Int
+    /// When automatic recovery may try it again; nil means it is due now.
+    var nextAttemptAt: Date? = nil
+
+    /// Used up its automatic attempts; only a manual run transcribes it.
+    var exhausted: Bool { attempts >= RecordingRecovery.maxAutomaticAttempts }
 }
 
 enum RecordingRecovery {
@@ -94,7 +99,8 @@ enum RecordingRecovery {
             let startedAt = (try? fm.attributesOfItem(atPath: sidecarPath))?[.modificationDate] as? Date
             return RecoverableRecording(audioPath: audioPath, transcriptPath: transcript,
                                         startedAt: min(startedAt ?? endedAt, endedAt), endedAt: endedAt,
-                                        attempts: attempts(forAudio: audioPath))
+                                        attempts: attempts(forAudio: audioPath),
+                                        nextAttemptAt: nextAttemptAt(forAudio: audioPath))
         }
         .sorted { $0.endedAt > $1.endedAt }
     }
@@ -108,31 +114,63 @@ enum RecordingRecovery {
         return now.timeIntervalSince(modified) > automaticWindow
     }
 
-    static func automatic(_ recordings: [RecoverableRecording], now: Date = Date()) -> [RecoverableRecording] {
+    /// Within the automatic window and under the attempt cap, due or not.
+    static func retryable(_ recordings: [RecoverableRecording], now: Date = Date()) -> [RecoverableRecording] {
         recordings.filter {
             now.timeIntervalSince($0.endedAt) <= automaticWindow && $0.attempts < maxAutomaticAttempts
         }
+    }
+
+    /// Retryable and due. A record without `next_attempt_at` (never failed,
+    /// or written before 7.0.0) is due now.
+    static func automatic(_ recordings: [RecoverableRecording], now: Date = Date()) -> [RecoverableRecording] {
+        retryable(recordings, now: now).filter { ($0.nextAttemptAt ?? .distantPast) <= now }
     }
 
     static func modificationDate(_ path: String) -> Date? {
         (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date
     }
 
-    static func attempts(forAudio audioPath: String) -> Int {
+    private static func record(forAudio audioPath: String) -> [String: Any] {
         guard let data = FileManager.default.contents(atPath: attemptsPath(forAudio: audioPath)),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return 0 }
-        return json["attempts"] as? Int ?? 0
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
+        return json
+    }
+
+    /// Milliseconds matter: retry delays under a second must not round into the past.
+    private static func dateFormatter() -> ISO8601DateFormatter {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }
+
+    static func attempts(forAudio audioPath: String) -> Int {
+        record(forAudio: audioPath)["attempts"] as? Int ?? 0
+    }
+
+    static func nextAttemptAt(forAudio audioPath: String) -> Date? {
+        guard let value = record(forAudio: audioPath)["next_attempt_at"] as? String else { return nil }
+        return dateFormatter().date(from: value)
     }
 
     /// Counts a failed attempt next to the audio so automatic recovery stops
-    /// retrying a recording that cannot be transcribed.
+    /// retrying a recording that cannot be transcribed, and saves when the
+    /// next automatic attempt is due so the backoff survives a relaunch.
+    /// Called when an attempt starts too, so a crash midway does not retry
+    /// on the next launch before its time.
     static func recordFailure(audioPath: String, reason: String, countsAsAttempt: Bool = true,
+                              retryDelays: [TimeInterval] = RecordingRecovery.retryDelays,
                               now: Date = Date()) {
-        let record: [String: Any] = [
-            "attempts": attempts(forAudio: audioPath) + (countsAsAttempt ? 1 : 0),
+        let formatter = dateFormatter()
+        let attempts = attempts(forAudio: audioPath) + (countsAsAttempt ? 1 : 0)
+        var record: [String: Any] = [
+            "attempts": attempts,
             "last_error": reason,
-            "updated_at": ISO8601DateFormatter().string(from: now),
+            "updated_at": formatter.string(from: now),
         ]
+        if attempts >= 1, attempts <= retryDelays.count, attempts < maxAutomaticAttempts {
+            record["next_attempt_at"] = formatter.string(from: now.addingTimeInterval(retryDelays[attempts - 1]))
+        }
         guard let data = try? JSONSerialization.data(withJSONObject: record, options: [.prettyPrinted, .sortedKeys])
         else { return }
         try? data.write(to: URL(fileURLWithPath: attemptsPath(forAudio: audioPath)), options: .atomic)

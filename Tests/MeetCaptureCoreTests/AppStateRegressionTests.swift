@@ -364,11 +364,11 @@ final class AppStateRegressionTests: XCTestCase {
 
     // MARK: - Transcripts with gaps
 
-    private static let gappedOutcome = TranscriptionJob.Outcome(
+    private nonisolated static let gappedOutcome = TranscriptionJob.Outcome(
         segments: [Segment(start: 0, end: 1, text: "Arrancamos"),
                    Segment(start: 300, end: 600, text: "[fragmento sin transcribir 00:05:00–00:10:00]")],
         engineUsed: .parakeet, modelUsed: "fixture", audioDurationSec: 600, failedChunks: 1)
-    private static let completeOutcome = TranscriptionJob.Outcome(
+    private nonisolated static let completeOutcome = TranscriptionJob.Outcome(
         segments: [Segment(start: 0, end: 1, text: "Arrancamos"), Segment(start: 300, end: 301, text: "y cerramos")],
         engineUsed: .parakeet, modelUsed: "fixture", audioDurationSec: 600)
 
@@ -495,6 +495,71 @@ final class AppStateRegressionTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: audio))
         XCTAssertEqual(state.recoverableRecordings.map(\.audioPath), [audio], "still offered for a manual retry")
         XCTAssertTrue(RecordingRecovery.automatic(state.recoverableRecordings).isEmpty)
+        XCTAssertEqual(state.exhaustedRecordingCount, 1)
+        XCTAssertNil(RecordingRecovery.nextAttemptAt(forAudio: audio))
+    }
+
+    private func writeCapture(_ paths: AppPaths, _ suffix: String) throws -> String {
+        try FileManager.default.createDirectory(atPath: paths.transcriptsDir, withIntermediateDirectories: true)
+        let audio = paths.transcriptsDir + "/recording-meet-1789474169-\(suffix).pcm"
+        try Data(count: RecordingRecovery.minimumBytes).write(to: URL(fileURLWithPath: audio))
+        try AudioFormatSidecar.capture(tapStrategy: "global", tapInfo: "t").write(forAudio: audio)
+        return audio
+    }
+
+    func testPersistedRetryTimeSurvivesARelaunch() async throws {
+        let outputDir = TestSupport.makeTempDir(self, "app-retry-relaunch")
+        let paths = AppPaths(environment: ["MEETCAPTURE_TEST_OUTPUT_DIR": outputDir], home: outputDir)
+        useSettings([Settings.Key.notifyHermes.rawValue: false])
+        let audio = try writeCapture(paths, "relaunch")
+        // The previous process failed it and saved the next retry time.
+        RecordingRecovery.recordFailure(audioPath: audio, reason: "engine failed", retryDelays: [1.0])
+        let calls = TranscriptionCallCounter()
+        let state = AppState(
+            paths: paths, store: MeetingStore(path: paths.databasePath),
+            recordingDriver: FakeRecordingBackend().driver,
+            transcriptionRunner: Self.runner(calls) { _ in Self.completeOutcome },
+            recoveryRetryDelays: [3_600, 3_600])
+
+        state.recoverRecordings(automaticOnly: true)
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(calls.value, 0, "not before the saved retry time")
+
+        try await waitUntil { calls.value == 1 && !state.isRecovering }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: RecordingRecovery.attemptsPath(forAudio: audio)))
+    }
+
+    func testEachCaptureIsRetriedAtItsOwnTime() async throws {
+        let outputDir = TestSupport.makeTempDir(self, "app-retry-own-time")
+        let paths = AppPaths(environment: ["MEETCAPTURE_TEST_OUTPUT_DIR": outputDir], home: outputDir)
+        useSettings([Settings.Key.notifyHermes.rawValue: false])
+        let a = try writeCapture(paths, "a"), b = try writeCapture(paths, "b"), c = try writeCapture(paths, "c")
+        RecordingRecovery.recordFailure(audioPath: a, reason: "engine failed", retryDelays: [0.2])
+        // Comes due while a's job runs.
+        RecordingRecovery.recordFailure(audioPath: b, reason: "engine failed", retryDelays: [0.5])
+        RecordingRecovery.recordFailure(audioPath: c, reason: "engine failed", retryDelays: [3_600])
+        let calls = TranscriptionCallCounter()
+        let state = AppState(
+            paths: paths, store: MeetingStore(path: paths.databasePath),
+            recordingDriver: FakeRecordingBackend().driver,
+            transcriptionRunner: { job, _ in
+                calls.increment()
+                try FileManager.default.createDirectory(
+                    atPath: ChunkedTranscription.workDirectory(forAudio: job.audioPath),
+                    withIntermediateDirectories: true)
+                if job.audioPath == a { try await Task.sleep(nanoseconds: 800_000_000) }
+                return Self.completeOutcome
+            },
+            recoveryRetryDelays: [3_600, 3_600])
+
+        state.recoverRecordings(automaticOnly: true)
+        try await waitUntil { calls.value == 2 && !state.isRecovering }
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        XCTAssertEqual(calls.value, 2, "c is not due yet")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: RecordingRecovery.attemptsPath(forAudio: a)))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: RecordingRecovery.attemptsPath(forAudio: b)))
+        XCTAssertEqual(RecordingRecovery.attempts(forAudio: c), 1)
     }
 
     func testRetranscribingAGappedCaptureReplacesItInPlace() async throws {

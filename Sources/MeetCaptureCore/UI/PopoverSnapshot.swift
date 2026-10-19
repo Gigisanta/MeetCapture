@@ -156,6 +156,7 @@ private final class UIFixtureState: ObservableObject, PopoverStateModel {
     @Published var isStartingRecording = false
     @Published var captureWarning: CaptureWarning?
     @Published var pendingRecordingCount = 0
+    @Published var exhaustedRecordingCount = 0
     @Published var isRecovering = false
     var canRequestAudioPermission: Bool { true }
 
@@ -201,6 +202,7 @@ private final class UIFixtureState: ObservableObject, PopoverStateModel {
 
     func transcribePendingRecordings() {
         pendingRecordingCount = 0
+        exhaustedRecordingCount = 0
         errorMessage = "Fixture: recuperación simulada sin audio real."
     }
 

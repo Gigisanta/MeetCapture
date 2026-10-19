@@ -58,6 +58,14 @@ enum Strings {
     static func pendingRecordings(_ count: Int) -> String {
         count == 1 ? "1 grabación sin transcribir" : "\(count) grabaciones sin transcribir"
     }
+    static func exhaustedRecordings(_ count: Int) -> String {
+        count == 1
+            ? "1 agotó los reintentos automáticos; el audio se conserva"
+            : "\(count) agotaron los reintentos automáticos; el audio se conserva"
+    }
+    static func recordingExhausted(_ title: String) -> String {
+        "«\(title)» sigue sin transcripción completa tras \(RecordingRecovery.maxAutomaticAttempts) intentos automáticos. El audio se conserva: abrí MeetCapture y tocá \(transcribePending)."
+    }
 
     // Menu bar
     static let menuBarHiddenTitle = "El ícono no está en la barra de menús"

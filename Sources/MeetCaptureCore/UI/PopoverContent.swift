@@ -26,6 +26,7 @@ protocol PopoverStateModel: ObservableObject {
     var canRequestAudioPermission: Bool { get }
     var captureWarning: CaptureWarning? { get }
     var pendingRecordingCount: Int { get }
+    var exhaustedRecordingCount: Int { get }
     var isRecovering: Bool { get }
 
     func requestAudioPermission()
@@ -158,7 +159,14 @@ struct PopoverContent<Model: PopoverStateModel>: View {
                 Spacer()
             } else {
                 Image(systemName: "tray.full").foregroundStyle(.secondary)
-                Text(Strings.pendingRecordings(appState.pendingRecordingCount)).font(.system(size: 11))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(Strings.pendingRecordings(appState.pendingRecordingCount)).font(.system(size: 11))
+                    if appState.exhaustedRecordingCount > 0 {
+                        Text(Strings.exhaustedRecordings(appState.exhaustedRecordingCount))
+                            .font(.system(size: 10)).foregroundStyle(Brand.warnAmber)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
                 Spacer()
                 Button(Strings.transcribePending) { appState.transcribePendingRecordings() }
                     .controlSize(.small)
@@ -460,6 +468,7 @@ extension AppState: PopoverStateModel {
 
     var canRequestAudioPermission: Bool { audioCapture.canRequestPermission() }
     var pendingRecordingCount: Int { recoverableRecordings.count }
+    var exhaustedRecordingCount: Int { recoverableRecordings.filter(\.exhausted).count }
 
     func requestAudioPermission() { requestMicAccess() }
 
