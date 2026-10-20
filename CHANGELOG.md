@@ -7,7 +7,7 @@ semantic versioning. The single source of the current version is
 
 ## [Unreleased]
 
-Planned as 7.0.0 (`scripts/version.sh` bumps it at release).
+## [7.0.0] - 2026-10-19
 
 ### Removed
 - Whisper: `whisper-cli`, the ggml models in `~/.whisper/models`,
@@ -151,6 +151,16 @@ Planned as 7.0.0 (`scripts/version.sh` bumps it at release).
   a global pass; keep `PopoverSnapshot` as appearance-only evidence.
 
 ### Verification and limits
+- 7.0.0 release gate, run locally on the staged bundle: `swift test` passed
+  `139/139`; the summary dispatcher tests passed `31/31` and the real-summary
+  check passed; `codesign --verify --deep --strict` and the installer fixture
+  test passed; the smoke test passed `10/10`. On the `91.414`-second Spanish
+  TTS corpus, `capture` passed with WER `0.004`, `93.376` s of recorded audio
+  and zero dropped callbacks. `import` measured WER `0.004` (1/244, under the
+  `0.15` limit) but exited 1: its essential-word check requires every
+  reference word of four letters or more, and Parakeet heard "me pongo" as
+  "me puego" on both runs. The `ui` mode of RELEASING was not run, because the
+  repo has no way to build the QA bundle with a separate identifier.
 - The final Swift suite passed `114/114`; the targeted import and AppState
   suites also passed `9/9` each, including a real
   `afconvert` conversion, cancellation after a partial output was written,
