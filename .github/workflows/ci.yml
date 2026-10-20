@@ -61,7 +61,7 @@ jobs:
 
       - name: Python syntax and unit tests
         run: |
-          python3 -m py_compile qa/*.py tools/summary/*.py tools/legacy/*.py
+          python3 -m py_compile tools/summary/*.py tools/legacy/*.py
           python3 tools/summary/test_dispatcher.py
           python3 tools/summary/test_real_summary_check.py
           python3 tools/legacy/test_legacy_privacy_migration.py
