@@ -137,6 +137,24 @@ assert_bundle_stopped() {
   fi
 }
 
+# Another copy may own the capture. Both find implementations used on macOS
+# support -mmin; an inspection error is not evidence that recording is idle.
+assert_capture_idle() {
+  local recent
+  if ! recent="$(find "$MEETINGS" -maxdepth 2 -name 'recording-*.pcm' -mmin -1)"; then
+    printf '%s\n' 'Cannot inspect recent recordings; refusing to install.' >&2
+    return 1
+  fi
+  if [ -n "$recent" ]; then
+    printf 'A recording was written in the last minute; refusing to install:\n%s\n' "$recent" >&2
+    return 1
+  fi
+  if lsof -t +D "$MEETINGS/transcripts" 2>/dev/null | grep -q .; then
+    printf '%s\n' 'A process holds a file open in ~/meetings/transcripts; refusing to install.' >&2
+    return 1
+  fi
+}
+
 rollback() {
   local failed_app="$NEW_DIR/failed.app"
   local running_pids
@@ -227,17 +245,8 @@ if path_exists "$APP"; then
   assert_bundle_stopped "$APP" || exit 1
 fi
 
-# A capture still being written belongs to a recorder this script cannot see
-# (another copy of the app): never swap bundles under it.
-GROWING="$(find "$MEETINGS" -maxdepth 2 -name 'recording-*.pcm' -mtime -60s 2>/dev/null || true)"
-if [ -n "$GROWING" ]; then
-  printf 'A recording was written in the last minute; refusing to install:\n%s\n' "$GROWING" >&2
-  exit 1
-fi
-if lsof -t +D "$MEETINGS/transcripts" 2>/dev/null | grep -q .; then
-  printf '%s\n' 'A process holds a file open in ~/meetings/transcripts; refusing to install.' >&2
-  exit 1
-fi
+# A capture owned by another copy also prevents installation.
+assert_capture_idle || exit 1
 
 STAGE="$(mktemp -d "${TMPDIR:-/tmp}/meetcapture-install.XXXXXX")"
 cd "$ROOT"
@@ -292,6 +301,8 @@ if [ "$ORIGINAL_APP_PRESENT" -eq 1 ]; then
   # is moved out of the way.
   assert_bundle_stopped "$APP" || exit 1
 fi
+# A recording can start while the build/backup/copy is running.
+assert_capture_idle || exit 1
 
 # Keep the old bundle available for a rename-based rollback until LaunchServices
 # starts and keeps the exact new executable alive.

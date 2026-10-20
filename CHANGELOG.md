@@ -7,6 +7,44 @@ semantic versioning. The single source of the current version is
 
 ## [Unreleased]
 
+## [7.0.1] - 2026-10-19
+
+### Fixed
+- The installer uses the portable `find -mmin -1` predicate on macOS and
+  Homebrew/GNU find. A failed inspection is no longer silently treated as
+  "no recording"; installation aborts without replacing the bundle. The same
+  capture/file-use guard runs again immediately before the swap, catching a
+  recording that started during the build or backup.
+
+### Added
+- `build.sh --staging-dir <path> --qa --sign -` builds a separate
+  `MeetCapture QA.app` with identifier `com.maatwork.meetcapture.qa` and a
+  matching ad-hoc designated requirement. Production identity is unchanged;
+  the installer rejects the QA identifier. Existing QA and release docs now
+  describe launching the real UI with isolated data and preferences.
+
+### Verification and limits
+- The real QA UI imported the unchanged Spanish corpus through NSOpenPanel,
+  re-transcribed it, found matching text, showed an empty result for a
+  non-match, surfaced an invalid-WAV conversion error, and recovered on a new
+  valid import. Three distinct history rows, transcripts, processed markers
+  and handoff checksums agreed. Quit exited the QA process without stopping
+  the installed app or changing its 29-row database (`quick_check`: `ok`).
+- The installer regression suite passed all 13 cases, including a recording
+  started during the build and an inspection failure. Its recording guard
+  regression failed before the fix under GNU-compatible find behavior.
+- Swift tests passed `139/139`, dispatcher `31/31`, real-summary checks
+  `15/15`, and legacy migration `4/4`; shellcheck passed. The signed production
+  bundle passed the strict hosted-icon smoke `10/10`. Real dual-channel
+  capture with diarization enabled passed with WER `0.004`, two participant
+  labels, zero dropped callbacks and `92.778` s of audio from the unchanged
+  `91.414` s corpus. CI now runs the installer regressions and verifies the
+  separate QA bundle identity on both macOS runners.
+- The known 7.0.0 exact-word import gate failure remains: Parakeet hears
+  "me pongo" as "me puego" in the 91.414-second TTS corpus (WER 1/244).
+  FluidAudio's opt-in dual-decode arbitration did not fix it and was rejected;
+  neither the corpus, word aliases nor the acceptance gate were changed.
+
 ## [7.0.0] - 2026-10-19
 
 ### Removed

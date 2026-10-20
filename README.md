@@ -69,10 +69,12 @@ cd MeetCapture
 bundle, installs to `~/meetings/MeetCapture.app`, then launches and checks the
 exact installed process. It restores the previous bundle if installation or
 launch verification fails. Finish any recording and quit the running app before
-updating; the installer refuses to replace a live bundle. Backups are kept as
-zipped bundles in `~/meetings/.backups/` for manual recovery. Run `qa/app-smoke-test.sh` and the
-real pipeline checks separately; a successful launch alone does not prove
-capture, transcription, import, SQLite publication, or summary delivery.
+updating; the installer refuses to replace a live bundle. It checks for recent
+recordings before building and again immediately before the swap, and refuses
+installation if that inspection fails. Backups are kept as zipped bundles in
+`~/meetings/.backups/` for manual recovery. Run `qa/app-smoke-test.sh` and the real
+pipeline checks separately; a successful launch alone does not prove capture,
+transcription, import, SQLite publication, or summary delivery.
 
 ## Configuration
 
