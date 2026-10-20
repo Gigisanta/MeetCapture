@@ -604,21 +604,24 @@ def _claim_path(path: str) -> str:
     return os.path.join(MEETINGS_DIR, ".%s.claim" % os.path.basename(path))
 
 
-def release_handoff(path: str, acked_inode: int) -> None:
+def release_handoff(path: str, acked_inode: int) -> bool:
     """Drops the acknowledged handoff's name. Renaming it aside first makes the
     check atomic: a revision the app published meanwhile is a different file,
-    which goes back in place unless an even newer one is already there."""
+    which goes back in place unless an even newer one is already there.
+    Returns True when a newer handoff was found."""
     claim = _claim_path(path)
     try:
         os.rename(path, claim)
     except FileNotFoundError:
-        return
-    if os.stat(claim).st_ino != acked_inode:
+        return False
+    newer = os.stat(claim).st_ino != acked_inode
+    if newer:
         try:
             os.link(claim, path)
         except FileExistsError:
             pass
     os.unlink(claim)
+    return newer
 
 
 def restore_claims() -> None:
@@ -641,6 +644,28 @@ def restore_claims() -> None:
         os.unlink(claim)
 
 
+def retire_if_superseded(path: str) -> bool:
+    """Moves a stale retry (already acknowledged, or its transcript rewritten
+    since) aside so it never holds the .retry name a later revision needs.
+    Runs before backoff filtering: a stale retry still waiting would block
+    that revision just the same."""
+    name = os.path.basename(path)
+    m = PENDING_RE.match(name)
+    if not m or retry_generation(name) == 0:
+        return False
+    base = m.group("base")
+    if not is_superseded(path, os.path.join(MEETINGS_DIR, base + ".done")):
+        return False
+    target = base + SUPERSEDED_SUFFIX
+    try:
+        os.replace(path, os.path.join(MEETINGS_DIR, target))
+    except OSError as e:
+        log("%s superado, no se pudo mover a %s: %s" % (name, target, e), "ERROR")
+        return False
+    log("%s superado -> %s" % (name, target))
+    return True
+
+
 def process_file(path: str, cfg: dict) -> None:
     name = os.path.basename(path)
     m = PENDING_RE.match(name)
@@ -651,16 +676,8 @@ def process_file(path: str, cfg: dict) -> None:
     done_path = os.path.join(MEETINGS_DIR, base + ".done")
     revision = os.path.exists(done_path) and is_revision(path, done_path)
     if os.path.exists(done_path) and not revision:
-        if retry_generation(name) > 0 and is_superseded(path, done_path):
-            # A stale retry would hold the .retry name a later revision needs.
-            target = base + SUPERSEDED_SUFFIX
-            try:
-                os.replace(path, os.path.join(MEETINGS_DIR, target))
-                log("%s superado por %s.done -> %s" % (name, base, target))
-            except OSError as e:
-                log("%s superado, no se pudo mover a %s: %s" % (name, target, e), "ERROR")
-            return
-        log("skip %s: %s.done ya existe (idempotente)" % (name, base))
+        if not retire_if_superseded(path):
+            log("skip %s: %s.done ya existe (idempotente)" % (name, base))
         return
     if revision:
         log("revisión de %s: el transcript cambió, se rehace el resumen" % base)
@@ -815,7 +832,7 @@ def process_file(path: str, cfg: dict) -> None:
         _remove_if_exists(ack_tmp)
         _rollback_artifacts((), (json_path, html_path, md_path), backups)
         return fail(path, base, "ack del handoff falló: %s" % e)
-    release_handoff(path, acked_inode)
+    newer_handoff = release_handoff(path, acked_inode)
     _finalize_artifacts(backups)
     # Transcript: privado también (0600) — lo escribe la app con umask default.
     if os.path.isfile(tpath):
@@ -842,7 +859,11 @@ def process_file(path: str, cfg: dict) -> None:
         except Exception as e:  # noqa: BLE001 — el hook nunca rompe el pipeline
             log("hook post-summary falló: %s" % e, "ERROR")
 
-    if audio_path is not None:
+    if newer_handoff:
+        # The app published a revision meanwhile; its own audioPath decides
+        # whether the audio is still needed.
+        log("audio conservado: %s tiene una revisión pendiente" % base)
+    elif audio_path is not None:
         apath = audio_path
         if cfg.get("keep_audio"):
             log("audio conservado (keep_audio=true): %s" % apath)
@@ -860,6 +881,8 @@ def run_once(cfg: dict, now: float | None = None) -> int:
     if not os.path.isdir(MEETINGS_DIR):
         return 0
     restore_claims()
+    for name in sorted(os.listdir(MEETINGS_DIR)):
+        retire_if_superseded(os.path.join(MEETINGS_DIR, name))
     candidates = sorted(f for f in os.listdir(MEETINGS_DIR) if PENDING_RE.match(f))
     files = [f for f in candidates if due(os.path.join(MEETINGS_DIR, f), now)]
     waiting = len(candidates) - len(files)

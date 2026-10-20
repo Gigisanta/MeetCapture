@@ -133,7 +133,8 @@ class DispatcherTests(unittest.TestCase):
                          hashlib.sha256("hola completo\n".encode("utf-8")).hexdigest())
 
     def test_revision_published_during_ack_is_kept_for_the_next_pass(self):
-        _contract("meet-ack-race", text="viejo\n", with_audio=False)
+        # The old handoff was complete (audio to delete); the revision has gaps and needs the audio.
+        _contract("meet-ack-race", text="viejo\n")
         real_link = os.link
 
         def link_then_publish(src, dst, *args, **kwargs):
@@ -147,10 +148,26 @@ class DispatcherTests(unittest.TestCase):
         self.assertEqual(mod._checksum_of(os.path.join(MEETINGS, "meet-ack-race.done")), old,
                          "the summary is acknowledged with the handoff it was made from")
         self.assertIn("meet-ack-race.pending", self.names(), "the revision stays queued")
+        self.assertIn("meet-ack-race.pcm", self.names(), "the revision decides about the audio")
         mod.run_once(self.cfg)
         self.assertNotIn("meet-ack-race.pending", self.names())
+        self.assertIn("meet-ack-race.pcm", self.names(), "a gapped revision keeps the audio")
         with open(os.path.join(MEETINGS, "meet-ack-race.summary.md"), encoding="utf-8") as f:
             self.assertIn("nuevo", f.read())
+
+    def test_stale_retry_in_backoff_does_not_block_a_later_revision(self):
+        _contract("meet-block", text="uno [fragmento]\n", with_audio=False)
+        os.replace(os.path.join(MEETINGS, "meet-block.pending"), os.path.join(MEETINGS, "meet-block.pending.retry"))
+        _contract("meet-block", text="dos [fragmento]\n", with_audio=False)
+        mod.run_once(self.cfg)
+        self.assertIn("meet-block.done", self.names())
+        self.assertNotIn("meet-block.pending.retry", self.names(), "retired while still in backoff")
+
+        _contract("meet-block", text="tres\n", with_audio=False)
+        with mock.patch.object(mod, "_publish_artifacts", side_effect=OSError("disk full")):
+            mod.run_once(self.cfg)
+        self.assertIn("meet-block.pending.retry", self.names(), "the new revision enters the backoff")
+        self.assertNotIn("meet-block.pending", self.names())
 
     def test_claim_left_by_a_crash_is_restored(self):
         path = _contract("meet-claim", text="nuevo\n", with_audio=False)
