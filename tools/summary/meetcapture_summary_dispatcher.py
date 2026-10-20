@@ -55,6 +55,8 @@ EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 PENDING_RE = re.compile(r"^(?P<base>.+?)\.pending(?:\.retry(?:\.(?P<gen>\d+))?)?$")
 SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 FAILED_SUFFIX = ".pending.failed"
+# A retry whose handoff was already acknowledged or rewritten since: kept for inspection only.
+SUPERSEDED_SUFFIX = ".pending.superseded"
 MAX_RETRIES = 8
 BACKOFF_BASE = 300       # 5 min after the first failure
 BACKOFF_CAP = 6 * 3600   # never wait more than 6 h between attempts
@@ -571,7 +573,7 @@ def is_revision(path: str, done_path: str) -> bool:
     The app re-publishes a meeting under the same id when a retry fills the
     gaps of its transcript. The same checksum is a duplicate, and one that no
     longer matches the transcript is a superseded handoff (a stale
-    .pending.retry); both are skipped.
+    .pending.retry, retired to .pending.superseded); neither is a revision.
     """
     contract = _read_contract(path) or {}
     new = contract.get("checksum")
@@ -581,6 +583,62 @@ def is_revision(path: str, done_path: str) -> bool:
         return sha256_file(resolve(contract.get("transcriptPath"))) == new.lower()
     except (OSError, TypeError, ValueError):
         return False
+
+
+def is_superseded(path: str, done_path: str) -> bool:
+    """A handoff that adds nothing: already acknowledged, or its transcript was
+    rewritten after it was published. Unknown states are not superseded."""
+    contract = _read_contract(path) or {}
+    new = contract.get("checksum")
+    if not isinstance(new, str):
+        return False
+    if new == _checksum_of(done_path):
+        return True
+    try:
+        return sha256_file(resolve(contract.get("transcriptPath"))) != new.lower()
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _claim_path(path: str) -> str:
+    return os.path.join(MEETINGS_DIR, ".%s.claim" % os.path.basename(path))
+
+
+def release_handoff(path: str, acked_inode: int) -> None:
+    """Drops the acknowledged handoff's name. Renaming it aside first makes the
+    check atomic: a revision the app published meanwhile is a different file,
+    which goes back in place unless an even newer one is already there."""
+    claim = _claim_path(path)
+    try:
+        os.rename(path, claim)
+    except FileNotFoundError:
+        return
+    if os.stat(claim).st_ino != acked_inode:
+        try:
+            os.link(claim, path)
+        except FileExistsError:
+            pass
+    os.unlink(claim)
+
+
+def restore_claims() -> None:
+    """A crash inside release_handoff leaves a claim: it goes back unless it is
+    the acknowledged handoff or a newer one took its place."""
+    for name in os.listdir(MEETINGS_DIR):
+        if not (name.startswith(".") and name.endswith(".claim")):
+            continue
+        claim = os.path.join(MEETINGS_DIR, name)
+        path = os.path.join(MEETINGS_DIR, name[1:-len(".claim")])
+        m = PENDING_RE.match(os.path.basename(path))
+        if not m:
+            continue
+        done_path = os.path.join(MEETINGS_DIR, m.group("base") + ".done")
+        if _checksum_of(claim) != _checksum_of(done_path):
+            try:
+                os.link(claim, path)
+            except FileExistsError:
+                pass
+        os.unlink(claim)
 
 
 def process_file(path: str, cfg: dict) -> None:
@@ -593,6 +651,15 @@ def process_file(path: str, cfg: dict) -> None:
     done_path = os.path.join(MEETINGS_DIR, base + ".done")
     revision = os.path.exists(done_path) and is_revision(path, done_path)
     if os.path.exists(done_path) and not revision:
+        if retry_generation(name) > 0 and is_superseded(path, done_path):
+            # A stale retry would hold the .retry name a later revision needs.
+            target = base + SUPERSEDED_SUFFIX
+            try:
+                os.replace(path, os.path.join(MEETINGS_DIR, target))
+                log("%s superado por %s.done -> %s" % (name, base, target))
+            except OSError as e:
+                log("%s superado, no se pudo mover a %s: %s" % (name, target, e), "ERROR")
+            return
         log("skip %s: %s.done ya existe (idempotente)" % (name, base))
         return
     if revision:
@@ -721,20 +788,34 @@ def process_file(path: str, cfg: dict) -> None:
         return fail(path, base, "escritura de artefactos falló: %s" % e)
 
     # --- ack idempotente + cleanup de audio ---
-    if _checksum_of(path) != cksum:
+    # A hard link pins the file the name points to right now; the app publishes
+    # a revision as a new file renamed over the .pending, so what is checked
+    # here is exactly what gets acknowledged.
+    ack_tmp = os.path.join(MEETINGS_DIR, ".%s.ack-%d" % (base, os.getpid()))
+    _remove_if_exists(ack_tmp)
+    try:
+        os.link(path, ack_tmp)
+    except Exception as e:  # noqa: BLE001
+        _rollback_artifacts((), (json_path, html_path, md_path), backups)
+        return fail(path, base, "ack del handoff falló: %s" % e)
+    if _checksum_of(ack_tmp) != cksum:
         # A revision replaced this handoff while it was being summarized:
         # acknowledging it would mark the new transcript as done with the old summary.
+        _remove_if_exists(ack_tmp)
         _rollback_artifacts((), (json_path, html_path, md_path), backups)
         log("%s fue reemplazado durante el resumen; queda para la próxima pasada" % name)
         return
     try:
-        os.chmod(path, 0o600)
+        os.chmod(ack_tmp, 0o600)
+        acked_inode = os.stat(ack_tmp).st_ino
         if os.path.exists(done_path) and not revision:
             raise FileExistsError("ya existe %s" % done_path)
-        os.replace(path, done_path)  # atómico: .pending -> .done (una revisión lo reemplaza)
+        os.replace(ack_tmp, done_path)  # atómico (una revisión reemplaza el .done)
     except Exception as e:  # noqa: BLE001 — sin ack, no debe quedar artefacto huérfano
+        _remove_if_exists(ack_tmp)
         _rollback_artifacts((), (json_path, html_path, md_path), backups)
         return fail(path, base, "ack del handoff falló: %s" % e)
+    release_handoff(path, acked_inode)
     _finalize_artifacts(backups)
     # Transcript: privado también (0600) — lo escribe la app con umask default.
     if os.path.isfile(tpath):
@@ -778,6 +859,7 @@ def process_file(path: str, cfg: dict) -> None:
 def run_once(cfg: dict, now: float | None = None) -> int:
     if not os.path.isdir(MEETINGS_DIR):
         return 0
+    restore_claims()
     candidates = sorted(f for f in os.listdir(MEETINGS_DIR) if PENDING_RE.match(f))
     files = [f for f in candidates if due(os.path.join(MEETINGS_DIR, f), now)]
     waiting = len(candidates) - len(files)

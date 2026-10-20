@@ -51,8 +51,11 @@ def _contract(base: str, text: str = "hola mundo\n", with_audio: bool = True, **
     }
     contract.update(extra)
     path = os.path.join(MEETINGS, base + ".pending")
-    with open(path, "w", encoding="utf-8") as f:
+    # Like the app: a new file renamed over the handoff.
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(contract, f)
+    os.replace(tmp, path)
     return path
 
 
@@ -114,7 +117,7 @@ class DispatcherTests(unittest.TestCase):
                              hashlib.sha256("hola mundo completo\n".encode("utf-8")).hexdigest())
         self.assertNotIn("meet-rev.pcm", self.names(), "the complete handoff releases the audio")
 
-    def test_stale_retry_next_to_a_revision_is_skipped(self):
+    def test_stale_retry_next_to_a_revision_is_retired(self):
         _contract("meet-stale", text="hola [fragmento]\n", with_audio=False)
         os.replace(os.path.join(MEETINGS, "meet-stale.pending"), os.path.join(MEETINGS, "meet-stale.pending.retry"))
         stale = os.path.join(MEETINGS, "meet-stale.pending.retry")
@@ -124,8 +127,38 @@ class DispatcherTests(unittest.TestCase):
         self.assertIn("meet-stale.done", self.names())
         mod.run_once(self.cfg)
         self.assertNotIn("meet-stale.pending.error", self.names(), "a superseded handoff is not an error")
+        self.assertNotIn("meet-stale.pending.retry", self.names(), "it must not hold the retry name")
+        self.assertIn("meet-stale.pending.superseded", self.names())
         self.assertEqual(mod._checksum_of(os.path.join(MEETINGS, "meet-stale.done")),
                          hashlib.sha256("hola completo\n".encode("utf-8")).hexdigest())
+
+    def test_revision_published_during_ack_is_kept_for_the_next_pass(self):
+        _contract("meet-ack-race", text="viejo\n", with_audio=False)
+        real_link = os.link
+
+        def link_then_publish(src, dst, *args, **kwargs):
+            real_link(src, dst, *args, **kwargs)
+            if ".ack-" in os.path.basename(dst):
+                _contract("meet-ack-race", text="nuevo\n", with_audio=False)
+
+        with mock.patch.object(mod.os, "link", side_effect=link_then_publish):
+            mod.run_once(self.cfg)
+        old = hashlib.sha256("viejo\n".encode("utf-8")).hexdigest()
+        self.assertEqual(mod._checksum_of(os.path.join(MEETINGS, "meet-ack-race.done")), old,
+                         "the summary is acknowledged with the handoff it was made from")
+        self.assertIn("meet-ack-race.pending", self.names(), "the revision stays queued")
+        mod.run_once(self.cfg)
+        self.assertNotIn("meet-ack-race.pending", self.names())
+        with open(os.path.join(MEETINGS, "meet-ack-race.summary.md"), encoding="utf-8") as f:
+            self.assertIn("nuevo", f.read())
+
+    def test_claim_left_by_a_crash_is_restored(self):
+        path = _contract("meet-claim", text="nuevo\n", with_audio=False)
+        claim = os.path.join(MEETINGS, ".meet-claim.pending.claim")
+        os.replace(path, claim)
+        mod.run_once(self.cfg)
+        self.assertFalse(os.path.exists(claim))
+        self.assertIn("meet-claim.done", self.names())
 
     def test_handoff_replaced_during_summary_is_not_acknowledged(self):
         _contract("meet-race", text="viejo\n", with_audio=False)
@@ -452,7 +485,7 @@ class DispatcherTests(unittest.TestCase):
         original_replace = mod.os.replace
 
         def replace(src, dst):
-            if os.path.basename(src) == "meet-ack.pending" and os.path.basename(dst) == "meet-ack.done":
+            if os.path.basename(src).startswith(".meet-ack.ack-") and os.path.basename(dst) == "meet-ack.done":
                 raise OSError("simulated ack failure")
             return original_replace(src, dst)
 

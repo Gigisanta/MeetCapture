@@ -106,14 +106,18 @@ Planned as 7.0.0 (`scripts/version.sh` bumps it at release).
   stays until no gap is left. Re-transcribir refuses while background recovery
   works on the same capture.
 - Summary dispatcher: a `.pending` whose checksum differs from its `.done` is a
-  revision and replaces the summary; a handoff rewritten while it is read or
-  summarized is left for the next pass instead of being acknowledged.
+  revision and replaces the summary; a handoff rewritten while it is read,
+  summarized or acknowledged is left for the next pass instead of being
+  acknowledged with the old summary, and a stale `.pending.retry` that a
+  revision superseded moves to `.pending.superseded`.
 - Retry times are saved in `<audio>.recovery.json` (`next_attempt_at`), so the
   5 and 20 min backoff survives a relaunch or crash, and each capture keeps its
-  own time; a capture that comes due during another recovery runs right after it.
+  own time; a capture that comes due during another recovery runs right after
+  it, and a queued capture is checked again before its turn.
 - A capture that used up its automatic attempts shows a warning under the
   pending count in the popover and posts one notification; its audio is kept
-  until it is transcribed by hand.
+  until it is transcribed by hand. A failed Re-transcribir of a complete
+  capture keeps its transcript and does not count as an attempt.
 - Chunk checkpoints record the recognition language; after a language change
   the chunks are transcribed again instead of reusing the old language.
 

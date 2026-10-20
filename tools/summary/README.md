@@ -65,6 +65,7 @@ checksum is invalid.
 | `meet-X.pending.retry`, `.retry.N` | Transient failure such as an endpoint error. Backoff starts at 5 minutes, doubles up to 6 hours, and is evaluated from the latest failure. |
 | `meet-X.pending.failed` | Eight transient attempts were exhausted. `--retry-failed` moves it back to `.pending` without overwriting a colliding handoff. |
 | `meet-X.pending.error` | Permanent input failure: invalid JSON or version, path escape, missing transcript, checksum mismatch, or invalid transcript. The handoff is retained for diagnosis. |
+| `meet-X.pending.superseded` | A `.retry` whose handoff was already acknowledged or whose transcript was rewritten since; moved aside so it never holds the retry name a later revision needs. Kept for diagnosis only. |
 | `meet-X.done` | The summary JSON and HTML were published and the handoff was acknowledged. Audio is then removed unless `keep_audio` is true. A later `meet-X.pending` with the same checksum is a duplicate and is skipped; one with a different checksum is a revision (the app filled the gaps of a transcript) and replaces the summary and the `.done`. A handoff with gaps carries `audioPath: null` because the app keeps the audio for that retry. |
 
 All three summary artifacts (JSON, HTML and Markdown) are prepared through temporary files and rollback. If

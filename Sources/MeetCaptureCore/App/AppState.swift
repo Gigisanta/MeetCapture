@@ -532,6 +532,14 @@ final class AppState: ObservableObject {
                     try? await Task.sleep(nanoseconds: 2_000_000_000)
                 }
                 guard !Task.isCancelled else { break }
+                // A job that ran meanwhile (Re-transcribir) may have moved its
+                // retry time or used up its attempts: re-read them before its turn.
+                if automaticOnly {
+                    var current = recording
+                    current.attempts = RecordingRecovery.attempts(forAudio: recording.audioPath)
+                    current.nextAttemptAt = RecordingRecovery.nextAttemptAt(forAudio: recording.audioPath)
+                    guard !RecordingRecovery.automatic([current]).isEmpty else { continue }
+                }
                 await self.recover(recording)
             }
             self.recoveringPath = nil
@@ -594,8 +602,10 @@ final class AppState: ObservableObject {
     }
 
     /// Records a failed or gapped attempt with its next retry time; the attempt
-    /// that uses up the automatic ones tells the user once.
+    /// that uses up the automatic ones tells the user once. A failed re-run of
+    /// a complete capture leaves its transcript intact and is not a recovery.
     private func recordRecoveryFailure(audioPath: String, reason: String, countsAsAttempt: Bool, title: String) async {
+        guard RecordingRecovery.needsTranscript(audioPath: audioPath) else { return }
         RecordingRecovery.recordFailure(audioPath: audioPath, reason: reason,
                                         countsAsAttempt: countsAsAttempt, retryDelays: recoveryRetryDelays)
         if RecordingRecovery.attempts(forAudio: audioPath) == RecordingRecovery.maxAutomaticAttempts,

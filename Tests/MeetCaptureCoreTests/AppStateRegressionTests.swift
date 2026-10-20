@@ -562,6 +562,66 @@ final class AppStateRegressionTests: XCTestCase {
         XCTAssertEqual(RecordingRecovery.attempts(forAudio: c), 1)
     }
 
+    func testQueuedCaptureIsRecheckedBeforeItsTurn() async throws {
+        let outputDir = TestSupport.makeTempDir(self, "app-retry-recheck")
+        let paths = AppPaths(environment: ["MEETCAPTURE_TEST_OUTPUT_DIR": outputDir], home: outputDir)
+        useSettings([Settings.Key.notifyHermes.rawValue: false])
+        let a = try writeCapture(paths, "a"), b = try writeCapture(paths, "b")
+        // Older audio goes second in the pass.
+        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-60)], ofItemAtPath: b)
+        let calls = TranscriptionCallCounter()
+        let state = AppState(
+            paths: paths, store: MeetingStore(path: paths.databasePath),
+            recordingDriver: FakeRecordingBackend().driver,
+            transcriptionRunner: { job, _ in
+                calls.increment()
+                try FileManager.default.createDirectory(
+                    atPath: ChunkedTranscription.workDirectory(forAudio: job.audioPath),
+                    withIntermediateDirectories: true)
+                if job.audioPath == a { try await Task.sleep(nanoseconds: 600_000_000) }
+                return Self.completeOutcome
+            },
+            recoveryRetryDelays: [3_600, 3_600])
+
+        state.recoverRecordings(automaticOnly: true)
+        try await waitUntil { calls.value == 1 }
+        // Meanwhile another job on b failed and moved its retry time.
+        RecordingRecovery.recordFailure(audioPath: b, reason: "engine failed", retryDelays: [3_600])
+        try await waitUntil { !state.isRecovering }
+
+        XCTAssertEqual(calls.value, 1, "b waits for its new retry time")
+        XCTAssertEqual(RecordingRecovery.attempts(forAudio: b), 1)
+    }
+
+    func testFailedRerunOfACompleteCaptureIsNotARecoveryAttempt() async throws {
+        let outputDir = TestSupport.makeTempDir(self, "app-rerun-complete")
+        let paths = AppPaths(environment: ["MEETCAPTURE_TEST_OUTPUT_DIR": outputDir], home: outputDir)
+        useSettings([Settings.Key.notifyHermes.rawValue: false])
+        let backend = FakeRecordingBackend()
+        backend.suspendStart = false
+        let calls = TranscriptionCallCounter()
+        let state = AppState(
+            paths: paths, store: MeetingStore(path: paths.databasePath), recordingDriver: backend.driver,
+            transcriptionRunner: { _, _ in
+                calls.increment()
+                guard calls.value == 1 else { throw FakeEngineError() }
+                return Self.completeOutcome
+            },
+            errorDismissalDelay: 300, recoveryRetryDelays: [3_600, 3_600])
+        state.startRecording()
+        try await waitUntil { backend.isRecording }
+        state.stopRecording()
+        try await waitUntil { state.phase == .done }
+        let audio = try XCTUnwrap(backend.outputPath)
+
+        for _ in 0..<RecordingRecovery.maxAutomaticAttempts { await state.retranscribeLastAudio() }
+
+        XCTAssertEqual(calls.value, 1 + RecordingRecovery.maxAutomaticAttempts)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: RecordingRecovery.attemptsPath(forAudio: audio)))
+        XCTAssertTrue(state.recoverableRecordings.isEmpty)
+        XCTAssertEqual(state.exhaustedRecordingCount, 0)
+    }
+
     func testRetranscribingAGappedCaptureReplacesItInPlace() async throws {
         let outputDir = TestSupport.makeTempDir(self, "app-gap-manual")
         let paths = AppPaths(environment: ["MEETCAPTURE_TEST_OUTPUT_DIR": outputDir], home: outputDir)

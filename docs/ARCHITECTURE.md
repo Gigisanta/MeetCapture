@@ -112,7 +112,10 @@ and `Settings` only know `Support`. Nothing below `App` touches SwiftUI.
    `.pending.retry[.N]` with a backoff of 5 min doubling up to 6 h; after 8
    attempts it becomes `.pending.failed`, which `--retry-failed` requeues. A
    `.pending` whose checksum differs from its `.done` is a revision (the app
-   filled the gaps) and replaces the summary.
+   filled the gaps) and replaces the summary. The acknowledgement hard-links the
+   handoff first and checks that copy, so a revision published meanwhile stays
+   queued; a stale `.pending.retry` that a revision superseded moves to
+   `.pending.superseded`.
 
 ## Meeting identity
 
