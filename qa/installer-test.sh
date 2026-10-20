@@ -59,6 +59,18 @@ start_fixture_process() {
 
 mkdir -p "$TEST_BIN"
 
+# GNU find (also common on macOS through Homebrew) rejects BSD's -mtime -60s.
+# Preserve the real filesystem predicate: never turn an inspection error into idle.
+cat >"$TEST_BIN/find" <<'MOCK'
+#!/bin/bash
+set -euo pipefail
+if [ "$INSTALL_SCENARIO" = inspection-fails ]; then exit 2; fi
+for arg in "$@"; do
+  [ "$arg" != -60s ] || exit 2
+done
+exec /usr/bin/find "$@"
+MOCK
+
 cat >"$TEST_BIN/codesign" <<'MOCK'
 #!/bin/bash
 set -euo pipefail
@@ -189,7 +201,7 @@ MOCK
   chmod +x "$TEST_BIN/$command_name"
 done
 
-for command_name in codesign plutil ditto pgrep lsof open sleep; do
+for command_name in codesign plutil ditto pgrep lsof open sleep find; do
   chmod +x "$TEST_BIN/$command_name"
 done
 
@@ -235,6 +247,10 @@ fi
 /bin/mkdir -p "$stage/Contents/Resources"
 /bin/cp "$FIXTURE_ICON" "$stage/Contents/Resources/AppIcon.icns"
 printf 'new\n' >"$stage/Contents/version-marker"
+if [ "$INSTALL_SCENARIO" = recording-during-build ]; then
+  mkdir -p "$HOME/meetings/transcripts"
+  printf 'pcm\n' >"$HOME/meetings/transcripts/recording-late.pcm"
+fi
 BUILD
   chmod +x "$REPO/build.sh"
 
@@ -437,5 +453,23 @@ run_installer
 grep -F 'refusing to install' "$OUTPUT_FILE" >/dev/null || fail 'growing recording abort gave no reason'
 assert_preserved_state
 printf 'PASS: a recording written in the last minute aborts before building\n'
+
+setup_case late_recording recording-during-build
+run_installer
+[ "$STATUS" -ne 0 ] || fail 'installer replaced the app after a recording started during the build'
+[ -s "$BUILD_LOG" ] || fail 'late recording case did not reach the build'
+[ "$(cat "$APP/Contents/version-marker")" = old ] || fail 'late recording case replaced the installed bundle'
+[ "$(cat "$MEETINGS/transcripts/recording-late.pcm")" = pcm ] || fail 'late recording case changed the recording'
+[ ! -s "$OPEN_LOG" ] || fail 'late recording case opened the replacement'
+assert_preserved_state
+printf 'PASS: a recording started during the build prevents the swap\n'
+
+setup_case failed_inspection inspection-fails
+run_installer
+[ "$STATUS" -ne 0 ] || fail 'installer treated a failed recording inspection as idle'
+[ "$(cat "$APP/Contents/version-marker")" = old ] || fail 'failed inspection changed the installed bundle'
+[ ! -s "$BUILD_LOG" ] || fail 'failed inspection did not abort before building'
+assert_preserved_state
+printf 'PASS: a failed recording inspection prevents installation\n'
 
 printf '%s\n' 'All installer fixture cases passed.'

@@ -114,6 +114,64 @@ variables and acceptance behavior are fixed:
   WER/reference checks; app exit `0` by itself is not a WER pass. `ui` is a
   manual interaction review and never converts a report counter into PASS.
 
+### Building and driving the real QA UI
+
+Build a separate staging-only bundle; the installed production app can stay
+running during this check:
+
+```bash
+./build.sh --staging-dir /tmp/mc-qa --qa --sign -
+codesign --verify --deep --strict "/tmp/mc-qa/MeetCapture QA.app"
+codesign -d -r- "/tmp/mc-qa/MeetCapture QA.app"
+```
+
+`--qa` requires `--staging` or `--staging-dir` and ad-hoc signing (`--sign -`
+also overrides `MEETCAPTURE_SIGN_IDENTITY`). It produces `MeetCapture QA.app`
+with display name `MeetCapture QA`, identifier
+`com.maatwork.meetcapture.qa`, and the stable ad-hoc designated requirement
+`designated => identifier "com.maatwork.meetcapture.qa"`. Only the staged
+Info.plist is changed; `Resources/Info.plist` and user preferences are not.
+The normal build keeps the production identifier, name, and signing behavior.
+The normal installer rejects the QA identifier; never copy this bundle over
+the production app.
+
+Launch the exact QA executable with the required environment rather than
+opening an app by name (which could target the installed app):
+
+```bash
+QA_OUTPUT="$(mktemp -d /tmp/meetcapture-ui.XXXXXX)"
+env MEETCAPTURE_REAL_CHECK=ui \
+  MEETCAPTURE_TEST_OUTPUT_DIR="$QA_OUTPUT" \
+  MEETCAPTURE_CHECK_INPUT=/tmp/known.wav \
+  MEETCAPTURE_CHECK_REPORT="$QA_OUTPUT/ui-evidence.json" \
+  "/tmp/mc-qa/MeetCapture QA.app/Contents/MacOS/MeetCapture" &
+QA_PID=$!
+```
+
+The input must be a nonempty 16 kHz mono Int16 WAV. Keep the output directory
+empty before launch; save logs outside it until the harness has started.
+Wait for `REAL_UI_READY` and the `MeetCapture · Real pipeline` window before
+using CUA. The QA identity alone does not isolate data: always supply this
+environment, which selects isolated AppPaths and volatile preferences before
+normal startup. Do not open the QA bundle without it.
+
+CUA must exercise known-WAV import via the open panel, re-transcription,
+search matches/non-matches, and error recovery with the real controls.
+Do not enter Settings or grant privacy permissions for this import check.
+Save fresh screenshots and observed actions/results, failures or blockers,
+the QA bundle identifier, input and output paths in
+`$QA_OUTPUT/ui-evidence.json`; this is manual evidence, not an app-generated
+PASS. After work finishes, use the QA window's Quit button and then
+`wait "$QA_PID"` in the launching shell. Confirm that this QA process exited
+and the already-running production app remains available. Do not quit or
+kill by the shared `MeetCapture` executable name. Unregister the disposable
+bundle after quitting it so LaunchServices does not retain the staging copy:
+
+```bash
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
+  -u "/tmp/mc-qa/MeetCapture QA.app"
+```
+
 The legacy duration-based self-test path is retired and removed; it must not be
 used as a replacement. An error must not be reported as a successful check.
 Fixture counts do not establish system health; current local evidence and

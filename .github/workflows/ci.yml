@@ -31,6 +31,15 @@ jobs:
       - name: Verify signature
         run: codesign --verify --deep --strict /tmp/mc-stage/MeetCapture.app
 
+      - name: Installer safety regressions
+        run: qa/installer-test.sh
+
+      - name: Separate QA bundle identity
+        run: |
+          ./build.sh --staging-dir /tmp/mc-qa --qa --sign -
+          codesign --verify --deep --strict "/tmp/mc-qa/MeetCapture QA.app"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "/tmp/mc-qa/MeetCapture QA.app/Contents/Info.plist")" = com.maatwork.meetcapture.qa
+
       - name: Smoke test
         env:
           CI: "1"

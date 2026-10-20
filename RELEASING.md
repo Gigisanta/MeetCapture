@@ -81,6 +81,49 @@
 
    Repeat with `--mode capture` when the microphone prerequisite is available.
 
+   For `ui`, build the opt-in staging-only QA identity and launch its exact
+   executable with a fresh output directory:
+
+   ```bash
+   ./build.sh --staging-dir /tmp/mc-qa --qa --sign -
+   codesign --verify --deep --strict "/tmp/mc-qa/MeetCapture QA.app"
+   codesign -d -r- "/tmp/mc-qa/MeetCapture QA.app"
+   QA_OUTPUT="$(mktemp -d /tmp/meetcapture-ui.XXXXXX)"
+   env MEETCAPTURE_REAL_CHECK=ui \
+     MEETCAPTURE_TEST_OUTPUT_DIR="$QA_OUTPUT" \
+     MEETCAPTURE_CHECK_INPUT=/tmp/known.wav \
+     MEETCAPTURE_CHECK_REPORT="$QA_OUTPUT/ui-evidence.json" \
+     "/tmp/mc-qa/MeetCapture QA.app/Contents/MacOS/MeetCapture" &
+   QA_PID=$!
+   ```
+
+   This bundle is named `MeetCapture QA`, with identifier
+   `com.maatwork.meetcapture.qa` and a matching identifier-only ad-hoc
+   designated requirement. `--qa` requires a staging destination and ad-hoc
+   signing; `--sign -` overrides any configured signing identity. It edits
+   only the staged plist, not `Resources/Info.plist` or user preferences.
+   Normal builds retain their production identity, and `install.sh` rejects
+   the QA identifier. The installed app may remain running for this UI check.
+   Always use the real-check environment: the QA identity by itself does not
+   select isolated AppPaths or skip normal startup.
+
+   Wait for `REAL_UI_READY` and the real-pipeline window, then drive it with
+   CUA as described below. Keep the output directory empty before launch,
+   including logs; the input must be a nonempty 16 kHz mono Int16 WAV. Save
+   fresh screenshots and observed actions/results, failures or blockers,
+   bundle identity and input/output paths in the manual evidence JSON. After
+   work finishes, use this QA window's Quit button, then `wait "$QA_PID"` in
+   the launching shell. Confirm the QA process exits and production remains
+   available; never quit by the shared executable name. Unregister the
+   disposable bundle after quitting:
+
+   ```bash
+   /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
+     -u "/tmp/mc-qa/MeetCapture QA.app"
+   ```
+
+   See `qa/README.md` for the QA identity and CUA evidence contract.
+
    `import` must cover two imports and one re-transcription through real
    AppState, SQLite, and `.pending` publication. `capture` must use AppState,
    AV/Core Audio, `afplay`, a real PCM recording plus format sidecar, convert
