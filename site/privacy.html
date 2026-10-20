@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy, cookies &amp; external services | MeetCapture</title>
+<meta name="description" content="How the MeetCapture website and macOS app handle data, cookies, and optional external services.">
+<link rel="canonical" href="https://meetcapture.maat.work/privacy">
+<meta name="theme-color" content="#0b0b11">
+<meta name="color-scheme" content="dark">
+<link rel="icon" href="favicon.ico" sizes="any">
+<link rel="icon" href="icon-mw.svg" type="image/svg+xml">
+<style>
+@font-face {
+  font-family: "Hanken Grotesk";
+  src: url("fonts/hanken.woff2") format("woff2");
+  font-weight: 200 800;
+  font-display: swap;
+}
+:root {
+  color-scheme: dark;
+  --bg: #0b0b11;
+  --surface: #111119;
+  --line: rgba(244, 240, 255, 0.16);
+  --text: #f5f2fc;
+  --muted: #c9c5d4;
+  --accent: #c2b4ff;
+  --page: 760px;
+}
+* { box-sizing: border-box; }
+html { background: var(--bg); -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--muted);
+  font-family: "Hanken Grotesk", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  font-size: 1.0625rem;
+  line-height: 1.65;
+}
+a { color: var(--accent); text-underline-offset: 0.2em; }
+a:hover { color: var(--text); }
+a:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, button:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 3px;
+}
+.skip-link {
+  position: absolute;
+  top: 0.75rem;
+  left: 0.75rem;
+  z-index: 2;
+  padding: 0.65rem 0.9rem;
+  transform: translateY(-160%);
+  border-radius: 7px;
+  background: var(--text);
+  color: var(--bg);
+  font-weight: 700;
+}
+.skip-link:focus { transform: translateY(0); }
+.wrap { width: min(100% - 2.5rem, var(--page)); margin-inline: auto; }
+header, footer { border-bottom: 1px solid var(--line); }
+header .wrap, footer .wrap {
+  display: flex;
+  min-height: 76px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.brand { color: var(--text); font-weight: 700; text-decoration: none; }
+main { padding-block: clamp(3rem, 8vw, 6rem); }
+h1, h2 { color: var(--text); line-height: 1.2; }
+h1 { max-width: 18ch; margin: 0 0 0.75rem; font-size: clamp(2.25rem, 7vw, 3.75rem); letter-spacing: -0.045em; }
+h2 { margin: 2.5rem 0 0.65rem; font-size: 1.4rem; }
+p, ul { margin: 0.7rem 0 0; }
+li + li { margin-top: 0.35rem; }
+.updated { margin: 0; color: var(--muted); font-size: 0.95rem; }
+.notice {
+  margin-top: 1.5rem;
+  padding: 1rem 1.15rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+.contact-form {
+  display: grid;
+  gap: 1rem;
+  margin-top: 1rem;
+  padding: 1.25rem;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+}
+fieldset { display: grid; gap: 0.9rem; margin: 0; padding: 0; border: 0; }
+legend { margin-bottom: 0.4rem; color: var(--text); font-size: 1.1rem; font-weight: 700; }
+label { display: block; margin-bottom: 0.3rem; color: var(--text); font-weight: 600; }
+input, textarea {
+  width: 100%;
+  min-height: 46px;
+  padding: 0.7rem 0.75rem;
+  border: 1px solid #767181;
+  border-radius: 7px;
+  background: #09090e;
+  color: var(--text);
+  font: inherit;
+}
+textarea { min-height: 150px; resize: vertical; }
+.help { margin: 0.35rem 0 0; font-size: 0.92rem; }
+button {
+  min-height: 48px;
+  width: fit-content;
+  padding: 0.7rem 1rem;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: #6845d0;
+  color: #fff;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+button:hover { background: #7955e8; }
+footer { border-top: 1px solid var(--line); border-bottom: 0; }
+footer .wrap { min-height: 84px; }
+@media (max-width: 520px) {
+  .wrap { width: min(100% - 2rem, var(--page)); }
+  header .wrap, footer .wrap { align-items: flex-start; flex-direction: column; justify-content: center; padding-block: 1rem; }
+  button { width: 100%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; }
+}
+</style>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<header>
+  <div class="wrap">
+    <a class="brand" href="index.html">MeetCapture by MaatWork</a>
+    <a href="index.html">Back to MeetCapture</a>
+  </div>
+</header>
+<main id="main" class="wrap">
+  <article aria-labelledby="page-title">
+    <h1 id="page-title">Privacy, cookies and external services</h1>
+    <p class="updated">Last updated: <time datetime="2026-09-24">September 24, 2026</time></p>
+
+    <div class="notice">
+      <p><strong>In brief:</strong> this website has no analytics, advertising pixels, embedded third-party content, or tracking scripts. Its source sets no cookies or browser storage. The macOS app transcribes locally; optional summaries use the endpoint you configure.</p>
+    </div>
+
+    <section aria-labelledby="website-title">
+      <h2 id="website-title">The MeetCapture website</h2>
+      <p>The page and its fonts, icons, and product preview are served as local site assets. It does not load analytics, advertising, externally hosted fonts, video embeds, or third-party scripts. The page source does not set cookies or use local storage. No non-essential tracking runs, so there is no tracking-consent choice to save.</p>
+      <p>The deployment configuration uses Vercel for hosting. The hosting provider may process technical request data, such as IP addresses and logs, and may use its own cookies or similar technologies as described in its <a href="https://vercel.com/legal/privacy-notice">Privacy Notice</a> and <a href="https://vercel.com/legal/cookie-policy">Cookie Policy</a>. MeetCapture does not add Vercel analytics to this page.</p>
+    </section>
+
+    <section aria-labelledby="app-title">
+      <h2 id="app-title">The macOS app</h2>
+      <p>MeetCapture captures and transcribes audio on your Mac and stores searchable meeting history locally. The first time it transcribes, it downloads its speech models (about 0.6 GB) from Hugging Face; after that it needs no network, and audio and transcripts never leave the Mac. Audio and Calendar access remain subject to the permissions managed by macOS; this notice does not change those permissions or the app's capture and consent behavior.</p>
+      <p>Summaries are optional. When the summary dispatcher runs, it sends the meeting title and date, transcript text, notes, and any configured tag-vocabulary names to the OpenAI-compatible endpoint in your local MeetCapture configuration. The default endpoint is <code>http://127.0.0.1:8080/v1</code>; if you change it to a remote service, that service receives the request and its own privacy terms apply. The dispatcher sends text, not the raw audio file. An optional post-summary script that you configure receives a summary JSON file that also contains your notes; that script may pass its contents to another service.</p>
+      <p>Audio retention follows the app's retention setting and the summary configuration. This page does not promise a fixed retention period for local files; review the current settings before recording.</p>
+    </section>
+
+    <section aria-labelledby="third-parties-title">
+      <h2 id="third-parties-title">External services</h2>
+      <p>This page does not embed GitHub or MaatWork content. Following the <a href="https://github.com/Gigisanta/MeetCapture">source-code link</a> opens GitHub; visiting <a href="https://maat.work">MaatWork</a> opens its website. Those services receive a request only when you follow the link and handle it under their own policies. See <a href="https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement">GitHub's Privacy Statement</a> and <a href="https://maat.work/privacidad">MaatWork's privacy page</a>.</p>
+    </section>
+
+    <section aria-labelledby="request-title">
+      <h2 id="request-title">Privacy requests</h2>
+      <p>For a question or a request about information sent to MaatWork, use this form. It opens your configured email app; it does not submit data to this website. Review the message in your email app and send it yourself. If no email app opens, write to <a href="mailto:maatwork.comercial@gmail.com">maatwork.comercial@gmail.com</a>. This request is not a marketing subscription.</p>
+      <form class="contact-form" action="mailto:maatwork.comercial@gmail.com?subject=MeetCapture%20privacy%20request" method="post" enctype="text/plain">
+        <fieldset>
+          <legend>Send a privacy request</legend>
+          <div>
+            <label for="request-email">Your email address <span>(required)</span></label>
+            <input id="request-email" name="Email" type="email" autocomplete="email" inputmode="email" required aria-describedby="request-help">
+          </div>
+          <div>
+            <label for="request-message">How can we help? <span>(required)</span></label>
+            <textarea id="request-message" name="Request" rows="6" required aria-describedby="request-help"></textarea>
+          </div>
+        </fieldset>
+        <p class="help" id="request-help">Include only the details needed to understand your request. Don't include passwords, API keys, meeting recordings, or other people's personal information.</p>
+        <button type="submit">Open email app</button>
+      </form>
+      <p>MeetCapture is a MaatWork product. The MaatWork privacy page lists the available contact channel. For general information about personal-data rights in Argentina, see the <a href="https://www.argentina.gob.ar/aaip/datospersonales/derechos">AAIP guide</a>.</p>
+    </section>
+  </article>
+</main>
+<footer>
+  <div class="wrap">
+    <span>MeetCapture by MaatWork</span>
+    <a href="index.html">Back to MeetCapture</a>
+  </div>
+</footer>
+</body>
+</html>

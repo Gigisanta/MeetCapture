@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>ai.hermes.meetcapture-summary</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/bin/python3</string>
+		<string>__REPO__/tools/summary/meetcapture_summary_dispatcher.py</string>
+		<string>--once</string>
+	</array>
+	<!-- A new .pending wakes the agent at once... -->
+	<key>WatchPaths</key>
+	<array>
+		<string>__HOME__/meetings</string>
+	</array>
+	<!-- ...and this periodic run is what makes the retry backoff expire. -->
+	<key>StartInterval</key>
+	<integer>900</integer>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>StandardOutPath</key>
+	<string>__HOME__/meetings/.logs/launchd-summary.log</string>
+	<key>StandardErrorPath</key>
+	<string>__HOME__/meetings/.logs/launchd-summary.log</string>
+	<key>ProcessType</key>
+	<string>Background</string>
+</dict>
+</plist>

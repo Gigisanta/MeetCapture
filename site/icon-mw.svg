@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="MaatWork">
+  <rect width="512" height="512" rx="115" fill="#0A0A11"/>
+  <g transform="translate(129,106) scale(2.5424)" fill="#FFFFFF">
+    <path d="M0,0 L0,48.4 L14.1,48.4 L14.3,27 L50,54.3 L85.7,27 L85.9,48.4 L100,48.4 L100,0 L58.5,29.5 L50,34.2 L41.5,29.5 Z"/>
+    <path d="M0,118 L0,69.6 L14.1,69.6 L14.3,91 L50,63.7 L85.7,91 L85.9,69.6 L100,69.6 L100,118 L58.5,88.5 L50,83.8 L41.5,88.5 Z"/>
+  </g>
+</svg>

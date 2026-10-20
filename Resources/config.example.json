@@ -1,0 +1,10 @@
+{
+  "whitelistedEmails": [
+    "you@example.com",
+    "teammate@example.com"
+  ],
+  "aliases": {
+    "AppSheet": ["app sheet", "apsheet"],
+    "CEDEAR": ["cedear", "sedear"]
+  }
+}

@@ -46,3 +46,16 @@ venv/
 *.p12
 *.cer
 *.mobileprovision
+
+# Agent scratch state
+.omh/
+
+# Local, per-machine configuration (see Resources/config.example.json)
+config.json
+
+# Downloaded models (scripts/fetch-models.sh)
+*.tar.bz2
+*.onnx
+
+# Landing deploy state
+site/.vercel/

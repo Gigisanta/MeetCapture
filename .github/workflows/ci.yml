@@ -1,0 +1,91 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Build (release)
+        run: swift build -c release
+
+      - name: Unit tests
+        run: swift test
+
+      - name: Bundle (staging)
+        run: ./build.sh --staging-dir /tmp/mc-stage
+
+      - name: Verify signature
+        run: codesign --verify --deep --strict /tmp/mc-stage/MeetCapture.app
+
+      - name: Smoke test
+        env:
+          CI: "1"
+          MEETCAPTURE_APP: /tmp/mc-stage/MeetCapture.app
+        run: qa/app-smoke-test.sh
+
+      - name: Version consistency
+        run: scripts/version.sh --check
+
+      - name: Upload artifact
+        if: matrix.os == 'macos-14'
+        uses: actions/upload-artifact@v4
+        with:
+          name: MeetCapture.app
+          path: /tmp/mc-stage/MeetCapture.app
+          if-no-files-found: error
+
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: shellcheck
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q shellcheck
+          shellcheck -S error build.sh install.sh scripts/*.sh qa/*.sh tools/summary/*.sh
+
+      - name: Python syntax and unit tests
+        run: |
+          python3 -m py_compile tools/summary/*.py tools/legacy/*.py
+          python3 tools/summary/test_dispatcher.py
+          python3 tools/summary/test_real_summary_check.py
+          python3 tools/legacy/test_legacy_privacy_migration.py
+
+      - name: Landing lint
+        run: |
+          python3 - <<'PY'
+          import re, sys
+          html = open("site/index.html", encoding="utf-8").read()
+          errors = []
+          if "—" in html or "–" in html:
+              errors.append("em/en dash in site/index.html")
+          if len(re.findall(r"<h1\b", html)) != 1:
+              errors.append("site/index.html must have exactly one <h1>")
+          if "fonts.googleapis" in html or "fonts.gstatic" in html:
+              errors.append("fonts must be self-hosted")
+          if "<script" in html:
+              errors.append("the landing ships no JavaScript")
+          for e in errors:
+              print("::error::" + e)
+          sys.exit(1 if errors else 0)
+          PY
+
+      - name: Repo hygiene
+        run: |
+          test -z "$(git ls-files | grep -i '^tests/' | grep -v '\.swift$')"
+          ! git ls-files -z | xargs -0 grep -Il '/Users/' -- Sources scripts qa tools build.sh install.sh
