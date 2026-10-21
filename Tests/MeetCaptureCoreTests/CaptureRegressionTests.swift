@@ -149,13 +149,25 @@ final class CaptureRegressionTests: XCTestCase {
             AudioResampler(inputRate: inputRate, outputRate: 16_000, channels: 1))
         let samples = [Float](repeating: 0.25, count: inputFrames)
 
-        var output = samples.withUnsafeBufferPointer { buffer in
-            resampler.resample(interleaved: buffer.baseAddress!, frameCount: inputFrames)
+        var converted: [Int16] = []
+        converted.reserveCapacity(resampler.outputFrameCapacity)
+        try samples.withUnsafeBufferPointer { buffer in
+            try resampler.resample(mono: buffer.baseAddress!, frameCount: inputFrames, into: &converted)
         }
-        output += resampler.flush()
+        var output = converted
+        var drained = false
+        for _ in 0..<8 {
+            let status = try resampler.flush(into: &converted)
+            output.append(contentsOf: converted)
+            if status == .endOfStream {
+                drained = true
+                break
+            }
+        }
 
-        XCTAssertLessThan(abs(output.count - inputFrames * 2), 100)
-        XCTAssertGreaterThan(output.map { abs(Int($0)) }.max() ?? 0, 5_000)
+        XCTAssertTrue(drained, "upsampling must confirm end of stream before stop returns")
+        XCTAssertLessThanOrEqual(abs(output.count - inputFrames * 2), 1)
+        XCTAssertGreaterThan(output.suffix(64).map { abs(Int($0)) }.max() ?? 0, 5_000)
     }
 
     // The Core Audio IO callback is private and hardware-backed; this fixture

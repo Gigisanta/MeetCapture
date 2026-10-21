@@ -16,9 +16,13 @@ struct Segment: Codable, Equatable, Sendable {
         self.text = text
         self.speaker = speaker
     }
+
+    var hasValidTiming: Bool {
+        start.isFinite && end.isFinite && start >= 0 && end >= start
+    }
 }
 
-enum ASREngine: String, Sendable {
+enum ASREngine: String, Codable, Sendable {
     case parakeet
 }
 
@@ -36,9 +40,7 @@ enum TranscriptFormatter {
     static func cleaned(_ segments: [Segment]) -> [Segment] {
         segments.compactMap { seg in
             let text = seg.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !text.isEmpty,
-                  seg.start.isFinite, seg.end.isFinite,
-                  seg.start >= 0, seg.end >= seg.start else { return nil }
+            guard !text.isEmpty, seg.hasValidTiming else { return nil }
             var speaker = seg.speaker?.trimmingCharacters(in: .whitespacesAndNewlines)
             if speaker == "?" || speaker?.isEmpty == true { speaker = nil }
             return Segment(start: seg.start, end: seg.end, text: text, speaker: speaker)

@@ -7,6 +7,78 @@ semantic versioning. The single source of the current version is
 
 ## [Unreleased]
 
+## [7.0.2] - 2026-10-21
+
+### Fixed
+- Capture keeps bounded pending frames from unequal converter batches and drains
+  both converters before the final writer flush. Overflow, channel imbalance,
+  conversion and drain errors are surfaced; the realtime callback is unchanged.
+- Removed lexical microphone-word deletion. Identical answers and negations from
+  different speakers are retained; the acoustic bleed gate remains unchanged.
+- Checkpoint manifest v4 binds audio/reference content, actual model artifacts,
+  SDK revision and effective recognition configuration. Stale or corrupt derived
+  checkpoints rebuild without deleting source audio; diarization is content-bound.
+- Nonempty SDK text without valid word timings fails explicitly instead of
+  silently losing speech or inventing timestamps.
+- Cancellation reaches the detached transcription worker, and model leases are
+  balanced on completion, failure and cancellation. The final user cleans up
+  models without interrupting another active job.
+- A failed signature verification now aborts `build.sh`; it cannot print READY.
+  Injected verifier exit 42 was incorrectly accepted by the previous script and
+  is now propagated as exit 42. Actual signed production and QA bundles verified.
+
+### Changed
+- Parakeet loads for transcription, not capture. The final job drops app-held model
+  references and invokes SDK cleanup instead of retaining them for ten idle
+  minutes. The disk cache is kept; immediate process-RSS recovery is not guaranteed.
+- Production remains Parakeet-only. Experimental WhisperKit dependencies and
+  controls are not included. The tested FluidAudio revision is retained: the
+  inspected newer commits do not change Ultra recognition, and tag v0.17.7 is older.
+- Documentation no longer guarantees Neural Engine placement or zero GPU
+  contention, and describes the actual silent-left/right-mic capture layout.
+
+### Verification and limits
+- Swift tests passed 145/145, installer regressions 13/13, dispatcher 31/31,
+  real-summary checks 15/15 and legacy migration 4/4; version, signature and
+  shellcheck checks passed.
+- The strict hosted-icon smoke passed 10/10 with local speech models required.
+  An initial notHosted failure is retained as a failure; a later same-source
+  native probe and screenshot established visible hosting before the successful
+  retry. The Menu Bar switch was already on and no OS preference was changed.
+  The transition's cause is unproven; visibility on every display/Space is not certified.
+- Network-denied real import completed two imports and one re-transcription with
+  three distinct history records. Network-denied dual system/microphone capture
+  completed with diarization on, two participant labels, zero dropped callbacks
+  and 92.907 s of captured audio from the unchanged 91.414 s public TTS corpus.
+- The real isolated QA UI completed manual NSOpenPanel import, re-transcription,
+  matching/non-matching search, a real invalid-WAV error and successful recovery.
+  Its three distinct history rows, markers, handoffs and transcript checksums
+  agreed, and Quit exited only the QA process.
+- The original acceptance wrappers remain **FAIL**: all three import records
+  score 1/244 word errors (WER 0.004); capture scores 2/244 (WER 0.008).
+  Each misses the essential word `pongo` because the model writes `puego`.
+  The maintainer explicitly accepted this known exact-word exception for this
+  maintenance release on 2026-10-21. No reference, essential word, alias,
+  threshold or wrapper was changed. This is not a general accuracy improvement.
+- Live UI-process RSS remained elevated after completed jobs. Return to the
+  pre-ASR level was not demonstrated, and neither a leak nor a cache cause is
+  established. These observations do not demonstrate a RAM improvement:
+
+  | Live QA process observation | RSS (MiB) |
+  | --- | ---: |
+  | Before the first import | 108.6 |
+  | After the first import | 771.3 |
+  | After re-transcription | 834.4 |
+  | After the invalid-WAV error | 826.5 |
+  | After successful recovery import | 948.3 |
+
+  Separate BSD `time -l` command peaks, not live idle or whole-PC usage:
+
+  | Command | Maximum RSS (MiB, rounded) |
+  | --- | ---: |
+  | Real import | 1001 |
+  | Real capture | 1041 |
+
 ## [7.0.1] - 2026-10-19
 
 ### Fixed

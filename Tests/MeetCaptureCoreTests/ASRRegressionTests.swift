@@ -62,18 +62,69 @@ final class ASRRegressionTests: XCTestCase {
         }
     }
 
-    func testParakeetTokensBecomeTimedWords() {
+    func testParakeetTokensBecomeTimedWords() throws {
         func t(_ token: String, _ start: Double, _ end: Double) -> TokenTiming {
             TokenTiming(token: token, tokenId: 0, startTime: start, endTime: end, confidence: 1)
         }
-        let words = ParakeetEngine.words(from: [
+        let result = ASRResult(text: "Hola, CEDEAR mañana.", confidence: 1, duration: 2, processingTime: 0, tokenTimings: [
             t("▁Ho", 0.0, 0.2), t("la", 0.2, 0.4), t(",", 0.4, 0.45),
             t("▁", 0.5, 0.5), t("CE", 0.6, 0.7), t("DEAR", 0.7, 0.9),
             t(" mañana", 1.0, 1.4), t(".", 1.4, 1.5),
         ])
+        let words = try ParakeetEngine.timedWords(from: result)
         XCTAssertEqual(words, [Segment(start: 0, end: 0.45, text: "Hola,"),
                                Segment(start: 0.6, end: 0.9, text: "CEDEAR"),
                                Segment(start: 1.0, end: 1.5, text: "mañana.")])
-        XCTAssertEqual(ParakeetEngine.words(from: []), [])
+    }
+
+    func testSDKTextRequiresRealValidTimingsButEmptyOutputIsAllowed() throws {
+        let whitespace = TokenTiming(token: "▁", tokenId: 0, startTime: 0, endTime: 0, confidence: 1)
+        let missingTimings: [[TokenTiming]?] = [nil, [], [whitespace]]
+        for timings in missingTimings {
+            let speech = ASRResult(text: "No", confidence: 1, duration: 2, processingTime: 0, tokenTimings: timings)
+            XCTAssertThrowsError(try ParakeetEngine.timedWords(from: speech)) { error in
+                guard case ParakeetEngine.AdapterError.missingTimedWords = error else {
+                    return XCTFail("nonempty SDK text must not become successful silence: \(error)")
+                }
+            }
+            let empty = ASRResult(text: " \n", confidence: 1, duration: 2, processingTime: 0, tokenTimings: timings)
+            XCTAssertEqual(try ParakeetEngine.timedWords(from: empty), [])
+        }
+        for (start, end) in [(Double.nan, 0.2), (-0.1, 0.2), (1.0, 0.5), (0.0, Double.infinity)] {
+            // A valid final punctuation token must not hide an invalid interior piece.
+            let result = ASRResult(text: "No.", confidence: 1, duration: 2, processingTime: 0, tokenTimings: [
+                TokenTiming(token: "▁N", tokenId: 1, startTime: 0, endTime: 0.1, confidence: 1),
+                TokenTiming(token: "o", tokenId: 2, startTime: start, endTime: end, confidence: 1),
+                TokenTiming(token: ".", tokenId: 3, startTime: 0.3, endTime: 0.4, confidence: 1),
+            ])
+            XCTAssertThrowsError(try ParakeetEngine.timedWords(from: result)) { error in
+                guard case ParakeetEngine.AdapterError.invalidTimedWords = error else {
+                    return XCTFail("invalid token timings must fail before word aggregation: \(error)")
+                }
+            }
+        }
+    }
+
+    func testModelRevisionTracksActualWeightsAndVocabularyAndFailsClosed() throws {
+        let dir = URL(fileURLWithPath: TestSupport.makeTempDir(self, "asr-artifacts"))
+        for bundle in ModelNames.ASR.requiredModelsV3() {
+            let weights = dir.appendingPathComponent(bundle + "/weights")
+            try AppPaths.ensurePrivateDirectory(weights.path)
+            try Data([0x11]).write(to: weights.appendingPathComponent("weight.bin"))
+        }
+        let vocabulary = dir.appendingPathComponent(ModelNames.ASR.vocabularyFile)
+        try Data("{}".utf8).write(to: vocabulary)
+        let original = try ParakeetEngine.artifactRevision(in: dir)
+
+        let encoder = dir.appendingPathComponent(ModelNames.ASR.encoderFile + "/weights/weight.bin")
+        try Data([0x12]).write(to: encoder) // Same byte count, different loaded weights.
+        let changedWeights = try ParakeetEngine.artifactRevision(in: dir)
+        XCTAssertNotEqual(changedWeights, original)
+        try Data("[]".utf8).write(to: vocabulary)
+        XCTAssertNotEqual(try ParakeetEngine.artifactRevision(in: dir), changedWeights)
+
+        try FileManager.default.removeItem(at: vocabulary)
+        XCTAssertThrowsError(try ParakeetEngine.artifactRevision(in: dir),
+                             "an unreadable identity must not become an 'unknown' reusable cache key")
     }
 }

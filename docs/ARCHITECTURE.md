@@ -20,7 +20,7 @@ Sources/MeetCaptureCore/           everything else, one directory per layer
   App/        AppState, RecordingCoordinator, MeetingDetectionPolicy, Notifier
   Capture/    CoreAudioTap, AudioRingBuffer, AudioResampler, PCMFileWriter, AudioFormatSidecar, ChannelLevels, InputDevices, AudioCaptureService
   Detection/  CallDetector, CallActivityDebouncer, CalendarService, MeetingFilter
-  ASR/        TranscriptionJob, ChannelReader, PCMToWAV, BleedGate, ChunkedTranscription, ParakeetEngine, TurnMerger, Aliases, Segment
+  ASR/        TranscriptionJob, RecognitionIdentity, ChannelReader, PCMToWAV, BleedGate, ChunkedTranscription, ParakeetEngine, TurnMerger, Aliases, Segment
   Pipeline/   MeetingSession, PendingContractV2, PostProcessor, Retention, AudioImporter, RecordingRecovery, MeetingNotesStore
   Store/      MeetingStore (sqlite3 + FTS5)
   Settings/   Settings, LocalConfig, SummaryDispatcherConfig, AppPaths
@@ -55,11 +55,14 @@ and `Settings` only know `Support`. Nothing below `App` touches SwiftUI.
    global tap as fallback) plus an aggregate device with the chosen input.
    The IOProc copies both tracks into a preallocated `AudioRingBuffer`
    (64 slots of 8192 frames, no allocation on the real-time thread). One
-   consumer thread mixes, resamples to 16 kHz (`AudioResampler` wraps
-   `AVAudioConverter` with a reused output buffer) and appends Int16
-   stereo to `PCMFileWriter`, which flushes
-   every 64 KB. Left channel is the system, right is the microphone; in microphone-only
-   mode both channels carry the microphone so mono conversion preserves its level.
+   consumer thread resamples to 16 kHz (`AudioResampler` wraps
+   `AVAudioConverter` with reused output buffers). Bounded per-channel pending
+   queues preserve unequal converter batches; only matched frames are written,
+   without padding. Stop drains the ring, both converters to end-of-stream and
+   the writer, in that order. Conversion, overflow, imbalance and drain errors
+   are surfaced rather than silently truncating audio. `PCMFileWriter` appends
+   Int16 stereo and flushes every 64 KB. Left is system, right is microphone;
+   microphone-only mode leaves the left silent and records the microphone on the right.
    `AudioFormatSidecar` writes `<file>.pcm.format.json` with schema
    `meetcapture.audio.v1` so no consumer guesses the byte layout.
 3. **Transcribe.** There is no live transcription. After capture stops,
@@ -75,26 +78,39 @@ and `Settings` only know `Support`. Nothing below `App` touches SwiftUI.
      stays because Gio is then clearly louder.
    - *Chunks.* `ChunkedTranscription` cuts each channel into ~5 min chunks at
      the quietest 100 ms frame within ±10 s of each boundary and transcribes
-     them with `ParakeetEngine` (FluidAudio, Parakeet TDT 0.6B "ultra", Core
-     ML on the Neural Engine), which returns timed words. Finished chunks are
-     checkpointed in `<audio>.work/remote/` and `<audio>.work/mic/`
-     (`manifest.json` version 2 + `chunk-NNN.json`), so a crash or quit
-     resumes at the first missing chunk. A chunk that fails twice becomes
+     them with `ParakeetEngine` (FluidAudio, Parakeet TDT 0.6B "ultra"), which
+     returns real timed words. Core ML CPU/Neural Engine placement is requested,
+     not measured. The adapter rejects nonfinite or negative times, reversed
+     intervals and nonempty SDK text without word timings; it preserves SDK order
+     rather than inventing an alignment. Finished
+     chunks are checkpointed in `<audio>.work/remote/` and `<audio>.work/mic/`
+     (`manifest.json` version 4 + `chunk-NNN.json`). Audio SHA-256, gated reference
+     content, recognizer/model artifact identity, SDK and effective configuration
+     must match before reuse. Mismatches or corrupt checkpoints rebuild derived
+     work without deleting source audio. A chunk failing twice becomes
      `[fragmento sin transcribir hh:mm:ss–hh:mm:ss]` and the audio is kept.
    - *Diarize.* With diarization on, FluidAudio's offline diarizer (pyannote
      community-1 segmentation and embeddings, VBx clustering) runs on the
-     remote channel only; its spans are cached in `<audio>.work/diarization.json`.
-     It requires macOS 15 (macOS 14 crashes in BNNS) and is skipped there.
+     remote channel only; its spans are cached in `<audio>.work/diarization.json`
+     against actual source content, not just file size. It requires macOS 15
+     (macOS 14 crashes in BNNS) and is skipped there.
    - *Merge.* `TurnMerger` labels mic words `Gio` and remote words
      `Participante 1..N` by order of first appearance, or `Participante` when
-     diarization is off or failed. It drops mic words that repeat an identical
-     remote word within ±0.5 s, then opens a new turn on a speaker change, a
-     gap over 1.5 s, or a sentence end after 45 s. `Aliases` applies the
-     `config.json` spelling fixes to the merged turns.
+     diarization is off or failed. Lexical matching never deletes a microphone
+     word merely because the remote speaker said it too; the acoustic gate is
+     the echo control. A new turn opens on a speaker change, a gap over 1.5 s,
+     or a sentence end after 45 s. `Aliases` applies configured spelling fixes
+     to the merged turns.
 
    `install.sh` downloads the models to `~/Library/Application Support/FluidAudio/`
-   (`MEETCAPTURE_PREFETCH_MODELS=1`), or the first job does. Parakeet loads when a
-   recording starts and is freed after 10 minutes with no recording or job.
+   (`MEETCAPTURE_PREFETCH_MODELS=1`), or the first job does. Each transcription
+   leases a single-flight model load. Completion, error and cancellation release
+   the lease; the final user clears app-held references and invokes SDK cleanup.
+   Capture no longer warms models and there is no ten-minute idle unload timer;
+   the disk cache is retained. Cleanup does not guarantee immediate RSS recovery:
+   real UI observations remained elevated after completed jobs, with no established
+   cause or demonstrated return to baseline. Hardware placement and GPU contention
+   are not instrumented.
 4. **Hand off.** `PostProcessor` is an actor: it rejects empty transcripts,
    writes the `.txt` transcript, commits `MeetingStore`, writes the
    `.processed.json` marker, and only then publishes the `.pending`
@@ -131,7 +147,7 @@ to that id; existing recordings and history keep their original paths.
 | Path | Writer | Reader | Notes |
 | --- | --- | --- | --- |
 | `~/meetings/transcripts/recording-meet-<epoch>-<uuid>.pcm` + `.pcm.format.json` | Capture | ASR, retention | Int16 stereo 16 kHz; sidecar schema `meetcapture.audio.v1` (`sample_rate`, `sample_format`, `channels`, `layout`, `tap_strategy`, `tap_info`). |
-| `<audio>.work/` (`remote/`, `mic/`, `diarization.json`, `gaps.json`) | ASR | ASR | Per-channel chunk checkpoints (manifest version 3: audio size, recognition language and chunk boundaries; a different size or language redoes the chunks), the cached diarization, and `gaps.json`, present while the handed-off transcript has gaps; removed once a transcript without gaps is handed off. A version 1 layout (top-level `manifest.json`) is discarded. |
+| `<audio>.work/` (`remote/`, `mic/`, `diarization.json`, `gaps.json`) | ASR | ASR | Per-channel manifest version 4 binds audio/reference SHA-256, actual model artifacts, SDK and effective recognition configuration. Stale/corrupt derived checkpoints are rebuilt without deleting source audio; diarization is content-bound too. `gaps.json` remains while the handed-off transcript has gaps and is removed after a complete transcript is handed off. Older manifests are invalidated, not compatibility-shimmed. |
 | `<audio>.recovery.json` | AppState | AppState | `attempts`, `last_error`, `updated_at` and `next_attempt_at` (ISO 8601 with milliseconds; absent once the automatic attempts are used up). Automatic recovery runs a capture only after `next_attempt_at`, at most three attempts within 48 h of the capture. Removed when a transcript without gaps is handed off. |
 | `~/meetings/transcripts/[recording-]meet-<epoch>-<uuid>.txt` | PostProcessor | dispatcher, popover | Live recordings use the `recording-` prefix; retranscriptions use the job id directly. Imports keep a unique dated basename in `~/meetings/imports/`. One `[speaker]: text` line per turn, for example `[Gio]: …` or `[Participante 2]: …`. |
 | `~/meetings/meet-<epoch>-<uuid>.pending` | PostProcessor | dispatcher | Version 2, 14 sorted keys: `audioPath` (null if deleted or if the transcript has gaps), `checksum` (SHA-256 of the transcript text), `durationSec`, `endedAt`, `engine`, `language`, `meetingId`, `model`, `segments` (`start`, `end`, `text`, optional `speaker`), `speakerCount`, `startedAt`, `title`, `transcriptPath`, `version`. Written to a temp file and renamed. |

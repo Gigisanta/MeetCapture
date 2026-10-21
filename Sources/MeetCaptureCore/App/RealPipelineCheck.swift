@@ -101,7 +101,7 @@ public enum RealPipelineCheck {
     @MainActor
     private static func run(_ app: AppState, mode: String, source: URL) async throws -> [String: Any] {
         let start = Date()
-        let original = try Data(contentsOf: source)
+        let originalHash = try digest(source)
         let duration = PCMToWAV.wavDurationSeconds(source.path)
         var capture: [String: Any] = [:]
         if mode == "capture" {
@@ -140,7 +140,7 @@ public enum RealPipelineCheck {
             }
         }
         try requireDone(app)
-        guard try Data(contentsOf: source) == original else { throw CheckError.failed("source audio changed") }
+        guard try digest(source) == originalHash else { throw CheckError.failed("source audio changed") }
         let reopened = MeetingStore(path: app.paths.databasePath)
         let history = reopened.recent(limit: 10)
         guard history.count == (mode == "capture" ? 1 : 3),
@@ -172,6 +172,17 @@ public enum RealPipelineCheck {
             "micOnly": Settings.micOnlyMode]
         result.merge(capture) { _, new in new }
         return result
+    }
+
+    /// Check integrity without retaining a second meeting-sized audio buffer.
+    private static func digest(_ source: URL) throws -> SHA256.Digest {
+        let handle = try FileHandle(forReadingFrom: source)
+        defer { try? handle.close() }
+        var hash = SHA256()
+        while let block = try handle.read(upToCount: 1_048_576), !block.isEmpty {
+            hash.update(data: block)
+        }
+        return hash.finalize()
     }
 
     @MainActor

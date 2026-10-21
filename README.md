@@ -8,11 +8,13 @@ them locally, and keeping the resulting meeting history on the Mac. It has no
 main window or Dock icon. Opening the app from Finder or Spotlight shows its
 controls below the menu-bar icon; later, click that icon to reopen them.
 Opening the app again while it is running also shows the controls. It is one
-native process with no Python: transcription and speaker labels run in-process
-on the Neural Engine through [FluidAudio](https://github.com/FluidInference/FluidAudio),
-so they do not compete with a local LLM for the GPU. Summary generation uses a
-separate Python dispatcher; its default MLX route is the local gateway at
-`http://127.0.0.1:8080/v1`, unless you configure another endpoint.
+native process with no Python: transcription and speaker labels run locally
+through [FluidAudio](https://github.com/FluidInference/FluidAudio) and Core ML.
+Parakeet requests CPU/Neural Engine execution; actual device placement and GPU
+contention are not instrumented. Summary generation is a separate, optional
+Python dispatcher; its default endpoint is the local gateway at
+`http://127.0.0.1:8080/v1`. A configured remote summary endpoint would send
+transcript text off the Mac.
 
 Website: https://meetcapture.maat.work
 
@@ -21,13 +23,14 @@ Website: https://meetcapture.maat.work
 - **Local capture.** A Core Audio process tap records the call app and the
   microphone into 16 kHz Int16 stereo PCM. In the normal two-track layout,
   left is system audio and right is the microphone; microphone-only mode
-  carries the microphone on both channels.
+  leaves the left channel silent and records the microphone on the right.
 - **Transcript after the call.** There is no live transcription. After
   capture, each channel is transcribed separately with NVIDIA Parakeet TDT
-  0.6B in ~5 min chunks, checkpointed per channel so a crash or quit resumes
-  instead of starting over. Where the remote voice leaks from the speakers
-  into the microphone, a bleed gate mutes it before transcription. The model
-  is recorded in the handoff.
+  0.6B in ~5 min chunks. Checkpoints bind audio content, model artifacts, SDK
+  and effective configuration, so compatible work resumes after interruption.
+  An acoustic bleed gate mutes remote audio leaking into the microphone;
+  identical words from different speakers are not deleted by lexical matching.
+  The actual engine and model are recorded in the handoff.
 - **Speaker labels.** The microphone channel is labeled `Gio`. With "Identificar
   hablantes" on (macOS 15 or newer), the call channel is diarized into
   `Participante 1`, `Participante 2`… by order of appearance; otherwise it is
@@ -56,6 +59,21 @@ the summary dispatcher removes handoff audio after a successful summary unless
   first use.
 - Permissions when requested: Microphone, Screen and System Audio Recording,
   Calendar, and Notifications. Calendar auto-recording is optional.
+
+## Local resources
+
+ASR and speaker labeling need no cloud service or subscription after the model
+download. Models load for transcription, not when a recording starts. On
+completion, failure or cancellation the final job drops app-held model
+references and invokes SDK cleanup; another active job keeps its shared load.
+There is no ten-minute idle retention timer, and the disk cache remains.
+This does not guarantee immediate RAM reclamation: process RSS remained elevated
+after real UI jobs, and return to the pre-ASR level was not demonstrated.
+See `CHANGELOG.md` for the distinct live-process and command-peak measurements.
+
+For a local-only deployment, keep the optional summary endpoint on loopback or
+leave its scheduler disabled. Installing the app does not authorize starting
+that scheduler, external training or a cloud runtime.
 
 ## Install
 
@@ -96,6 +114,13 @@ Personal configuration stays outside the repository in `~/.meetcapture/`:
 Models are downloaded at runtime and are never bundled from this repository.
 Their licenses and the required attribution are in
 [`docs/THIRD_PARTY.md`](docs/THIRD_PARTY.md).
+
+The tested FluidAudio revision remains pinned in `Package.swift` and
+`Package.resolved`. The 2026-10-20 dependency review found that tag `v0.17.7`
+predates this Ultra-capable pin; the six inspected newer main commits did not
+change Ultra recognition. See the
+[reviewed upstream comparison](https://github.com/FluidInference/FluidAudio/compare/bd11ac8da17a944a7291a2c76e9a172eb275f629...61d41b3ca04833d1cb80632c82ba401f117a01ef).
+An apparently newer tag is not a reason to discard the tested model revision.
 
 ## Summaries
 
@@ -201,8 +226,9 @@ separate QA bundle with CUA. The interface is:
 - The capture case exercises AppState, AV/Core Audio, `afplay`, a real PCM
   recording with its format sidecar, the per-channel WAV split, and Parakeet
   itself. The models must already be downloaded or the first run needs
-  network. Diarization is explicitly disabled here. If microphone permission
-  blocks the run, classify it as exit `77` and do not claim a real-call result.
+  network. Diarization defaults off; `MEETCAPTURE_CHECK_DIARIZE=1` enables it
+  on macOS 15 or newer and the report lists the speakers. If microphone
+  permission blocks the run, classify it as exit `77`, not a real-call result.
 - The `ui` case opens `PopoverContent` with real `AppState`, real engines,
   isolated history, and volatile settings, with `allowsSettings:false` so
   `SettingsView` cannot read or write normal preferences. CUA exercises the

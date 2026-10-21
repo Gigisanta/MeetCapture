@@ -147,9 +147,7 @@ else
 fi
 
 codesign "${SIGN_FLAGS[@]}" "$APP_BUNDLE"
-codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE" || {
-    echo "  ⚠️  Code verification warning (non-fatal for ad-hoc)"
-}
+codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
 echo "  Signed: ${SIGN_IDENTITY} (bundle ID: $APP_BUNDLE_ID)"
 
 echo ""

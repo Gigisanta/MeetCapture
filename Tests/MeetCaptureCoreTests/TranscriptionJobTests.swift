@@ -5,10 +5,15 @@ import XCTest
 /// Fixed diarization, or a failure; counts calls to prove the cache.
 actor FakeDiarizer: SpeakerDiarizing {
     private let result: [SpeakerSpan]?
+    private let throwsCancellation: Bool
     private(set) var calls = 0
-    init(_ result: [SpeakerSpan]?) { self.result = result }
+    init(_ result: [SpeakerSpan]?, throwsCancellation: Bool = false) {
+        self.result = result
+        self.throwsCancellation = throwsCancellation
+    }
     func spans(in wav: URL) async throws -> [SpeakerSpan] {
         calls += 1
+        if throwsCancellation { throw CancellationError() }
         guard let result else { throw DiarizationError.unsupportedOS }
         return result
     }
@@ -53,10 +58,10 @@ final class TranscriptionJobTests: XCTestCase {
         let outcome = try await job.run { _ in }
 
         XCTAssertEqual(TranscriptFormatter.text(for: outcome.segments),
-                       "[Participante 1]: Hola AppSheet\n[Gio]: Buenas\n[Participante 2]: listo",
-                       "the mic's echo of \"listo\" is dropped")
+                       "[Participante 1]: Hola AppSheet\n[Gio]: Buenas\n[Participante 2]: listo\n[Gio]: listo",
+                       "independent mic speech that survived the acoustic gate must not be deleted by text")
         XCTAssertEqual(outcome.engineUsed, .parakeet)
-        XCTAssertEqual(outcome.modelUsed, ParakeetEngine.modelName)
+        XCTAssertEqual(outcome.modelUsed, FakeRecognizer.testIdentity.model)
         XCTAssertEqual(outcome.failedChunks, 0)
         XCTAssertEqual(outcome.audioDurationSec ?? 0, 4, accuracy: 0.01)
         let work = ChunkedTranscription.workDirectory(forAudio: audio)
@@ -68,7 +73,7 @@ final class TranscriptionJobTests: XCTestCase {
         let again = try await TranscriptionJob(audioPath: audio, captureSampleRate: 16_000, language: "es",
                                                diarize: true, recognizer: FakeRecognizer { _, _ in [] },
                                                diarizer: diarizer).run { _ in }
-        XCTAssertEqual(again.segments.map(\.speaker), ["Participante 1", "Gio", "Participante 2"])
+        XCTAssertEqual(again.segments.map(\.speaker), ["Participante 1", "Gio", "Participante 2", "Gio"])
         let diarizations = await diarizer.calls
         XCTAssertEqual(diarizations, 1)
     }
@@ -136,5 +141,54 @@ final class TranscriptionJobTests: XCTestCase {
                                                  diarizer: FakeDiarizer([])).run { _ in }
         XCTAssertFalse(outcome.segments.map(\.text).contains("whisper viejo"))
         XCTAssertFalse(FileManager.default.fileExists(atPath: work + "/chunk-000.json"))
+    }
+
+    func testDiarizationCancellationDoesNotPublishFallbackOrCacheAndCanResume() async throws {
+        let dir = TestSupport.makeTempDir(self, "job-cancel-diarization")
+        let wav = URL(fileURLWithPath: dir + "/import.wav")
+        try WAVFixture.write(WAVFixture.tone(seconds: 1), to: wav)
+        let original = try Data(contentsOf: wav)
+        let recognizer = FakeRecognizer { _, _ in [Segment(start: 0, end: 0.5, text: "No")] }
+        let work = ChunkedTranscription.workDirectory(forAudio: wav.path)
+        do {
+            _ = try await TranscriptionJob(audioPath: wav.path, captureSampleRate: 16_000, language: "es",
+                                           diarize: true, recognizer: recognizer,
+                                           diarizer: FakeDiarizer([], throwsCancellation: true)).run { _ in }
+            XCTFail("cancellation must not become a successful undiarized transcript")
+        } catch is CancellationError {}
+        let cancelledReleases = await recognizer.releases
+        XCTAssertEqual(cancelledReleases, 1, "a cancellation after ASR must release its model hold exactly once")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: work + "/diarization.json"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: work + "/remote/chunk-000.json"),
+                      "completed ASR stays recoverable when the later diarization is cancelled")
+        let resumed = FakeRecognizer { _, _ in throw FakeEngineError() }
+        let outcome = try await TranscriptionJob(
+            audioPath: wav.path, captureSampleRate: 16_000, language: "es", diarize: true,
+            recognizer: resumed, diarizer: FakeDiarizer([SpeakerSpan(start: 0, end: 1, speaker: "A")])).run { _ in }
+        XCTAssertEqual(TranscriptFormatter.text(for: outcome.segments), "[Participante 1]: No")
+        let calls = await resumed.calls
+        XCTAssertEqual(calls, 0, "resume uses the completed ASR, not a silently cancelled diarization cache")
+        let resumedReleases = await resumed.releases
+        XCTAssertEqual(resumedReleases, 1, "successful checkpoint recovery also releases its model hold")
+        XCTAssertEqual(try Data(contentsOf: wav), original)
+    }
+
+    func testSameSizeAudioChangeInvalidatesDiarizationAsWellAsWords() async throws {
+        let dir = TestSupport.makeTempDir(self, "job-stale-diarization")
+        let wav = URL(fileURLWithPath: dir + "/import.wav")
+        var samples = WAVFixture.tone(seconds: 1)
+        try WAVFixture.write(samples, to: wav)
+        let diarizer = FakeDiarizer([SpeakerSpan(start: 0, end: 1, speaker: "A")])
+        let job = TranscriptionJob(
+            audioPath: wav.path, captureSampleRate: 16_000, language: "es", diarize: true,
+            recognizer: FakeRecognizer { _, _ in [Segment(start: 0, end: 0.5, text: "word")] }, diarizer: diarizer)
+        _ = try await job.run { _ in }
+        samples[samples.count - 1] += 1
+        try WAVFixture.write(samples, to: wav)
+        let changed = try Data(contentsOf: wav)
+        _ = try await job.run { _ in }
+        let calls = await diarizer.calls
+        XCTAssertEqual(calls, 2, "the same byte count does not prove this is the diarized audio")
+        XCTAssertEqual(try Data(contentsOf: wav), changed)
     }
 }
