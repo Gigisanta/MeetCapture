@@ -26,6 +26,10 @@ semantic versioning. The single source of the current version is
 - A failed signature verification now aborts `build.sh`; it cannot print READY.
   Injected verifier exit 42 was incorrectly accepted by the previous script and
   is now propagated as exit 42. Actual signed production and QA bundles verified.
+- The version gate checks the actual app bundle metadata, not arbitrary source
+  strings. Its former source-literal scan incorrectly rejected legitimate SDK
+  release references; it was removed without adding a version whitelist.
+  Mismatched or unreadable app metadata still fails.
 
 ### Changed
 - Parakeet loads for transcription, not capture. The final job drops app-held model
@@ -36,6 +40,9 @@ semantic versioning. The single source of the current version is
   inspected newer commits do not change Ultra recognition, and tag v0.17.7 is older.
 - Documentation no longer guarantees Neural Engine placement or zero GPU
   contention, and describes the actual silent-left/right-mic capture layout.
+- Existing CI uses the maintained v7 checkout and artifact actions rather than
+  the Node 20-era checkout. Runner matrix, workflow triggers and permissions
+  are unchanged; no speech models or private data are sent to CI.
 
 ### Verification and limits
 - Swift tests passed 145/145, installer regressions 13/13, dispatcher 31/31,

@@ -6,7 +6,7 @@ Checks that need a built app, fixtures, or a human display live in `qa/`.
 
 | Script | Purpose |
 | --- | --- |
-| `version.sh` | Prints the version from `Resources/Info.plist`; `--check` rejects other version literals in tracked release files. |
+| `version.sh` | Prints the version from `Resources/Info.plist`; `--check` rejects mismatched app build/short versions or unreadable metadata. Dependency and OS versions in source/docs are separate namespaces, not app versions. |
 | `deploy-site.sh` | Publishes `site/` to Vercel for maintainers who have separately authorized that external action. |
 
 The canonical summary implementation is under `tools/summary/`, not an old
