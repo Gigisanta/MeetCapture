@@ -1,5 +1,5 @@
 // TranscriptionJob.swift
-// Transcription of one capture: split L (remote) and R (Gio's mic) into
+// Transcription of one capture: split L (remote) and R (local mic) into
 // 16 kHz WAVs, gate the remote voice out of the mic, transcribe each channel
 // in checkpointed chunks with Parakeet, diarize the remote channel and merge
 // both into speaker turns. Runs off the main actor; reports coarse progress.

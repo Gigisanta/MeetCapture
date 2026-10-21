@@ -1,6 +1,6 @@
 // Segment.swift
 // One timed transcript segment (a word while transcribing, a speaker turn in
-// the transcript). `speaker` is "Gio", "Participante N" or nil.
+// the transcript). `speaker` is "Yo", "Participante N" or nil.
 
 import Foundation
 

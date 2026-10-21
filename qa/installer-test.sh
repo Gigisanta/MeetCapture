@@ -60,6 +60,27 @@ start_fixture_process() {
 
 mkdir -p "$TEST_BIN"
 
+# Transaction fixtures model a supported install, independently of the CI host.
+cat >"$TEST_BIN/uname" <<'MOCK'
+#!/bin/bash
+set -euo pipefail
+case "${1:-}" in
+  -s)
+    if [ "$INSTALL_SCENARIO" = unsupported-os ]; then
+      printf '%s\n' Linux
+    else
+      printf '%s\n' Darwin
+    fi ;;
+  -m)
+    if [ "$INSTALL_SCENARIO" = unsupported-arch ]; then
+      printf '%s\n' x86_64
+    else
+      printf '%s\n' arm64
+    fi ;;
+  *) exit 2 ;;
+esac
+MOCK
+
 # GNU find (also common on macOS through Homebrew) rejects BSD's -mtime -60s.
 # Preserve the real filesystem predicate: never turn an inspection error into idle.
 cat >"$TEST_BIN/find" <<'MOCK'
@@ -202,7 +223,7 @@ MOCK
   chmod +x "$TEST_BIN/$command_name"
 done
 
-for command_name in codesign plutil ditto pgrep lsof open sleep find; do
+for command_name in codesign plutil ditto pgrep lsof open sleep find uname; do
   chmod +x "$TEST_BIN/$command_name"
 done
 
@@ -326,6 +347,20 @@ assert_restored_old_app() {
   done
   fail "$CASE_NAME did not retain the backup"
 }
+
+# Unsupported fresh installs must fail before creating ~/meetings or building.
+for platform in unsupported-os unsupported-arch; do
+  setup_case "$platform" "$platform"
+  mv "$MEETINGS" "$CASE_DIR/preserved-meetings"
+  run_installer
+  [ "$STATUS" -ne 0 ] || fail "$platform was accepted"
+  [ ! -e "$MEETINGS" ] || fail "$platform created the installation directory"
+  [ ! -s "$BUILD_LOG" ] || fail "$platform started a build"
+  [ ! -s "$OPEN_LOG" ] || fail "$platform launched an app"
+  MEETINGS="$CASE_DIR/preserved-meetings"
+  assert_preserved_state
+  printf 'PASS: %s refuses installation without filesystem/build/launch effects\n' "$platform"
+done
 
 # Successful update must ignore a same-name process from another bundle.
 setup_case positive success

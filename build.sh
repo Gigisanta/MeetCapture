@@ -3,6 +3,11 @@
 # Usage: ./build.sh --staging-dir <path> [--sign <identity>] [--qa]
 set -e
 
+if [ "$(uname -s)" != "Darwin" ]; then
+    echo "ERROR: MeetCapture builds require macOS; Linux and Windows are not supported." >&2
+    exit 1
+fi
+
 APP_NAME="MeetCapture"
 APP_DISPLAY_NAME="$APP_NAME"
 APP_BUNDLE_ID="com.maatwork.meetcapture"
@@ -42,6 +47,8 @@ while [ $# -gt 0 ]; do
             echo "  --sign <identity>   Sign with given identity (default: ad-hoc '-')"
             echo "  --qa                Separate ad-hoc QA identity (staging only)"
             echo ""
+            echo "Supported app runtime: Apple Silicon, macOS 14.4+."
+            echo "Build tools: Swift 6.0+ and a macOS SDK; the toolchain may need a newer macOS host."
             echo "Speech models download on first use (see docs/THIRD_PARTY.md)."
             echo ""
             echo "Examples:"
@@ -84,6 +91,42 @@ fi
 APP_BUNDLE="${STAGING_DIR:-/tmp}/$BUNDLE_NAME.app"
 if [ ! -s "$APP_ICON" ]; then
     echo "ERROR: required app icon is missing or empty: $APP_ICON" >&2
+    exit 1
+fi
+
+# Package.swift and the pinned FluidAudio manifest require Swift tools 6.0.
+# Check before removing a staging bundle or starting dependency downloads.
+if [ "$(uname -m)" != "arm64" ]; then
+    echo "WARNING: Intel/Rosetta staging builds are not supported ASR installations." >&2
+    echo "Use a native Apple Silicon terminal for ./install.sh." >&2
+fi
+MACOS_VERSION="$(sw_vers -productVersion)"
+IFS=. read -r MACOS_MAJOR MACOS_MINOR MACOS_PATCH <<< "$MACOS_VERSION"
+if [[ ! "$MACOS_MAJOR" =~ ^[0-9]+$ ]] || [[ ! "$MACOS_MINOR" =~ ^[0-9]+$ ]] \
+    || (( MACOS_MAJOR < 14 || (MACOS_MAJOR == 14 && MACOS_MINOR < 4) )); then
+    echo "ERROR: macOS 14.4 or newer is required; found $MACOS_VERSION." >&2
+    exit 1
+fi
+for command_name in swift xcrun git codesign; do
+    if ! command -v "$command_name" >/dev/null 2>&1; then
+        echo "ERROR: missing $command_name. Install compatible Xcode or Command Line Tools; see README.md." >&2
+        exit 1
+    fi
+done
+if ! SWIFT_VERSION="$(swift --version 2>&1)"; then
+    echo "ERROR: Swift could not start. Complete Xcode/Command Line Tools setup; see README.md." >&2
+    printf '%s\n' "$SWIFT_VERSION" >&2
+    exit 1
+fi
+if [[ ! "$SWIFT_VERSION" =~ Swift\ version\ ([0-9]+)\.([0-9]+) ]] \
+    || (( BASH_REMATCH[1] < 6 )); then
+    echo "ERROR: Swift 6.0 or newer is required by Package.swift and FluidAudio." >&2
+    printf '%s\n' "$SWIFT_VERSION" >&2
+    echo "Select a compatible toolchain; see README.md." >&2
+    exit 1
+fi
+if ! xcrun --sdk macosx --show-sdk-path >/dev/null; then
+    echo "ERROR: no usable macOS SDK. Complete Xcode/Command Line Tools setup and check xcode-select -p." >&2
     exit 1
 fi
 
@@ -142,7 +185,7 @@ else
     if [ "$QA" = true ]; then
         echo "  QA ad-hoc requirement uses only $APP_BUNDLE_ID; production grants are separate."
     else
-        echo "  ⚠️  Ad-hoc signature: set MEETCAPTURE_SIGN_IDENTITY to keep permissions across rebuilds"
+        echo "  Ad-hoc local build: not Developer ID signed or notarized; macOS may request permissions again."
     fi
 fi
 

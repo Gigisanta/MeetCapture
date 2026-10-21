@@ -4,8 +4,7 @@
 #   MEETCAPTURE_APP       bundle to launch (default ~/meetings/MeetCapture.app)
 #   MEETCAPTURE_SHOT_DIR  where to write the PNG (default /tmp)
 #   --headless            render the popover with synthetic data instead of
-#                         driving the real menu bar (no Accessibility needed;
-#                         this is how site/assets/popover.png is produced)
+#                         driving the real menu bar (no Accessibility needed)
 set -euo pipefail
 
 APP="${MEETCAPTURE_APP:-$HOME/meetings/MeetCapture.app}"

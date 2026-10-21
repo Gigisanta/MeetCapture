@@ -1,0 +1,83 @@
+diff --git a/Sources/MeetCaptureCore/App/RealPipelineCheck.swift b/Sources/MeetCaptureCore/App/RealPipelineCheck.swift
+index 27701b2..6ce4620 100644
+--- a/Sources/MeetCaptureCore/App/RealPipelineCheck.swift
++++ b/Sources/MeetCaptureCore/App/RealPipelineCheck.swift
+@@ -101,6 +101,7 @@ public enum RealPipelineCheck {
+     @MainActor
+     private static func run(_ app: AppState, mode: String, source: URL) async throws -> [String: Any] {
+         let start = Date()
++        var memory: [[String: Any]] = [Self.memorySample("start", since: start)]
+         let originalHash = try digest(source)
+         let duration = PCMToWAV.wavDurationSeconds(source.path)
+         var capture: [String: Any] = [:]
+@@ -126,15 +127,19 @@ public enum RealPipelineCheck {
+                 throw CheckError.failed("capture or its format sidecar is missing")
+             }
+             capture = ["capturePath": raw, "droppedCallbacks": app.audioCapture.droppedCallbacks]
++            memory.append(Self.memorySample("after-capture", since: start))
+         } else {
+             await app.importAudio(url: source)
+             try requireDone(app)
++            memory.append(Self.memorySample("after-import-1", since: start))
+             let first = try Data(contentsOf: URL(fileURLWithPath: app.lastTranscriptPath!))
+             let firstPath = app.lastTranscriptPath!
+             await app.importAudio(url: source)
+             try requireDone(app)
++            memory.append(Self.memorySample("after-import-2", since: start))
+             await app.retranscribeLastAudio()
+             try requireDone(app)
++            memory.append(Self.memorySample("after-retranscribe", since: start))
+             guard try Data(contentsOf: URL(fileURLWithPath: firstPath)) == first else {
+                 throw CheckError.failed("earlier transcript was overwritten")
+             }
+@@ -165,11 +170,16 @@ public enum RealPipelineCheck {
+         if let word = app.lastSegments.first?.text.split(whereSeparator: { !$0.isLetter }).first {
+             guard !reopened.search(String(word)).isEmpty else { throw CheckError.failed("history search cannot find recognized speech") }
+         }
++        let elapsed = Date().timeIntervalSince(start)
++        // After every phase check: the earlier jobs' 10 s done→idle timers may fire now.
++        try await Task.sleep(nanoseconds: 5_000_000_000)
++        memory.append(Self.memorySample("idle-5s", since: start))
+         var result: [String: Any] = ["status": "passed", "mode": mode, "text": text,
+-            "inputDurationSec": duration, "elapsedSec": Date().timeIntervalSince(start),
++            "inputDurationSec": duration, "elapsedSec": elapsed,
+             "historyCount": history.count, "records": records, "diarize": Settings.diarize,
+             "speakers": PendingContractV2.speakers(of: app.lastSegments),
+-            "micOnly": Settings.micOnlyMode]
++            "micOnly": Settings.micOnlyMode,
++            "memory": ["samples": memory, "children_max_rss_bytes": Self.childrenMaxRSS()]]
+         result.merge(capture) { _, new in new }
+         return result
+     }
+@@ -185,6 +195,31 @@ public enum RealPipelineCheck {
+         return hash.finalize()
+     }
+ 
++    /// `phys_footprint` is the figure Activity Monitor reports as Memory; RSS
++    /// also counts clean pages the kernel can drop, so it is not used here.
++    private static func memorySample(_ label: String, since start: Date) -> [String: Any] {
++        var info = task_vm_info_data_t()
++        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
++        let status = withUnsafeMutablePointer(to: &info) {
++            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
++                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
++            }
++        }
++        var sample: [String: Any] = ["label": label, "elapsedSec": Date().timeIntervalSince(start)]
++        if status == KERN_SUCCESS {
++            sample["physFootprintBytes"] = info.phys_footprint
++            sample["residentBytes"] = info.resident_size
++        }
++        return sample
++    }
++
++    /// Peak RSS of reaped child processes (bytes on macOS); 0 without children.
++    private static func childrenMaxRSS() -> Int {
++        var usage = rusage()
++        guard getrusage(RUSAGE_CHILDREN, &usage) == 0 else { return -1 }
++        return usage.ru_maxrss
++    }
++
+     @MainActor
+     private static func requireDone(_ app: AppState) throws {
+         guard app.phase == .done, app.errorMessage == nil, app.lastTranscriptPath != nil else {

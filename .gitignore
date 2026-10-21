@@ -24,7 +24,7 @@ __pycache__/
 .venv/
 venv/
 
-# Whisper models (too large for git)
+# Downloaded model weights (too large for git)
 *.bin
 !*.bin.sha256
 
@@ -53,9 +53,7 @@ venv/
 # Local, per-machine configuration (see Resources/config.example.json)
 config.json
 
-# Downloaded models (scripts/fetch-models.sh)
+# Downloaded model archives
 *.tar.bz2
 *.onnx
 
-# Landing deploy state
-site/.vercel/

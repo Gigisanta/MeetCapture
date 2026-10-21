@@ -27,10 +27,9 @@ Sources/MeetCaptureCore/           everything else, one directory per layer
   Support/    ProcessRunner, ISO8601, AppInfo, Signposts
   UI/         PopoverContent, PopoverSnapshot, SettingsView, Strings, Brand, MeetCaptureApp
 Tests/MeetCaptureCoreTests/        XCTest, pure logic and on-disk contracts
-scripts/                           version check and site deploy (no runtime scripts)
+scripts/                           version check (no runtime scripts)
 tools/summary/                      canonical summary dispatcher, optional launchd template, tests
 qa/                                checks that need a built app, audio or a human eye
-site/                              landing page (static, no JavaScript)
 ```
 
 Dependencies point downward: `UI` and `App` know every layer; `Pipeline`
@@ -69,14 +68,14 @@ and `Settings` only know `Support`. Nothing below `App` touches SwiftUI.
    `TranscriptionWorkerClient` launches this app's executable in worker mode
    and runs `TranscriptionJob` there, never in the menu-bar process.
    - *Split.* `ChannelReader` writes one 16 kHz mono WAV per channel
-     (`PCMToWAV`): L (system, the remote side) and R (mic, Gio). A
+     (`PCMToWAV`): L (system, the remote side) and R (the local mic). A
      microphone-only capture, an import, a legacy mono file, or a system
      channel that stayed silent the whole meeting gives a single channel.
    - *Bleed gate.* With Mac speakers the mic also hears the remote side.
      `BleedGate` mutes each 0.5 s mic window where the system level is above
      −55 dBFS, the mic is less than 10 dB above it, and the 200 Hz–4 kHz
      band-passed signals correlate above 0.4 at a lag of 0–100 ms. Double talk
-     stays because Gio is then clearly louder.
+     stays because the local speaker is then clearly louder.
    - *Chunks.* `ChunkedTranscription` cuts each channel into ~5 min chunks at
      the quietest 100 ms frame within ±10 s of each boundary and transcribes
      them with `ParakeetEngine` (FluidAudio, Parakeet TDT 0.6B "ultra"), which
@@ -100,7 +99,7 @@ and `Settings` only know `Support`. Nothing below `App` touches SwiftUI.
      remote channel only; its spans are cached in `<audio>.work/diarization.json`
      against actual source content, not just file size. It requires macOS 15
      (macOS 14 crashes in BNNS) and is skipped there.
-   - *Merge.* `TurnMerger` labels mic words `Gio` and remote words
+   - *Merge.* `TurnMerger` labels mic words `Yo` and remote words
      `Participante 1..N` by order of first appearance, or `Participante` when
      diarization is off or failed. Lexical matching never deletes a microphone
      word merely because the remote speaker said it too; the acoustic gate is
@@ -156,7 +155,7 @@ to that id; existing recordings and history keep their original paths.
 | `~/meetings/transcripts/recording-meet-<epoch>-<uuid>.pcm` + `.pcm.format.json` | Capture | ASR, retention | Int16 stereo 16 kHz; sidecar schema `meetcapture.audio.v1` (`sample_rate`, `sample_format`, `channels`, `layout`, `tap_strategy`, `tap_info`). |
 | `<audio>.work/` (`remote/`, `mic/`, `diarization.json`, `gaps.json`) | ASR | ASR | Per-channel manifest version 4 binds audio/reference SHA-256, actual model artifacts, SDK and effective recognition configuration. Stale/corrupt derived checkpoints are rebuilt without deleting source audio; diarization is content-bound too. `gaps.json` remains while the handed-off transcript has gaps and is removed after a complete transcript is handed off. Older manifests are invalidated, not compatibility-shimmed. |
 | `<audio>.recovery.json` | AppState | AppState | `attempts`, `last_error`, `updated_at` and `next_attempt_at` (ISO 8601 with milliseconds; absent once the automatic attempts are used up). Automatic recovery runs a capture only after `next_attempt_at`, at most three attempts within 48 h of the capture. Removed when a transcript without gaps is handed off. |
-| `~/meetings/transcripts/[recording-]meet-<epoch>-<uuid>.txt` | PostProcessor | dispatcher, popover | Live recordings use the `recording-` prefix; retranscriptions use the job id directly. Imports keep a unique dated basename in `~/meetings/imports/`. One `[speaker]: text` line per turn, for example `[Gio]: …` or `[Participante 2]: …`. |
+| `~/meetings/transcripts/[recording-]meet-<epoch>-<uuid>.txt` | PostProcessor | dispatcher, popover | Live recordings use the `recording-` prefix; retranscriptions use the job id directly. Imports keep a unique dated basename in `~/meetings/imports/`. One `[speaker]: text` line per turn, for example `[Yo]: …` or `[Participante 2]: …`. |
 | `~/meetings/meet-<epoch>-<uuid>.pending` | PostProcessor | dispatcher | Version 2, 14 sorted keys: `audioPath` (null if deleted or if the transcript has gaps), `checksum` (SHA-256 of the transcript text), `durationSec`, `endedAt`, `engine`, `language`, `meetingId`, `model`, `segments` (`start`, `end`, `text`, optional `speaker`), `speakerCount`, `startedAt`, `title`, `transcriptPath`, `version`. Written to a temp file and renamed. |
 | `<transcript basename>.processed.json` | PostProcessor | app | Schema `meetcapture.processed.v1`: `processed_at`, `transcript_path`, `meeting_title`, `retention`. Makes post-processing idempotent. |
 | `~/meetings/meet-<epoch>-<uuid>.done`, `.summary.json`, `.summary.html` | dispatcher | popover | Acknowledged handoff and the summary. |

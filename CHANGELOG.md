@@ -19,6 +19,15 @@ semantic versioning. The single source of the current version is
   punctuation. Confidence survives chunk checkpoints; old checkpoints decode
   with no confidence and are not marked. Aliases preserve uncertainty; `.txt`,
   SQLite and handoff text keep the marks, which FTS ignores.
+- Source installation reports unsupported hosts and missing tools before a
+  staging bundle is replaced. Public installation is from a pinned release,
+  not an unnotarized binary download.
+- Removed the retired static website, duplicate web assets and deploy helper;
+  the product page has one owner in the MaatWork website repository.
+- Microphone turns use the generic label `Yo` instead of a developer's name.
+  Existing transcripts and history are not renamed.
+- Added a frozen operational baseline with input hashes and a comparison
+  observer patch, plus privacy-safe bug reporting and an evidence-first PR template.
 
 ### Fixed
 - Fully decoded audio without speech is terminal `noSpeech`: keep the audio,
@@ -38,18 +47,17 @@ semantic versioning. The single source of the current version is
   51.14%, recall 7.67%. Precision varies strongly by source (OpenSLR61 7.14%,
   MediaSpeech 59.46%). Most errors, and all deletions, stay unmarked.
   Holdout remains closed; this is not real-meeting accuracy validation.
-- Final same-host 91 s import QA: the candidate's main-process physical
-  footprint stayed near 17 MiB after three jobs; the 7.0.2 probe saw roughly
-  671/820/825 MiB immediately after jobs and 825 MiB after five idle seconds.
-  An earlier baseline run returned to 27 MiB after five seconds, so cleanup
-  timing varied; high RSS alone was not evidence of a leak. The helper's peak
-  RSS was 754 MiB: the worker relocates model memory, not the working set.
-  The three candidate transcripts match the baseline byte for byte after
-  removing doubt markers; added per-job latency was under 0.1 s in both runs.
+- Final same-host 91 s import QA: main-process physical footprint was
+  16.56/16.69/16.64 MiB after three jobs and 19.49 MiB after five idle seconds;
+  the 7.0.2 probe saw 671/851/902 MiB and 902 MiB idle. An earlier baseline
+  run returned to 27 MiB, so cleanup timing varied; RSS is not proof of a leak.
+  The helper's peak RSS was 762 MiB: model memory moved, not disappeared.
+  Three transcripts match the baseline after removing doubt markers.
+  The largest added job interval was 1.053 s, within the predeclared +2 s limit.
 - Digital silence (30 s) produces one `noSpeech` result, retains its imported
   WAV, and creates no transcript or handoff. Import and capture retain the
   known exact-word failure `pongo` → `puego`; this release does not fix it.
-- Local verification: 159 Swift tests, 13 installer safety cases, 31 dispatcher
+- Local verification: 159 Swift tests, 15 installer safety cases, 31 dispatcher
   tests, 15 real-summary checks and four legacy privacy tests passed. Final
   staging signatures, version, shellcheck and strict hosted-icon smoke (10/10)
   passed. Real dual-channel capture with diarization completed with two
@@ -59,8 +67,9 @@ semantic versioning. The single source of the current version is
 - No new-meeting silver benchmark yet: it requires at least 60 minutes of
   retained audio. Legacy text-only corrections are separate private copies,
   not an ASR reference or a migration of the meeting database.
-- Bundles are staged only. Installation and release publication require
-  separate approval.
+- The frozen baseline, measured input identities and reproduction steps are
+  published in [`docs/BASELINE.md`](docs/BASELINE.md). Public distribution is
+  pinned source; CI artifacts are not notarized app downloads.
 
 ## [7.0.2] - 2026-10-21
 

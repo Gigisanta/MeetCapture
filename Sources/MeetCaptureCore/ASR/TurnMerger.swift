@@ -1,7 +1,7 @@
 // TurnMerger.swift
 // Words from both channels → speaker turns, in time order. Remote words take
 // their speaker from diarization ("Participante N", numbered by first
-// appearance); mic words are Gio's. Echo removal belongs to the acoustic
+// appearance); mic words use the local "Yo" label. Echo removal belongs to the acoustic
 // BleedGate: matching text is not evidence that a real reply is bleed.
 
 import Foundation
@@ -13,7 +13,7 @@ struct SpeakerSpan: Codable, Equatable, Sendable {
 }
 
 enum TurnMerger {
-    static let micSpeaker = "Gio"
+    static let micSpeaker = "Yo"
     static let remoteSpeaker = "Participante"
     static let maxGap = 1.5
     /// A turn this long ends at the next sentence end, so lines stay readable.
