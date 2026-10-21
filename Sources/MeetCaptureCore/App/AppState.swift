@@ -117,10 +117,6 @@ final class AppState: ObservableObject {
     private let recoveryRetryDelays: [TimeInterval]
     private var systemAudioHeard = false
     private var lastLevelCheck: TimeInterval = 0
-    /// Only the real engine is warmed and unloaded; injected runners are fakes.
-    private let managesModels: Bool
-    private var modelUnloadTask: Task<Void, Never>?
-    static let modelIdleUnload: UInt64 = 600
     private let logger = AppInfo.logger("AppState")
 
     init(paths: AppPaths = .current, store: MeetingStore = .shared,
@@ -136,11 +132,15 @@ final class AppState: ObservableObject {
         self.store = store
         postProcessor = PostProcessor(store: store)
         self.recordingDriver = recordingDriver ?? .live(recorder: recorder)
-        managesModels = transcriptionRunner == nil
         self.transcriptionRunner = transcriptionRunner ?? { job, progress in
-            try await Task.detached(priority: .userInitiated) {
+            let task = Task.detached(priority: .userInitiated) {
                 try await job.run(progress: progress)
-            }.value
+            }
+            return try await withTaskCancellationHandler {
+                try await task.value
+            } onCancel: {
+                task.cancel()
+            }
         }
         self.errorDismissalDelay = max(0, errorDismissalDelay)
         self.recoveryRetryDelays = recoveryRetryDelays
@@ -232,7 +232,6 @@ final class AppState: ObservableObject {
         meetingNotes = ""
         isStartingRecording = true
         phase = .recording
-        warmModels()
         recordingOrigin = origin
         recordingDuration = 0
         captureWarning = nil
@@ -354,27 +353,6 @@ final class AppState: ObservableObject {
 
     // MARK: - Transcription
 
-    /// Loads Parakeet while the meeting runs, so the transcript starts at once.
-    private func warmModels() {
-        guard managesModels else { return }
-        modelUnloadTask?.cancel()
-        Task.detached(priority: .utility) { try? await ParakeetEngine.shared.prepare() }
-        scheduleModelUnload()
-    }
-
-    /// Frees the models after `modelIdleUnload` seconds with no recording or job.
-    private func scheduleModelUnload() {
-        guard managesModels else { return }
-        modelUnloadTask?.cancel()
-        modelUnloadTask = Task { @MainActor [weak self] in
-            while true {
-                try? await Task.sleep(nanoseconds: Self.modelIdleUnload * 1_000_000_000)
-                guard let self, !Task.isCancelled else { return }
-                if self.phase != .recording, self.phase != .transcribing, self.recoveringPath == nil { break }
-            }
-            await ParakeetEngine.shared.unload()
-        }
-    }
 
     private func makeJob(audioPath: String, captureSampleRate: Double) -> TranscriptionJob {
         TranscriptionJob(audioPath: audioPath, captureSampleRate: captureSampleRate,
@@ -384,7 +362,6 @@ final class AppState: ObservableObject {
 
     private func transcribe(session: MeetingSession, audioPath: String, durableAudioPath: String,
                             transcriptPath: String, applyRetention: Bool) async {
-        defer { scheduleModelUnload() }
         errorMessage = nil
         phase = .transcribing
         transcriptionProgress = 0
@@ -401,6 +378,7 @@ final class AppState: ObservableObject {
                 Task { @MainActor in self.transcriptionProgress = progress }
             }
             let outcome = try await transcriptionRunner(job, progressSink)
+            try Task.checkCancellation()
             var finalInput = input
             finalInput.segments = outcome.segments
             finalInput.engine = outcome.engineUsed
@@ -565,9 +543,9 @@ final class AppState: ObservableObject {
                                      fallbackTitle: Strings.recoveredRecording)
             ?? MeetingSession(startedAt: recording.startedAt, title: Strings.recoveredRecording)
         let job = makeJob(audioPath: recording.audioPath, captureSampleRate: 16_000)
-        defer { scheduleModelUnload() }
         do {
             let outcome = try await transcriptionRunner(job) { _ in }
+            try Task.checkCancellation()
             let input = PostProcessInput(
                 session: session, segments: outcome.segments, transcriptPath: recording.transcriptPath,
                 capturePath: recording.audioPath, durableAudioPath: recording.audioPath,

@@ -10,10 +10,10 @@ public enum ModelPrefetch {
         guard ProcessInfo.processInfo.environment["MEETCAPTURE_PREFETCH_MODELS"] == "1" else { return false }
         Task.detached {
             do {
-                try await ParakeetEngine.shared.prepare()
-                await ParakeetEngine.shared.unload()
+                let identity = try await ParakeetEngine.shared.prepare()
+                await ParakeetEngine.shared.release()
                 try await FluidDiarizer.prefetch()
-                print("MODELS_READY \(ParakeetEngine.modelName)")
+                print("MODELS_READY \(identity.model)")
                 exit(0)
             } catch {
                 FileHandle.standardError.write(Data("MODELS_FAILED \(error.localizedDescription)\n".utf8))

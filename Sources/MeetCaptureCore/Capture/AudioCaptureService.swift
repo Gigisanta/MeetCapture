@@ -397,7 +397,7 @@ final class CaptureEngine: CaptureEngineBackend, @unchecked Sendable {
             try sidecar.write(forAudio: outputPath)
 
             let consumer = try Consumer(ring: ring, writer: writer, inputRate: tap.sampleRate,
-                                        onWriteFailure: onRebuildFailure)
+                                        onFailure: onRebuildFailure)
             self.consumer = consumer
             consumer.start()
             try startIOProc(tap, micOnly: configuration.micOnly)
@@ -549,7 +549,7 @@ final class CaptureEngine: CaptureEngineBackend, @unchecked Sendable {
                 self.consumer = nil
                 try consumer.finish()
                 let fresh = try Consumer(ring: ring, writer: writer, inputRate: tap.sampleRate,
-                                         onWriteFailure: onRebuildFailure)
+                                         onFailure: onRebuildFailure)
                 self.consumer = fresh
                 fresh.start()
             }
@@ -565,37 +565,112 @@ final class CaptureEngine: CaptureEngineBackend, @unchecked Sendable {
 
     // MARK: - Consumer thread
 
-    /// Drains ring slots: resample both tracks, interleave L/R, feed the
-    /// buffered writer. Owns the resamplers.
+    /// Owns conversion, bounded channel carry-over and file I/O. The IOProc
+    /// only fills the existing ring; it never touches these buffers.
     private final class Consumer: @unchecked Sendable {
+        private enum IntegrityError: LocalizedError {
+            case droppedCallbacks(Int)
+            case unpairedFrames(system: Int, mic: Int)
+            case pendingLimitExceeded(system: Int, mic: Int, limit: Int)
+            case incompleteDrain(channel: String, calls: Int)
+
+            var errorDescription: String? {
+                switch self {
+                case .droppedCallbacks(let count):
+                    return "La cola de captura descartó \(count) callbacks. El audio parcial se conserva, pero contiene una interrupción."
+                case .unpairedFrames(let system, let mic):
+                    return "La captura terminó con frames sin pareja estéreo (sistema: \(system), micrófono: \(mic)); no se descartaron ni rellenaron silenciosamente. El audio ya escrito se conserva."
+                case .pendingLimitExceeded(let system, let mic, let limit):
+                    return "Los frames pendientes de captura excedieron el límite por canal \(limit) (sistema: \(system), micrófono: \(mic)). El audio ya escrito se conserva."
+                case .incompleteDrain(let channel, let calls):
+                    return "El conversor de \(channel) no confirmó fin de stream después de \(calls) intentos. El audio ya escrito se conserva."
+                }
+            }
+        }
+
+        /// Fixed-capacity FIFO, allocated before the consumer starts.
+        private final class PendingFrames {
+            let capacity: Int
+            private var storage: [Int16]
+            private var head = 0
+            private(set) var count = 0
+
+            init(capacity: Int) {
+                self.capacity = capacity
+                storage = [Int16](repeating: 0, count: capacity)
+            }
+
+            func append(_ samples: [Int16]) {
+                precondition(samples.count <= capacity - count)
+                guard !samples.isEmpty else { return }
+                let tail = (head + count) % capacity
+                let firstCount = min(samples.count, capacity - tail)
+                samples.withUnsafeBufferPointer { source in
+                    storage.withUnsafeMutableBufferPointer { destination in
+                        destination.baseAddress!.advanced(by: tail)
+                            .update(from: source.baseAddress!, count: firstCount)
+                        let remaining = samples.count - firstCount
+                        if remaining > 0 {
+                            destination.baseAddress!.update(
+                                from: source.baseAddress!.advanced(by: firstCount), count: remaining)
+                        }
+                    }
+                }
+                count += samples.count
+            }
+
+            subscript(index: Int) -> Int16 {
+                let position = head + index
+                return storage[position < capacity ? position : position - capacity]
+            }
+
+            func consume(_ frames: Int) {
+                precondition(frames <= count)
+                count -= frames
+                head = count == 0 ? 0 : (head + frames) % capacity
+            }
+        }
+
         let inputRate: Double
         private let ring: AudioRingBuffer
         private let writer: PCMFileWriter
-        private let onWriteFailure: (@Sendable (String) -> Void)?
+        private let onFailure: (@Sendable (String) -> Void)?
         private let system: AudioResampler
         private let mic: AudioResampler
+        private static let drainCallLimit = 8
+        private let pendingFrameLimit: Int
+        private let systemPending: PendingFrames
+        private let micPending: PendingFrames
+        private let initialDroppedCallbacks: Int
         private let stopFlag = OSAllocatedUnfairLock(initialState: false)
         private let done = DispatchSemaphore(value: 0)
         private var system16: [Int16] = []
         private var mic16: [Int16] = []
         private var interleaved: [Int16] = []
-        private var writeError: Error?
-        private var completionError: Error?
+        private var failure: Error?
+        private var writerFailed = false
 
         init(ring: AudioRingBuffer, writer: PCMFileWriter, inputRate: Double,
-             onWriteFailure: (@Sendable (String) -> Void)?) throws {
+             onFailure: (@Sendable (String) -> Void)?) throws {
             guard let system = AudioResampler(inputRate: inputRate, outputRate: AudioCaptureService.targetSampleRate, channels: 1),
                   let mic = AudioResampler(inputRate: inputRate, outputRate: AudioCaptureService.targetSampleRate, channels: 1)
             else { throw CaptureError.resamplerInitFailed }
             self.ring = ring
             self.writer = writer
             self.inputRate = inputRate
-            self.onWriteFailure = onWriteFailure
+            self.onFailure = onFailure
             self.system = system
             self.mic = mic
-            system16.reserveCapacity(AudioRingBuffer.maxFrames)
-            mic16.reserveCapacity(AudioRingBuffer.maxFrames)
-            interleaved.reserveCapacity(AudioRingBuffer.maxFrames * 2)
+            initialDroppedCallbacks = ring.droppedCallbacks
+            // One new converter batch plus one retained batch per channel.
+            // Persistent divergence fails instead of growing with the meeting.
+            let pendingLimit = 2 * max(system.outputFrameCapacity, mic.outputFrameCapacity)
+            pendingFrameLimit = pendingLimit
+            systemPending = PendingFrames(capacity: pendingLimit)
+            micPending = PendingFrames(capacity: pendingLimit)
+            system16.reserveCapacity(system.outputFrameCapacity)
+            mic16.reserveCapacity(mic.outputFrameCapacity)
+            interleaved.reserveCapacity(pendingLimit * 2)
         }
 
         func start() {
@@ -608,50 +683,143 @@ final class CaptureEngine: CaptureEngineBackend, @unchecked Sendable {
             thread.start()
         }
 
-        /// Signals the thread, waits until every queued slot is written and flushed.
+        /// Called once, after the producer stops. Waits for the ring, both
+        /// converter tails and the writer flush; a failure still completes.
         func finish() throws {
             stopFlag.withLock { $0 = true }
             ring.available.signal()
             done.wait()
-            if let completionError { throw completionError }
+            if let failure { throw failure }
         }
 
         private func run() {
+            defer { done.signal() }
             while true {
                 _ = ring.available.wait(timeout: .now() + 0.5)
                 while ring.read({ process($0) }) {}
+                let dropped = ring.droppedCallbacks - initialDroppedCallbacks
+                if dropped > 0, failure == nil {
+                    recordFailure(IntegrityError.droppedCallbacks(dropped))
+                }
                 if stopFlag.withLock({ $0 }) {
                     while ring.read({ process($0) }) {}
                     break
                 }
             }
+            // Drain both even if conversion or writing already failed. Neither
+            // an empty buffer nor a failed first channel skips the second.
+            drain(system, pending: systemPending, channel: "sistema")
+            drain(mic, pending: micPending, channel: "micrófono")
+            pairPendingOutput()
+            if !writerFailed, systemPending.count > 0 || micPending.count > 0 {
+                recordFailure(IntegrityError.unpairedFrames(
+                    system: systemPending.count, mic: micPending.count))
+            }
             do {
                 try writer.flush()
             } catch {
-                completionError = error
+                writerFailed = true
+                recordFailure(error, writing: true)
             }
-            done.signal()
+        }
+
+        private func recordFailure(_ error: Error, writing: Bool = false) {
+            guard failure == nil else { return }
+            failure = error
+            if writing {
+                onFailure?("La captura dejó de guardar audio: \(error.localizedDescription). Detené la grabación.")
+            } else {
+                onFailure?("La captura no pudo conservar todo el audio: \(error.localizedDescription). Detené la grabación.")
+            }
+        }
+
+        private func pairConvertedOutput() {
+            if systemPending.count == 0, micPending.count == 0, system16.count == mic16.count {
+                // Equal batches go straight to the writer, without FIFO copies.
+                interleaved.removeAll(keepingCapacity: true)
+                for index in system16.indices {
+                    interleaved.append(system16[index])
+                    interleaved.append(mic16[index])
+                }
+                _ = submitInterleaved()
+                return
+            }
+            let systemCount = systemPending.count + system16.count
+            let micCount = micPending.count + mic16.count
+            guard systemCount <= pendingFrameLimit, micCount <= pendingFrameLimit else {
+                recordFailure(IntegrityError.pendingLimitExceeded(
+                    system: systemCount, mic: micCount, limit: pendingFrameLimit))
+                return
+            }
+            systemPending.append(system16)
+            micPending.append(mic16)
+            pairPendingOutput()
+        }
+
+        private func pairPendingOutput() {
+            guard !writerFailed else { return }
+            let frames = min(systemPending.count, micPending.count)
+            guard frames > 0 else { return }
+            interleaved.removeAll(keepingCapacity: true)
+            for index in 0..<frames {
+                interleaved.append(systemPending[index])
+                interleaved.append(micPending[index])
+            }
+            if submitInterleaved() {
+                systemPending.consume(frames)
+                micPending.consume(frames)
+            }
+        }
+
+        private func drain(_ resampler: AudioResampler, pending: PendingFrames, channel: String) {
+            // Both converters have the same output capacity. Reuse one cache
+            // now that no ring slot remains, with a finite end-of-stream bound.
+            for _ in 0..<Self.drainCallLimit {
+                let status: AVAudioConverterOutputStatus
+                do {
+                    status = try resampler.flush(into: &system16)
+                } catch {
+                    recordFailure(error)
+                    return
+                }
+                if system16.count <= pending.capacity - pending.count {
+                    pending.append(system16)
+                } else {
+                    recordFailure(IntegrityError.pendingLimitExceeded(
+                        system: systemPending.count + (pending === systemPending ? system16.count : 0),
+                        mic: micPending.count + (pending === micPending ? system16.count : 0),
+                        limit: pendingFrameLimit))
+                }
+                if status == .endOfStream { return }
+            }
+            recordFailure(IntegrityError.incompleteDrain(channel: channel, calls: Self.drainCallLimit))
+        }
+
+        private func submitInterleaved() -> Bool {
+            guard !interleaved.isEmpty else { return true }
+            do {
+                try writer.write(interleaved)
+                return true
+            } catch {
+                writerFailed = true
+                recordFailure(error, writing: true)
+                return false
+            }
         }
 
         private func process(_ slot: AudioRingBuffer.Slot) {
-            guard writeError == nil else { return }
-            let frames = slot.frames
-            guard frames > 0 else { return }
-            system.resample(mono: UnsafePointer(slot.system), frameCount: frames, into: &system16)
-            mic.resample(mono: UnsafePointer(slot.mic), frameCount: frames, into: &mic16)
-            let n = min(system16.count, mic16.count)
-            guard n > 0 else { return }
-            interleaved.removeAll(keepingCapacity: true)
-            for i in 0..<n {
-                interleaved.append(system16[i])
-                interleaved.append(mic16[i])
+            guard failure == nil, slot.frames != 0 else { return }
+            do {
+                try system.resample(mono: UnsafePointer(slot.system), frameCount: slot.frames, into: &system16)
+            } catch {
+                recordFailure(error)
             }
             do {
-                try writer.write(interleaved)
+                try mic.resample(mono: UnsafePointer(slot.mic), frameCount: slot.frames, into: &mic16)
             } catch {
-                writeError = error
-                onWriteFailure?("La captura dejó de guardar audio: \(error.localizedDescription). Detené la grabación.")
+                recordFailure(error)
             }
+            pairConvertedOutput()
         }
     }
 }

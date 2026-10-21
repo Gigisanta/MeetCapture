@@ -50,6 +50,7 @@
    MEETCAPTURE_CHECK_INPUT=<WAV>
    MEETCAPTURE_CHECK_REPORT=<JSON inside TEST_OUTPUT_DIR>
    MEETCAPTURE_CHECK_MIC_ONLY=1  # optional capture branch; default false
+   MEETCAPTURE_CHECK_DIARIZE=1   # optional macOS 15+ branch; default false
    ```
 
    Both modes transcribe with Parakeet. Download the models beforehand (any
@@ -128,7 +129,9 @@
    AppState, SQLite, and `.pending` publication. `capture` must use AppState,
    AV/Core Audio, `afplay`, a real PCM recording plus format sidecar, convert
    that recording into isolated channel WAVs, and transcribe them with
-   Parakeet. Diarization is explicitly disabled for this check. `ui` must open `PopoverContent` with real AppState,
+   Parakeet. Diarization defaults off; opt in with `MEETCAPTURE_CHECK_DIARIZE=1`
+   to verify the macOS 15+ speaker-label branch separately. `ui` must open
+   `PopoverContent` with real AppState,
    real engines, isolated history, and volatile settings with
    `allowsSettings:false`; CUA exercises known-WAV import through
    `NSOpenPanel`, re-transcription, search matches/non-matches, and error

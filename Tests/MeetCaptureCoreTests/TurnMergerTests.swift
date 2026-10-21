@@ -30,12 +30,14 @@ final class TurnMergerTests: XCTestCase {
         XCTAssertEqual(turns[0].end, 0.7, accuracy: 1e-9)
     }
 
-    func testMicEchoOfARemoteWordIsDroppedButRealRepliesStay() {
+    func testIdenticalRepliesAndLegitimateRepetitionsSurviveBothChannels() {
         let turns = TurnMerger.merge([
-            w(0, "Dale.", "Participante"), w(0.2, "dale", "Gio"), w(3, "Dale", "Gio"),
+            w(0, "Sí.", "Participante"), w(0.1, "sí", "Gio"),
+            w(1, "No.", "Participante"), w(1.1, "no", "Gio"), w(1.4, "no", "Gio"),
+            w(2, "Dale.", "Participante"), w(2.2, "dale", "Gio"),
         ])
-        XCTAssertEqual(turns.map(\.text), ["Dale.", "Dale"])
-        XCTAssertEqual(turns.map(\.speaker), ["Participante", "Gio"])
+        XCTAssertEqual(turns.map(\.text), ["Sí.", "sí", "No.", "no no", "Dale.", "dale"])
+        XCTAssertEqual(turns.map(\.speaker), ["Participante", "Gio", "Participante", "Gio", "Participante", "Gio"])
     }
 
     func testWordsFromBothChannelsAreSortedStably() {

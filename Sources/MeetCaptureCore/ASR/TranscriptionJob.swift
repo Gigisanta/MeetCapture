@@ -23,6 +23,7 @@ enum TranscriptionError: LocalizedError {
 /// Diarization of the remote channel, cached so a resumed run does not redo it.
 struct DiarizationCache: Codable {
     var audioBytes: UInt64
+    var sourceSHA256: String
     var spans: [SpeakerSpan]
 }
 
@@ -45,6 +46,7 @@ struct TranscriptionJob: Sendable {
     }
 
     func run(progress: @escaping @Sendable (Double) -> Void) async throws -> Outcome {
+        try Task.checkCancellation()
         let state = Signposts.pipeline.beginInterval("transcription")
         defer { Signposts.pipeline.endInterval("transcription", state) }
         let fm = FileManager.default
@@ -58,21 +60,37 @@ struct TranscriptionJob: Sendable {
         defer { ChannelReader.cleanup(layout, original: audioPath) }
         let duration = PCMToWAV.wavDurationSeconds(layout.remote.path)
         guard duration > 0 else { throw TranscriptionError.emptyAudio }
-        try await recognizer.prepare()
+        let identity = try await recognizer.prepare()
+        let outcome: Outcome
+        do {
+            outcome = try await transcribePrepared(layout: layout, work: work, duration: duration,
+                                                   identity: identity, progress: progress)
+        } catch {
+            await recognizer.release()
+            throw error
+        }
+        await recognizer.release()
+        try Task.checkCancellation()
+        return outcome
+    }
+
+    private func transcribePrepared(layout: ChannelLayout, work: String, duration: TimeInterval,
+                                    identity: RecognitionIdentity,
+                                    progress: @escaping @Sendable (Double) -> Void) async throws -> Outcome {
         progress(0.1)
         try Task.checkCancellation()
 
-        let audioBytes = ((try? fm.attributesOfItem(atPath: audioPath))?[.size] as? NSNumber)?.uint64Value ?? 0
+        let audioBytes = ((try? FileManager.default.attributesOfItem(atPath: audioPath))?[.size] as? NSNumber)?.uint64Value ?? 0
         let micShare = layout.mic == nil ? 0.0 : 0.3
         let remote = try await ChunkedTranscription.run(
             wav: layout.remote, workDirectory: work + "/remote", audioBytes: audioBytes,
-            language: language, recognizer: recognizer,
+            language: language, recognizer: recognizer, recognizerIdentity: identity,
             progress: { progress(0.1 + (0.7 - micShare) * $0) })
         var mic: ChunkedResult?
         if let micURL = layout.mic {
             mic = try await ChunkedTranscription.run(
                 wav: micURL, workDirectory: work + "/mic", audioBytes: audioBytes,
-                gateReference: layout.remote, language: language, recognizer: recognizer,
+                gateReference: layout.remote, language: language, recognizer: recognizer, recognizerIdentity: identity,
                 progress: { progress(0.5 + 0.3 * $0) })
         }
         progress(0.8)
@@ -80,32 +98,42 @@ struct TranscriptionJob: Sendable {
 
         var words = remote.words
         if diarize || mic != nil {
-            let spans = diarize ? await speakerSpans(layout.remote, work: work, audioBytes: audioBytes) : nil
+            let spans = diarize ? try await speakerSpans(layout.remote, work: work, audioBytes: audioBytes,
+                                                         sourceSHA256: remote.sourceSHA256) : nil
             words = TurnMerger.labelRemote(words, spans: spans)
+            try Task.checkCancellation()
         }
         words += (mic?.words ?? []).map { var w = $0; w.speaker = TurnMerger.micSpeaker; return w }
         let gaps = remote.gaps + (mic?.gaps ?? [])
         let turns = Aliases.apply(aliases, to: TurnMerger.merge(words))
         let result = TranscriptFormatter.cleaned((turns + gaps).sorted { $0.start < $1.start })
         guard !result.isEmpty else { throw TranscriptionError.emptyOutput }
+        try Task.checkCancellation()
         progress(1.0)
-        return Outcome(segments: result, engineUsed: .parakeet, modelUsed: ParakeetEngine.modelName,
+        return Outcome(segments: result, engineUsed: identity.engine, modelUsed: identity.model,
                        audioDurationSec: duration, failedChunks: gaps.count)
     }
 
     /// nil when diarization fails: the remote side becomes one "Participante".
-    private func speakerSpans(_ wav: URL, work: String, audioBytes: UInt64) async -> [SpeakerSpan]? {
+    private func speakerSpans(_ wav: URL, work: String, audioBytes: UInt64,
+                              sourceSHA256: String) async throws -> [SpeakerSpan]? {
+        try Task.checkCancellation()
         let cacheURL = URL(fileURLWithPath: work + "/diarization.json")
         if let data = try? Data(contentsOf: cacheURL),
-           let cache = try? JSONDecoder().decode(DiarizationCache.self, from: data), cache.audioBytes == audioBytes {
+           let cache = try? JSONDecoder().decode(DiarizationCache.self, from: data),
+           cache.audioBytes == audioBytes, cache.sourceSHA256 == sourceSHA256 {
             return cache.spans
         }
         do {
             let spans = try await diarizer.spans(in: wav)
-            try? JSONEncoder().encode(DiarizationCache(audioBytes: audioBytes, spans: spans))
+            try Task.checkCancellation()
+            try? JSONEncoder().encode(DiarizationCache(audioBytes: audioBytes, sourceSHA256: sourceSHA256, spans: spans))
                 .write(to: cacheURL, options: .atomic)
             return spans
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
+            try Task.checkCancellation()
             AppInfo.logger("TranscriptionJob").warning(
                 "diarización no disponible: \(error.localizedDescription, privacy: .public)")
             return nil

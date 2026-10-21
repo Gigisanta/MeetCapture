@@ -1,17 +1,26 @@
 import AVFoundation
+import FluidAudio
 import XCTest
 @testable import MeetCaptureCore
 
 /// Scripted recognizer: `script(call, samples)` answers each call in order.
 actor FakeRecognizer: SpeechRecognizer {
     typealias Script = @Sendable (Int, [Float]) throws -> [Segment]
+    static let testIdentity = RecognitionIdentity(
+        engine: .parakeet, model: "fixture", modelRepository: "fixture",
+        modelRevision: "fixture-v1", sdk: "fixture", sdkRevision: "1", configuration: [:])
+    private let identity: RecognitionIdentity
     private let script: Script
     private(set) var calls = 0
-    private(set) var prepared = 0
+    private(set) var releases = 0
 
-    init(_ script: @escaping Script) { self.script = script }
+    init(identity: RecognitionIdentity = FakeRecognizer.testIdentity, _ script: @escaping Script) {
+        self.identity = identity
+        self.script = script
+    }
 
-    func prepare() async throws { prepared += 1 }
+    func prepare() async throws -> RecognitionIdentity { identity }
+    func release() async { releases += 1 }
 
     func words(in samples: [Float], language: String) async throws -> [Segment] {
         calls += 1
@@ -52,9 +61,19 @@ final class ChunkedTranscriptionTests: XCTestCase {
     }
 
     private func run(_ wav: URL, _ dir: String, bytes: UInt64 = 1_000, language: String = "es",
-                     _ recognizer: FakeRecognizer) async throws -> ChunkedResult {
-        try await ChunkedTranscription.run(wav: wav, workDirectory: dir + "/work/remote", audioBytes: bytes,
-                                           language: language, recognizer: recognizer) { _ in }
+                     gateReference: URL? = nil, _ recognizer: FakeRecognizer) async throws -> ChunkedResult {
+        let identity = try await recognizer.prepare()
+        let work = dir + "/work/" + (gateReference == nil ? "remote" : "mic")
+        do {
+            let result = try await ChunkedTranscription.run(
+                wav: wav, workDirectory: work, audioBytes: bytes, gateReference: gateReference,
+                language: language, recognizer: recognizer, recognizerIdentity: identity) { _ in }
+            await recognizer.release()
+            return result
+        } catch {
+            await recognizer.release()
+            throw error
+        }
     }
 
     func testCutsMoveToTheQuietestFrameNearEachBoundary() throws {
@@ -110,33 +129,75 @@ final class ChunkedTranscriptionTests: XCTestCase {
         let dir = TestSupport.makeTempDir(self, "chunk-language")
         let wav = try makeWAV(dir, seconds: 30)
         _ = try await run(wav, dir, language: "es", FakeRecognizer { _, _ in [Segment(start: 0, end: 1, text: "hola")] })
+        let retainedAudio = URL(fileURLWithPath: dir + "/work/remote/retained.wav")
+        let original = try Data(contentsOf: wav)
+        try original.write(to: retainedAudio)
 
         let english = FakeRecognizer { _, _ in [Segment(start: 0, end: 1, text: "hello")] }
         let again = try await run(wav, dir, language: "en", english)
         XCTAssertEqual(again.words.map(\.text), ["hello"], "chunks in another language are redone")
         let calls = await english.calls
         XCTAssertEqual(calls, 1)
+        XCTAssertEqual(try Data(contentsOf: wav), original)
+        XCTAssertEqual(try Data(contentsOf: retainedAudio), original, "invalidation removes only generated JSON")
     }
 
-    func testEveryChunkFailingKeepsTheCaptureRecoverable() async throws {
+    func testMissingSDKTimingsNeverCheckpointEmptySuccessAndRemainRecoverable() async throws {
         let dir = TestSupport.makeTempDir(self, "chunk-allfail")
-        let wav = try makeWAV(dir, seconds: 30)
+        let wav = try makeWAV(dir, seconds: 1)
+        let original = try Data(contentsOf: wav)
+        let broken = FakeRecognizer { _, _ in
+            try ParakeetEngine.timedWords(from: ASRResult(text: "No", confidence: 1, duration: 1, processingTime: 0))
+        }
         do {
-            _ = try await run(wav, dir, FakeRecognizer { _, _ in throw FakeEngineError() })
+            _ = try await run(wav, dir, broken)
             XCTFail("expected a failure")
         } catch TranscriptionError.emptyOutput {}
+        let failedCalls = await broken.calls
+        XCTAssertEqual(failedCalls, 2)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dir + "/work/remote/chunk-000.json"))
+        XCTAssertEqual(try Data(contentsOf: wav), original)
+
+        let healthy = FakeRecognizer { _, _ in [Segment(start: 0, end: 0.5, text: "No")] }
+        let recovered = try await run(wav, dir, healthy)
+        XCTAssertEqual(recovered.words.map(\.text), ["No"])
+        let recoveryCalls = await healthy.calls
+        XCTAssertEqual(recoveryCalls, 1, "the invalid SDK result must not leave an empty success checkpoint")
     }
 
-    func testCancellationIsNotRetriedOrTurnedIntoAGap() async throws {
-        let dir = TestSupport.makeTempDir(self, "chunk-cancel")
-        let wav = try makeWAV(dir, seconds: 30)
-        let recognizer = FakeRecognizer { _, _ in throw CancellationError() }
-        do {
-            _ = try await run(wav, dir, recognizer)
-            XCTFail("expected cancellation")
-        } catch is CancellationError {}
-        let calls = await recognizer.calls
-        XCTAssertEqual(calls, 1)
+    func testCancellationIsNotRetriedOrTurnedIntoAGapEvenWhenTheSDKIgnoresIt() async throws {
+        let scripts: [FakeRecognizer.Script] = [
+            { _, _ in throw CancellationError() },
+            { _, _ in
+                withUnsafeCurrentTask { $0?.cancel() }
+                return [Segment(start: 0, end: 0.5, text: "not completed")]
+            },
+            { _, _ in
+                withUnsafeCurrentTask { $0?.cancel() }
+                throw FakeEngineError()
+            },
+        ]
+        for (index, script) in scripts.enumerated() {
+            let dir = TestSupport.makeTempDir(self, "chunk-cancel-\(index)")
+            let wav = try makeWAV(dir, seconds: 1)
+            let original = try Data(contentsOf: wav)
+            let recognizer = FakeRecognizer(script)
+            let job = TranscriptionJob(audioPath: wav.path, captureSampleRate: 16_000, language: "es",
+                                       diarize: false, recognizer: recognizer)
+            // Cancel a separate task, never XCTest's own task.
+            let task = Task { try await job.run { _ in } }
+            do {
+                _ = try await task.value
+                XCTFail("expected cancellation")
+            } catch is CancellationError {}
+            let calls = await recognizer.calls
+            XCTAssertEqual(calls, 1)
+            let work = ChunkedTranscription.workDirectory(forAudio: wav.path)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: work + "/remote/chunk-000.json"))
+            let releases = await recognizer.releases
+            XCTAssertEqual(releases, 1)
+            XCTAssertEqual(try Data(contentsOf: wav), original)
+        }
     }
 
     func testEveryChunkReachesTheEngineWhole() async throws {
@@ -159,30 +220,99 @@ final class ChunkedTranscriptionTests: XCTestCase {
         XCTAssertEqual(calls, 0)
     }
 
-    func testChangedAudioInvalidatesCheckpoints() async throws {
-        let dir = TestSupport.makeTempDir(self, "chunk-stale")
-        let wav = try makeWAV(dir, seconds: 30)
-        _ = try await run(wav, dir, bytes: 1_000, FakeRecognizer { _, _ in [Segment(start: 0, end: 1, text: "viejo")] })
-        let result = try await run(wav, dir, bytes: 2_000,
-                                   FakeRecognizer { _, _ in [Segment(start: 0, end: 1, text: "nuevo")] })
-        XCTAssertEqual(result.words.map(\.text), ["nuevo"])
+    func testChangedAudioInvalidatesCheckpointsIncludingSameSizeEdits() async throws {
+        for sameSize in [false, true] {
+            let dir = TestSupport.makeTempDir(self, "chunk-stale-\(sameSize)")
+            let wav = try makeWAV(dir, seconds: 1)
+            _ = try await run(wav, dir, bytes: 1_000, FakeRecognizer { _, _ in [Segment(start: 0, end: 1, text: "viejo")] })
+            if sameSize {
+                var samples = WAVFixture.tone(seconds: 1)
+                samples[samples.count - 1] += 1
+                try WAVFixture.write(samples, to: wav)
+            }
+            let original = try Data(contentsOf: wav)
+            let result = try await run(wav, dir, bytes: sameSize ? 1_000 : 2_000,
+                                       FakeRecognizer { _, _ in [Segment(start: 0, end: 1, text: "nuevo")] })
+            XCTAssertEqual(result.words.map(\.text), ["nuevo"])
+            XCTAssertEqual(try Data(contentsOf: wav), original)
+        }
     }
 
-    func testGateReferenceMutesBleedBeforeTheEngine() async throws {
+    func testGateReferenceChangeInvalidatesWordsAndMutesBleedBeforeTheEngine() async throws {
         let dir = TestSupport.makeTempDir(self, "chunk-gate")
         // The mic is the system channel 20 ms late and 6 dB quieter: pure bleed.
         let system = WAVFixture.tone(seconds: 4)
         let lag = rate / 50
         let mic = [Int16](repeating: 0, count: lag) + system.prefix(system.count - lag).map { $0 / 2 }
         let systemURL = URL(fileURLWithPath: dir + "/system.wav"), micURL = URL(fileURLWithPath: dir + "/mic.wav")
-        try WAVFixture.write(system, to: systemURL)
+        try WAVFixture.write([Int16](repeating: 0, count: system.count), to: systemURL)
         try WAVFixture.write(mic, to: micURL)
+        let firstRecognizer = FakeRecognizer { _, _ in [Segment(start: 0, end: 1, text: "before gate")] }
+        let before = try await run(micURL, dir, bytes: 1, gateReference: systemURL, firstRecognizer)
+        XCTAssertEqual(before.words.map(\.text), ["before gate"])
+        // Same byte count, but now the reference proves this mic signal is bleed.
+        try WAVFixture.write(system, to: systemURL)
         let recognizer = FakeRecognizer { _, samples in
             [Segment(start: 0, end: 1, text: "peak \(samples.map(abs).max() ?? 0)")]
         }
-        let result = try await ChunkedTranscription.run(
-            wav: micURL, workDirectory: dir + "/work/mic", audioBytes: 1, gateReference: systemURL,
-            language: "es", recognizer: recognizer) { _ in }
+        let result = try await run(micURL, dir, bytes: 1, gateReference: systemURL, recognizer)
         XCTAssertEqual(result.words, [], "a fully gated chunk is silent and never reaches the engine")
+        let calls = await recognizer.calls
+        XCTAssertEqual(calls, 0)
+    }
+
+    func testRecognizerChangesInvalidateDerivedWordsWithoutChangingAudio() async throws {
+        let changes: [(String, (inout RecognitionIdentity) -> Void)] = [
+            ("model", { $0.model = "another-model" }),
+            ("weights", { $0.modelRevision = "different-local-content" }),
+            ("sdk", { $0.sdkRevision = "another-revision" }),
+            ("decoder", { $0.configuration["seamGapRepairMinGapSeconds"] = "0.5" }),
+            ("compute", { $0.configuration["compute.encoderDecoder"] = "cpuOnly" }),
+        ]
+        for (name, change) in changes {
+            let dir = TestSupport.makeTempDir(self, "chunk-recognizer-\(name)")
+            let wav = try makeWAV(dir, seconds: 1)
+            let original = try Data(contentsOf: wav)
+            _ = try await run(wav, dir, FakeRecognizer { _, _ in [Segment(start: 0, end: 0.5, text: "old")] })
+            var identity = FakeRecognizer.testIdentity
+            change(&identity)
+            let recognizer = FakeRecognizer(identity: identity) { _, _ in [Segment(start: 0, end: 0.5, text: name)] }
+            let result = try await run(wav, dir, recognizer)
+            XCTAssertEqual(result.words.map(\.text), [name], "\(name) must not reuse another recognizer's words")
+            let calls = await recognizer.calls
+            XCTAssertEqual(calls, 1)
+            XCTAssertEqual(try Data(contentsOf: wav), original)
+        }
+    }
+
+    func testLegacyAndCorruptCheckpointsAreRedoneInsteadOfReused() async throws {
+        for corruption in ["legacy-v3", "chunking", "boundaries", "word-times"] {
+            let dir = TestSupport.makeTempDir(self, "chunk-checkpoint-\(corruption)")
+            let wav = try makeWAV(dir, seconds: 1)
+            let original = try Data(contentsOf: wav)
+            _ = try await run(wav, dir, FakeRecognizer { _, _ in [Segment(start: 0, end: 0.5, text: "old")] })
+            let manifestURL = URL(fileURLWithPath: dir + "/work/remote/manifest.json")
+            if corruption == "legacy-v3" {
+                let legacy: [String: Any] = ["version": 3, "audioBytes": 1_000, "language": "es", "boundaries": [0, rate]]
+                try JSONSerialization.data(withJSONObject: legacy).write(to: manifestURL)
+            } else if corruption == "word-times" {
+                try JSONEncoder().encode([Segment(start: -1, end: 0.5, text: "invalid")])
+                    .write(to: URL(fileURLWithPath: dir + "/work/remote/chunk-000.json"))
+            } else {
+                var manifest = try JSONDecoder().decode(ChunkManifest.self, from: Data(contentsOf: manifestURL))
+                if corruption == "chunking" {
+                    manifest.chunking.targetSamples += 1
+                } else {
+                    manifest.boundaries = [0, rate / 2, rate]
+                }
+                try JSONEncoder().encode(manifest).write(to: manifestURL)
+            }
+            let recognizer = FakeRecognizer { _, _ in [Segment(start: 0, end: 0.5, text: "new")] }
+            let result = try await run(wav, dir, recognizer)
+            XCTAssertEqual(result.words.map(\.text), ["new"], corruption)
+            let calls = await recognizer.calls
+            XCTAssertEqual(calls, 1)
+            XCTAssertEqual(try Data(contentsOf: wav), original)
+        }
     }
 }

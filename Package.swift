@@ -23,8 +23,8 @@ let package = Package(
         .library(name: "MeetCaptureCore", targets: ["MeetCaptureCore"]),
     ],
     dependencies: [
-        // Parakeet ASR + offline diarization on the ANE. Pinned by revision:
-        // no tagged release has the Parakeet ultra model yet.
+        // Local Parakeet ASR + offline diarization. This tested Ultra-capable
+        // revision is newer than tag v0.17.7; device placement is not measured.
         .package(url: "https://github.com/FluidInference/FluidAudio.git",
                  revision: "bd11ac8da17a944a7291a2c76e9a172eb275f629"),
     ],

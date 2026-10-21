@@ -1,8 +1,8 @@
 // TurnMerger.swift
 // Words from both channels → speaker turns, in time order. Remote words take
 // their speaker from diarization ("Participante N", numbered by first
-// appearance); mic words are Gio's. A mic word that repeats a remote word
-// within ±0.5 s is bleed the gate let through and is dropped.
+// appearance); mic words are Gio's. Echo removal belongs to the acoustic
+// BleedGate: matching text is not evidence that a real reply is bleed.
 
 import Foundation
 
@@ -16,7 +16,6 @@ enum TurnMerger {
     static let micSpeaker = "Gio"
     static let remoteSpeaker = "Participante"
     static let maxGap = 1.5
-    static let echoWindow = 0.5
     /// A turn this long ends at the next sentence end, so lines stay readable.
     static let longTurn = 45.0
 
@@ -42,20 +41,11 @@ enum TurnMerger {
     }
 
     static func merge(_ words: [Segment]) -> [Segment] {
-        var remoteStarts: [String: [Double]] = [:]
-        for w in words where w.speaker != micSpeaker {
-            if let key = normalized(w.text) { remoteStarts[key, default: []].append(w.start) }
-        }
-        let kept = words.enumerated().filter { _, w in
-            guard w.speaker == micSpeaker, let key = normalized(w.text),
-                  let starts = remoteStarts[key] else { return true }
-            return !starts.contains { abs($0 - w.start) <= echoWindow }
-        }
-        .sorted { ($0.element.start, $0.offset) < ($1.element.start, $1.offset) }
-        .map(\.element)
+        let ordered = words.enumerated()
+            .sorted { ($0.element.start, $0.offset) < ($1.element.start, $1.offset) }
 
         var turns: [Segment] = []
-        for w in kept {
+        for (_, w) in ordered {
             if var last = turns.last, last.speaker == w.speaker, w.start - last.end <= maxGap,
                !(last.end - last.start >= longTurn && endsSentence(last.text)) {
                 last.text += " " + w.text
@@ -66,11 +56,6 @@ enum TurnMerger {
             }
         }
         return turns
-    }
-
-    private static func normalized(_ text: String) -> String? {
-        let key = String(text.lowercased().filter { $0.isLetter || $0.isNumber })
-        return key.isEmpty ? nil : key
     }
 
     private static func endsSentence(_ text: String) -> Bool {

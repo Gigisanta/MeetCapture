@@ -6,6 +6,20 @@ import AVFoundation
 import Foundation
 
 final class AudioResampler: @unchecked Sendable {
+    enum ConversionError: LocalizedError {
+        case invalidFrameCount(Int, capacity: Int)
+        case missingSampleBuffer
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidFrameCount(let frames, let capacity):
+                return "El conversor recibió \(frames) frames; la capacidad de entrada es \(capacity)."
+            case .missingSampleBuffer:
+                return "AVAudioConverter no proporcionó el buffer de muestras esperado."
+            }
+        }
+    }
+
     private final class InputProvider: @unchecked Sendable {
         let buffer: AVAudioPCMBuffer
         var supplied = false
@@ -24,6 +38,8 @@ final class AudioResampler: @unchecked Sendable {
     private let provider: InputProvider
     let inputRate: Double
     let outputRate: Double
+
+    var outputFrameCapacity: Int { Int(outputBuffer.frameCapacity) }
 
     init?(inputRate: Double, outputRate: Double, channels: Int, frameCapacity: Int = AudioRingBuffer.maxFrames) {
         guard channels == 1, inputRate > 0, outputRate > 0, frameCapacity > 0 else { return nil }
@@ -45,10 +61,15 @@ final class AudioResampler: @unchecked Sendable {
     }
 
     /// Resamples `frameCount` mono floats into `out` (reused, cleared first).
-    func resample(mono: UnsafePointer<Float>, frameCount: Int, into out: inout [Int16]) {
+    func resample(mono: UnsafePointer<Float>, frameCount: Int, into out: inout [Int16]) throws {
         out.removeAll(keepingCapacity: true)
-        guard frameCount > 0, frameCount <= Int(inputBuffer.frameCapacity),
-              let destination = inputBuffer.floatChannelData?.pointee else { return }
+        guard frameCount >= 0, frameCount <= Int(inputBuffer.frameCapacity) else {
+            throw ConversionError.invalidFrameCount(frameCount, capacity: Int(inputBuffer.frameCapacity))
+        }
+        guard frameCount > 0 else { return }
+        guard let destination = inputBuffer.floatChannelData?.pointee else {
+            throw ConversionError.missingSampleBuffer
+        }
         inputBuffer.frameLength = UInt32(frameCount)
         destination.update(from: mono, count: frameCount)
         outputBuffer.frameLength = 0
@@ -57,28 +78,37 @@ final class AudioResampler: @unchecked Sendable {
         let status = converter.convert(to: outputBuffer, error: &error) { [provider] _, inputStatus in
             provider.next(inputStatus)
         }
-        guard status != .error, outputBuffer.frameLength > 0,
-              let source = outputBuffer.int16ChannelData?.pointee else { return }
-        out.append(contentsOf: UnsafeBufferPointer(start: source, count: Int(outputBuffer.frameLength)))
+        if status == .error { throw conversionFailure(error) }
+        try copyOutput(into: &out)
     }
 
-    func resample(interleaved: UnsafePointer<Float>, frameCount: Int) -> [Int16] {
-        var out: [Int16] = []
-        resample(mono: interleaved, frameCount: frameCount, into: &out)
-        return out
-    }
-
-    /// Drains the converter (end of stream).
-    func flush() -> [Int16] {
+    /// One end-of-stream pass. Only `.endOfStream`, not an empty output buffer,
+    /// confirms that the converter has finished draining.
+    func flush(into out: inout [Int16]) throws -> AVAudioConverterOutputStatus {
+        out.removeAll(keepingCapacity: true)
         outputBuffer.frameLength = 0
         var error: NSError?
         let status = converter.convert(to: outputBuffer, error: &error) { _, inputStatus in
             inputStatus.pointee = .endOfStream
             return nil
         }
-        guard status != .error, outputBuffer.frameLength > 0,
-              let source = outputBuffer.int16ChannelData?.pointee else { return [] }
-        return Array(UnsafeBufferPointer(start: source, count: Int(outputBuffer.frameLength)))
+        if status == .error { throw conversionFailure(error) }
+        try copyOutput(into: &out)
+        return status
+    }
+
+    private func copyOutput(into out: inout [Int16]) throws {
+        guard outputBuffer.frameLength > 0 else { return }
+        guard let source = outputBuffer.int16ChannelData?.pointee else {
+            throw ConversionError.missingSampleBuffer
+        }
+        out.append(contentsOf: UnsafeBufferPointer(start: source, count: Int(outputBuffer.frameLength)))
+    }
+
+    private func conversionFailure(_ error: NSError?) -> NSError {
+        error ?? NSError(
+            domain: "MeetCapture.AudioResampler", code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "AVAudioConverter falló sin proporcionar un NSError."])
     }
 
     func reset() {
