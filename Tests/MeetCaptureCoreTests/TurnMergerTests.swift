@@ -38,6 +38,17 @@ final class TurnMergerTests: XCTestCase {
         XCTAssertEqual(turns.map(\.speaker), ["Participante", "Gio"])
     }
 
+    func testWithoutLexicalDedupeBothSpeakersKeepTheirNegationsAndRepetitions() {
+        let turns = TurnMerger.merge([
+            w(0, "No.", "Participante"),
+            w(0.1, "No,", "Gio"), w(0.4, "no.", "Gio"),
+        ], deduplicateMic: false)
+        XCTAssertEqual(turns.map(\.text), ["No.", "No, no."])
+        XCTAssertEqual(turns.map(\.speaker), ["Participante", "Gio"])
+        XCTAssertEqual(turns[1].start, 0.1)
+        XCTAssertEqual(turns[1].end, 0.7, accuracy: 1e-9)
+    }
+
     func testWordsFromBothChannelsAreSortedStably() {
         let turns = TurnMerger.merge([w(2, "b", "Participante"), w(1, "a", "Gio"), w(2, "c", "Gio")])
         XCTAssertEqual(turns.map(\.text), ["a", "b", "c"], "equal starts keep their input order")

@@ -25,6 +25,8 @@ final class AudioResampler: @unchecked Sendable {
     let inputRate: Double
     let outputRate: Double
 
+    var outputFrameCapacity: Int { Int(outputBuffer.frameCapacity) }
+
     init?(inputRate: Double, outputRate: Double, channels: Int, frameCapacity: Int = AudioRingBuffer.maxFrames) {
         guard channels == 1, inputRate > 0, outputRate > 0, frameCapacity > 0 else { return nil }
         let outputCapacity = max(frameCapacity,
@@ -45,7 +47,7 @@ final class AudioResampler: @unchecked Sendable {
     }
 
     /// Resamples `frameCount` mono floats into `out` (reused, cleared first).
-    func resample(mono: UnsafePointer<Float>, frameCount: Int, into out: inout [Int16]) {
+    func resample(mono: UnsafePointer<Float>, frameCount: Int, into out: inout [Int16]) throws {
         out.removeAll(keepingCapacity: true)
         guard frameCount > 0, frameCount <= Int(inputBuffer.frameCapacity),
               let destination = inputBuffer.floatChannelData?.pointee else { return }
@@ -57,28 +59,45 @@ final class AudioResampler: @unchecked Sendable {
         let status = converter.convert(to: outputBuffer, error: &error) { [provider] _, inputStatus in
             provider.next(inputStatus)
         }
-        guard status != .error, outputBuffer.frameLength > 0,
+        if status == .error { throw conversionFailure(error) }
+        guard outputBuffer.frameLength > 0,
               let source = outputBuffer.int16ChannelData?.pointee else { return }
         out.append(contentsOf: UnsafeBufferPointer(start: source, count: Int(outputBuffer.frameLength)))
     }
 
-    func resample(interleaved: UnsafePointer<Float>, frameCount: Int) -> [Int16] {
+    func resample(interleaved: UnsafePointer<Float>, frameCount: Int) throws -> [Int16] {
         var out: [Int16] = []
-        resample(mono: interleaved, frameCount: frameCount, into: &out)
+        try resample(mono: interleaved, frameCount: frameCount, into: &out)
         return out
     }
 
-    /// Drains the converter (end of stream).
-    func flush() -> [Int16] {
+    /// One end-of-stream conversion pass. The status, not an empty buffer,
+    /// establishes whether the converter has finished draining.
+    func flush(into out: inout [Int16]) throws -> AVAudioConverterOutputStatus {
+        out.removeAll(keepingCapacity: true)
         outputBuffer.frameLength = 0
         var error: NSError?
         let status = converter.convert(to: outputBuffer, error: &error) { _, inputStatus in
             inputStatus.pointee = .endOfStream
             return nil
         }
-        guard status != .error, outputBuffer.frameLength > 0,
-              let source = outputBuffer.int16ChannelData?.pointee else { return [] }
-        return Array(UnsafeBufferPointer(start: source, count: Int(outputBuffer.frameLength)))
+        if status == .error { throw conversionFailure(error) }
+        if outputBuffer.frameLength > 0, let source = outputBuffer.int16ChannelData?.pointee {
+            out.append(contentsOf: UnsafeBufferPointer(start: source, count: Int(outputBuffer.frameLength)))
+        }
+        return status
+    }
+
+    func flush() throws -> [Int16] {
+        var out: [Int16] = []
+        _ = try flush(into: &out)
+        return out
+    }
+
+    private func conversionFailure(_ error: NSError?) -> NSError {
+        error ?? NSError(
+            domain: "MeetCapture.AudioResampler", code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "AVAudioConverter falló sin proporcionar un NSError."])
     }
 
     func reset() {

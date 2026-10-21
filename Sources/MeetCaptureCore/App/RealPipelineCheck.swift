@@ -12,7 +12,21 @@ public enum RealPipelineCheck {
         guard let mode = env["MEETCAPTURE_REAL_CHECK"] else { return false }
         var reportURL: URL?
         do {
-            guard ["import", "capture", "ui"].contains(mode),
+            try QAExperiment.validate()
+            let timeoutSeconds: Int
+            if Bundle.main.bundleIdentifier == "com.maatwork.meetcapture.qa",
+               let value = env["MEETCAPTURE_CHECK_TIMEOUT_SECONDS"] {
+                guard !value.isEmpty, value.utf8.allSatisfy({ $0 >= 48 && $0 <= 57 }),
+                      let parsed = Int(value), (60...7_200).contains(parsed) else {
+                    throw CheckError.failed("MEETCAPTURE_CHECK_TIMEOUT_SECONDS must be an integer from 60 to 7200")
+                }
+                timeoutSeconds = parsed
+            } else {
+                timeoutSeconds = 240
+            }
+            let diagnostic = ["diagnostic", "resampler", "cancel"].contains(mode)
+                && Bundle.main.bundleIdentifier == "com.maatwork.meetcapture.qa"
+            guard (["import", "capture", "ui"].contains(mode) || diagnostic),
                   let output = env["MEETCAPTURE_TEST_OUTPUT_DIR"],
                   let input = env["MEETCAPTURE_CHECK_INPUT"],
                   let report = env["MEETCAPTURE_CHECK_REPORT"] else {
@@ -40,7 +54,15 @@ public enum RealPipelineCheck {
             try AppPaths.ensurePrivateDirectory(root.path)
             reportURL = target
             let source = URL(fileURLWithPath: input).resolvingSymlinksInPath()
-            guard PCMToWAV.is16kMonoWAV(source.path), PCMToWAV.wavDurationSeconds(source.path) > 0 else {
+            if diagnostic {
+                guard source.pathExtension == "pcm",
+                      let format = AudioFormatSidecar.read(forAudio: source.path),
+                      format.isInt16, format.channels == 2, format.sampleRate == 16_000,
+                      let size = (try FileManager.default.attributesOfItem(atPath: source.path)[.size] as? NSNumber)?.intValue,
+                      size > 0, size % 4 == 0 else {
+                    throw CheckError.failed("diagnostic input must be nonempty stereo 16 kHz Int16 PCM with a format sidecar")
+                }
+            } else if !PCMToWAV.is16kMonoWAV(source.path) || PCMToWAV.wavDurationSeconds(source.path) <= 0 {
                 throw CheckError.failed("input must be nonempty 16 kHz mono Int16 WAV")
             }
             // Highest-priority volatile domain: no user's saved preferences are
@@ -76,8 +98,15 @@ public enum RealPipelineCheck {
             }
             Task { @MainActor in
                 do {
-                    let result = try await run(app, mode: mode, source: source)
-                    finish(result, to: target, code: 0)
+                    let result: [String: Any]
+                    if mode == "resampler" {
+                        result = try CaptureEngine.diagnoseConsumer(outputDirectory: root)
+                    } else if diagnostic {
+                        result = try await runDiagnostic(source: source, root: root, cancelAndResume: mode == "cancel")
+                    } else {
+                        result = try await run(app, mode: mode, source: source)
+                    }
+                    finish(result, to: target, code: result["status"] as? String == "passed" ? 0 : 1)
                 } catch {
                     let blocked: Bool
                     if case CheckError.blocked = error { blocked = true } else { blocked = false }
@@ -86,8 +115,8 @@ public enum RealPipelineCheck {
                 }
             }
             Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 240_000_000_000)
-                finish(["status": "failed", "mode": mode, "error": "pipeline exceeded 240 seconds"],
+                try? await Task.sleep(nanoseconds: UInt64(timeoutSeconds) * 1_000_000_000)
+                finish(["status": "failed", "mode": mode, "error": "pipeline exceeded \(timeoutSeconds) seconds"],
                        to: target, code: 1)
             }
             application.run()
@@ -98,10 +127,77 @@ public enum RealPipelineCheck {
         return true
     }
 
+    /// Fixed-channel diagnosis bypasses capture/import/persistence; never an acceptance pass.
+    private static func runDiagnostic(source: URL, root: URL, cancelAndResume: Bool = false) async throws -> [String: Any] {
+        let start = Date()
+        let originalHash = try fileSHA256(source)
+        guard let originalBytes = (try FileManager.default.attributesOfItem(atPath: source.path)[.size] as? NSNumber)?.intValue else {
+            throw CheckError.failed("diagnostic source byte count unavailable")
+        }
+        let sidecar = URL(fileURLWithPath: AudioFormatSidecar.path(forAudio: source.path))
+        let originalSidecarHash = try fileSHA256(sidecar)
+        let copy = root.appendingPathComponent("diagnostic.pcm")
+        try FileManager.default.copyItem(at: source, to: copy)
+        try FileManager.default.copyItem(at: sidecar,
+            to: URL(fileURLWithPath: AudioFormatSidecar.path(forAudio: copy.path)))
+        guard try fileSHA256(copy) == originalHash else { throw CheckError.failed("diagnostic source changed during copy") }
+        let job = TranscriptionJob(audioPath: copy.path, captureSampleRate: 16_000,
+                                   language: Settings.asrLanguage, diarize: false)
+        var cancellation: [String: Any] = [:]
+        if cancelAndResume {
+            // Warm first: cancellation must exercise recognition, not model provisioning.
+            try await job.recognizer.prepare()
+            let operation = Task { try await job.run(progress: { _ in }) }
+            try await Task.sleep(nanoseconds: 2_000_000_000)
+            let cancelStart = Date()
+            operation.cancel()
+            do {
+                _ = try await operation.value
+                throw CheckError.failed("recognition completed before cancellation was observed")
+            } catch is CancellationError {
+                let work = ChunkedTranscription.workDirectory(forAudio: copy.path)
+                let files = FileManager.default.enumerator(atPath: work)?.allObjects as? [String] ?? []
+                let checkpoints = files.filter { $0.hasSuffix(".json") && $0.contains("chunk-") }
+                let retainedBytes = try FileManager.default.attributesOfItem(atPath: copy.path)[.size] as? NSNumber
+                guard retainedBytes?.intValue == originalBytes else {
+                    throw CheckError.failed("cancellation did not preserve the diagnostic audio")
+                }
+                cancellation = ["cancelled": true, "cancelWaitSec": Date().timeIntervalSince(cancelStart),
+                                "retainedAudioBytes": retainedBytes!.intValue, "retainedCheckpoints": checkpoints.sorted(),
+                                "resumePolicy": "same job, effective identity and unchanged audio"]
+            }
+        }
+        let outcome = try await job.run(progress: { _ in })
+        guard try fileSHA256(source) == originalHash, try fileSHA256(copy) == originalHash,
+              try fileSHA256(sidecar) == originalSidecarHash else {
+            throw CheckError.failed("diagnostic source changed")
+        }
+        return ["status": "passed", "mode": cancelAndResume ? "cancel" : "diagnostic",
+                "acceptance_status": "not_evaluated",
+                "evidence_scope": "fixed-channel TranscriptionJob; not live capture, AppState import or handoff",
+                "text": outcome.segments.map(\.text).joined(separator: " "),
+                "segments": try JSONSerialization.jsonObject(with: JSONEncoder().encode(outcome.segments)),
+                "engine": outcome.engineUsed.rawValue, "model": outcome.modelUsed,
+                "durationSec": Double(originalBytes) / 4 / 16_000,
+                "failedChunks": outcome.failedChunks, "elapsedSec": Date().timeIntervalSince(start),
+                "cancellation": cancellation]
+    }
+
+    private static func fileSHA256(_ url: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var hash = SHA256()
+        while let bytes = try handle.read(upToCount: 64 * 1024), !bytes.isEmpty {
+            try Task.checkCancellation()
+            hash.update(data: bytes)
+        }
+        return hash.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
     @MainActor
     private static func run(_ app: AppState, mode: String, source: URL) async throws -> [String: Any] {
         let start = Date()
-        let original = try Data(contentsOf: source)
+        let originalHash = try fileSHA256(source)
         let duration = PCMToWAV.wavDurationSeconds(source.path)
         var capture: [String: Any] = [:]
         if mode == "capture" {
@@ -140,7 +236,7 @@ public enum RealPipelineCheck {
             }
         }
         try requireDone(app)
-        guard try Data(contentsOf: source) == original else { throw CheckError.failed("source audio changed") }
+        guard try fileSHA256(source) == originalHash else { throw CheckError.failed("source audio changed") }
         let reopened = MeetingStore(path: app.paths.databasePath)
         let history = reopened.recent(limit: 10)
         guard history.count == (mode == "capture" ? 1 : 3),

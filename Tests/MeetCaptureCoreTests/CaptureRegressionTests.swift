@@ -149,10 +149,10 @@ final class CaptureRegressionTests: XCTestCase {
             AudioResampler(inputRate: inputRate, outputRate: 16_000, channels: 1))
         let samples = [Float](repeating: 0.25, count: inputFrames)
 
-        var output = samples.withUnsafeBufferPointer { buffer in
-            resampler.resample(interleaved: buffer.baseAddress!, frameCount: inputFrames)
+        var output = try samples.withUnsafeBufferPointer { buffer in
+            try resampler.resample(interleaved: buffer.baseAddress!, frameCount: inputFrames)
         }
-        output += resampler.flush()
+        output += try resampler.flush()
 
         XCTAssertLessThan(abs(output.count - inputFrames * 2), 100)
         XCTAssertGreaterThan(output.map { abs(Int($0)) }.max() ?? 0, 5_000)

@@ -32,7 +32,7 @@ struct TranscriptionJob: Sendable {
     var language: String
     var diarize: Bool
     var aliases: [String: [String]] = [:]
-    var recognizer: any SpeechRecognizer = ParakeetEngine.shared
+    var recognizer: any SpeechRecognizer = SpeechBackend.selected
     var diarizer: any SpeakerDiarizing = FluidDiarizer()
 
     struct Outcome: Sendable {
@@ -45,6 +45,23 @@ struct TranscriptionJob: Sendable {
     }
 
     func run(progress: @escaping @Sendable (Double) -> Void) async throws -> Outcome {
+        if QATrace.isEnabled {
+            let context = QATrace.Context(jobID: UUID().uuidString)
+            return try await QATrace.$context.withValue(context) {
+                do {
+                    return try await transcribe(progress: progress)
+                } catch let error as QATrace.Failure {
+                    throw error
+                } catch {
+                    try QATrace.write(error.localizedDescription, name: "job-failure")
+                    throw error
+                }
+            }
+        }
+        return try await transcribe(progress: progress)
+    }
+
+    private func transcribe(progress: @escaping @Sendable (Double) -> Void) async throws -> Outcome {
         let state = Signposts.pipeline.beginInterval("transcription")
         defer { Signposts.pipeline.endInterval("transcription", state) }
         let fm = FileManager.default
@@ -59,6 +76,12 @@ struct TranscriptionJob: Sendable {
         let duration = PCMToWAV.wavDurationSeconds(layout.remote.path)
         guard duration > 0 else { throw TranscriptionError.emptyAudio }
         try await recognizer.prepare()
+        if QATrace.isEnabled {
+            try QATrace.write(JobTrace(audioPath: audioPath, captureSampleRate: captureSampleRate,
+                                       language: language, diarize: diarize, aliases: aliases,
+                                       identity: recognizer.identity),
+                              name: "job-input")
+        }
         progress(0.1)
         try Task.checkCancellation()
 
@@ -79,18 +102,54 @@ struct TranscriptionJob: Sendable {
         try Task.checkCancellation()
 
         var words = remote.words
+        var spans: [SpeakerSpan]?
         if diarize || mic != nil {
-            let spans = diarize ? await speakerSpans(layout.remote, work: work, audioBytes: audioBytes) : nil
+            spans = diarize ? await speakerSpans(layout.remote, work: work, audioBytes: audioBytes) : nil
             words = TurnMerger.labelRemote(words, spans: spans)
         }
         words += (mic?.words ?? []).map { var w = $0; w.speaker = TurnMerger.micSpeaker; return w }
         let gaps = remote.gaps + (mic?.gaps ?? [])
-        let turns = Aliases.apply(aliases, to: TurnMerger.merge(words))
-        let result = TranscriptFormatter.cleaned((turns + gaps).sorted { $0.start < $1.start })
+        if QATrace.isEnabled {
+            try QATrace.write(LabeledWordsTrace(words: words, remoteWordCount: remote.words.count,
+                                                micWordCount: mic?.words.count ?? 0, spans: spans,
+                                                remoteGaps: remote.gaps, micGaps: mic?.gaps ?? []),
+                              name: "labeled-words-before-merger")
+        }
+        let merged = TurnMerger.merge(words)
+        if QATrace.isEnabled { try QATrace.write(merged, name: "turns-after-merger") }
+        let turns = Aliases.apply(aliases, to: merged)
+        if QATrace.isEnabled { try QATrace.write(turns, name: "turns-after-aliases") }
+        let beforeCleaning = (turns + gaps).sorted { $0.start < $1.start }
+        if QATrace.isEnabled { try QATrace.write(beforeCleaning, name: "turns-before-cleaning") }
+        let result = TranscriptFormatter.cleaned(beforeCleaning)
+        if QATrace.isEnabled { try QATrace.write(result, name: "turns-cleaned") }
         guard !result.isEmpty else { throw TranscriptionError.emptyOutput }
         progress(1.0)
-        return Outcome(segments: result, engineUsed: .parakeet, modelUsed: ParakeetEngine.modelName,
+        return Outcome(segments: result, engineUsed: recognizer.engine, modelUsed: recognizer.modelName,
                        audioDurationSec: duration, failedChunks: gaps.count)
+    }
+
+    private struct JobTrace: Encodable {
+        var audioPath: String
+        var captureSampleRate: Double
+        var language: String
+        var diarize: Bool
+        var aliases: [String: [String]]
+        var identity: QATrace.RecognizerIdentity
+        let chunkManifestVersion = ChunkManifest.currentVersion
+        let mergerMaxGap = TurnMerger.maxGap
+        let mergerEchoWindow = TurnMerger.echoWindow
+        let mergerLongTurn = TurnMerger.longTurn
+    }
+
+    private struct LabeledWordsTrace: Encodable {
+        /// Exactly the merger input, in textual emission order: remote, then mic.
+        var words: [Segment]
+        var remoteWordCount: Int
+        var micWordCount: Int
+        var spans: [SpeakerSpan]?
+        var remoteGaps: [Segment]
+        var micGaps: [Segment]
     }
 
     /// nil when diarization fails: the remote side becomes one "Participante".

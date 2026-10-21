@@ -55,8 +55,6 @@ final class TranscriptionJobTests: XCTestCase {
         XCTAssertEqual(TranscriptFormatter.text(for: outcome.segments),
                        "[Participante 1]: Hola AppSheet\n[Gio]: Buenas\n[Participante 2]: listo",
                        "the mic's echo of \"listo\" is dropped")
-        XCTAssertEqual(outcome.engineUsed, .parakeet)
-        XCTAssertEqual(outcome.modelUsed, ParakeetEngine.modelName)
         XCTAssertEqual(outcome.failedChunks, 0)
         XCTAssertEqual(outcome.audioDurationSec ?? 0, 4, accuracy: 0.01)
         let work = ChunkedTranscription.workDirectory(forAudio: audio)

@@ -7,6 +7,25 @@ semantic versioning. The single source of the current version is
 
 ## [Unreleased]
 
+### Experimental research only
+- Added an isolated, hash-locked ASR A/B harness with strict Unicode/casefold
+  scoring, frozen public corpora, one hypothesis per WAV, descriptive grouped
+  bootstrap, unscored failures and configuration-bound holdout selection.
+- Added QA-only stage traces and single-cause controls for chunk geometry,
+  internal seam repair, lexical mic dedupe, measured capture-tail integrity
+  and pinned offline WhisperKit large-v3 with/without fixed context.
+- Checkpoint manifest v4 binds actual recognizer/model artifacts and effective
+  configuration. Nonempty SDK text without valid real word timings fails
+  explicitly rather than silently dropping speech or inventing alignment.
+- Audio-integrity checks use bounded streaming hashes; the consumer diagnostic
+  distinguishes a true stereo delay from amplitude-biased threshold onset.
+  No bundle is installed or published by this research, and these experimental
+  results do not certify production readiness or macOS 14.4.
+- Closed development selection without a new candidate: the primary endpoint
+  ties baseline and the dependency tie-break favors v7.0.1. Controlled word/
+  frame conservation is not presented as a general WER improvement. Holdout
+  stays unrecognized; no install, publication or exact-word gate relaxation.
+
 ## [7.0.1] - 2026-10-19
 
 ### Fixed

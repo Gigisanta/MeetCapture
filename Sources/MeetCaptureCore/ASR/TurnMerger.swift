@@ -1,8 +1,8 @@
 // TurnMerger.swift
 // Words from both channels → speaker turns, in time order. Remote words take
 // their speaker from diarization ("Participante N", numbered by first
-// appearance); mic words are Gio's. A mic word that repeats a remote word
-// within ±0.5 s is bleed the gate let through and is dropped.
+// appearance); mic words are Gio's. The legacy lexical echo heuristic can be
+// disabled in the QA research arm without changing the acoustic gate.
 
 import Foundation
 
@@ -41,13 +41,13 @@ enum TurnMerger {
         min(span.end, word.end) - max(span.start, word.start)
     }
 
-    static func merge(_ words: [Segment]) -> [Segment] {
+    static func merge(_ words: [Segment], deduplicateMic: Bool = QAExperiment.lexicalMicDedupe) -> [Segment] {
         var remoteStarts: [String: [Double]] = [:]
-        for w in words where w.speaker != micSpeaker {
+        for w in words where deduplicateMic && w.speaker != micSpeaker {
             if let key = normalized(w.text) { remoteStarts[key, default: []].append(w.start) }
         }
         let kept = words.enumerated().filter { _, w in
-            guard w.speaker == micSpeaker, let key = normalized(w.text),
+            guard deduplicateMic, w.speaker == micSpeaker, let key = normalized(w.text),
                   let starts = remoteStarts[key] else { return true }
             return !starts.contains { abs($0 - w.start) <= echoWindow }
         }

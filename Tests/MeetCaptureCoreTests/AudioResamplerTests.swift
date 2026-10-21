@@ -16,11 +16,11 @@ final class AudioResamplerTests: XCTestCase {
                 let t = Double(start + index) / inputRate
                 return Float(sin(2 * .pi * 440 * t) * 0.5)
             }
-            samples.withUnsafeBufferPointer { buffer in
-                result += resampler.resample(interleaved: buffer.baseAddress!, frameCount: samples.count)
+            try samples.withUnsafeBufferPointer { buffer in
+                result += try resampler.resample(interleaved: buffer.baseAddress!, frameCount: samples.count)
             }
         }
-        result += resampler.flush()
+        result += try resampler.flush()
         return result
     }
 
@@ -35,6 +35,21 @@ final class AudioResamplerTests: XCTestCase {
         XCTAssertLessThan(abs(out.count - 16_000), 200, "44.1k drift: \(out.count)")
         XCTAssertGreaterThan(out.map { abs(Int($0)) }.max() ?? 0, 10_000, "44.1k output is silent")
     }
+
+    func testStereoLagIgnoresAmplitudeThresholdBiasButDetectsOneFrameDelay() throws {
+        let system: [Int16] = Array(repeating: 0, count: 16)
+            + [33, 100, -317, 8192, -1100, 440, -57, 0]
+            + Array(repeating: 0, count: 16)
+        let mic = system.map { $0 / 2 }
+        XCTAssertNotEqual(system.firstIndex { abs(Int($0)) > 32 },
+                          mic.firstIndex { abs(Int($0)) > 32 })
+        let aligned = try XCTUnwrap(CaptureEngine.diagnosticWaveformLag(system: system, mic: mic))
+        XCTAssertEqual(aligned.frames, 0)
+        let delayed = [Int16(0)] + Array(mic.dropLast())
+        let shifted = try XCTUnwrap(CaptureEngine.diagnosticWaveformLag(system: system, mic: delayed))
+        XCTAssertEqual(shifted.frames, 1)
+    }
+
 
     func testStereoConverterIsRejected() {
         XCTAssertNil(

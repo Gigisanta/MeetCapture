@@ -20,6 +20,7 @@ struct Segment: Codable, Equatable, Sendable {
 
 enum ASREngine: String, Sendable {
     case parakeet
+    case whisperkit
 }
 
 enum TranscriptFormatter {

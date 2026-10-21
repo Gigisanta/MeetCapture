@@ -76,4 +76,29 @@ final class ASRRegressionTests: XCTestCase {
                                Segment(start: 1.0, end: 1.5, text: "mañana.")])
         XCTAssertEqual(ParakeetEngine.words(from: []), [])
     }
+
+    func testParakeetRejectsMissingOrInvalidTimesWithoutInventingWords() throws {
+        let missing: [[TokenTiming]?] = [nil, []]
+        for timings in missing {
+            let result = ASRResult(text: "No autorizo", confidence: 1, duration: 2,
+                                   processingTime: 0, tokenTimings: timings)
+            XCTAssertThrowsError(try ParakeetEngine.timedWords(from: result, requireTimings: true)) {
+                guard case ParakeetEngine.AdapterError.missingTimedWords = $0 else {
+                    return XCTFail("Nonempty SDK text must not become a successful empty chunk: \($0)")
+                }
+            }
+        }
+        let silence = ASRResult(text: "", confidence: 1, duration: 2, processingTime: 0)
+        XCTAssertEqual(try ParakeetEngine.timedWords(from: silence, requireTimings: true), [])
+        for (start, end) in [(Double.nan, 1.0), (-0.1, 0.5), (1.0, 0.5), (0.0, Double.infinity)] {
+            let result = ASRResult(text: "No", confidence: 1, duration: 2, processingTime: 0,
+                tokenTimings: [TokenTiming(token: "▁No", tokenId: 1, startTime: start,
+                                           endTime: end, confidence: 1)])
+            XCTAssertThrowsError(try ParakeetEngine.timedWords(from: result, requireTimings: true)) {
+                guard case ParakeetEngine.AdapterError.invalidTimedWords = $0 else {
+                    return XCTFail("Invalid timing must retain recoverable audio: \($0)")
+                }
+            }
+        }
+    }
 }

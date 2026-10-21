@@ -354,11 +354,11 @@ final class AppState: ObservableObject {
 
     // MARK: - Transcription
 
-    /// Loads Parakeet while the meeting runs, so the transcript starts at once.
+    /// Loads the selected recognizer while the meeting runs.
     private func warmModels() {
         guard managesModels else { return }
         modelUnloadTask?.cancel()
-        Task.detached(priority: .utility) { try? await ParakeetEngine.shared.prepare() }
+        Task.detached(priority: .utility) { try? await SpeechBackend.selected.prepare() }
         scheduleModelUnload()
     }
 
@@ -372,7 +372,7 @@ final class AppState: ObservableObject {
                 guard let self, !Task.isCancelled else { return }
                 if self.phase != .recording, self.phase != .transcribing, self.recoveringPath == nil { break }
             }
-            await ParakeetEngine.shared.unload()
+            await SpeechBackend.selected.unload()
         }
     }
 
@@ -391,7 +391,7 @@ final class AppState: ObservableObject {
         let job = makeJob(audioPath: audioPath, captureSampleRate: recordingDriver.currentSampleRate())
         let input = PostProcessInput(
             session: session, segments: [], transcriptPath: transcriptPath, capturePath: audioPath,
-            durableAudioPath: durableAudioPath, engine: .parakeet, model: ParakeetEngine.modelName,
+            durableAudioPath: durableAudioPath, engine: job.recognizer.engine, model: job.recognizer.modelName,
             language: Settings.asrLanguage, applyRetention: applyRetention,
             retention: Settings.retention, meetingsDir: paths.meetingsDir,
             audioEndedAt: applyRetention ? RecordingRecovery.modificationDate(audioPath) : Date())

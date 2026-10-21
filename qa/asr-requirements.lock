@@ -1,0 +1,23 @@
+# QA environment: macOS arm64, CPython 3.11-3.14 (including 3.14 free-threaded).
+# Install with: python -m pip install --require-hashes -r qa/asr-requirements.lock
+# PyPI release JSON is the source of versions, Requires-Dist and wheel SHA-256s:
+# https://pypi.org/pypi/jiwer/4.0.0/json
+# https://pypi.org/pypi/click/8.1.8/json
+# https://pypi.org/pypi/rapidfuzz/3.14.6/json
+# JiWER requires click>=8.1.8 and rapidfuzz>=3.9.7. RapidFuzz has no runtime
+# dependencies without the optional 'all' extra. Click's colorama dependency is
+# Windows-only; importlib-metadata is Python<3.8 only, neither applies here.
+# Binary-only prevents an unlocked build-isolation dependency download.
+--only-binary=:all:
+--require-hashes
+
+jiwer==4.0.0 \
+    --hash=sha256:7efaf0bd336b095d99ddef9dd67e1ee829d75d58aa2a81d9639870b01d6d95ea
+click==8.1.8 \
+    --hash=sha256:63c132bbbed01578a06712a2d1f497bb62d9c1c0d329b7903a866228027263b2
+rapidfuzz==3.14.6 \
+    --hash=sha256:0c61cade182f130c9903231946bd1074539121721693a918e7b70382ae802bd8 \
+    --hash=sha256:1901414b135afb1a7f4b1ef940b95523b49cc5642aecf02af740f37567e98137 \
+    --hash=sha256:bba0e9fad4dbea80227cde9cef3aaa984a934a84aec5f7505532e19838b14769 \
+    --hash=sha256:8fa7d45388dec34a86038f2a38380f4922b74b5dd8991247f629a531178db10f \
+    --hash=sha256:9989280902b9c4ecf7de95fbb906e94df0d8c047290ed315c7aa1760cec9b3de
