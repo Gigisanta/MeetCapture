@@ -26,6 +26,8 @@ semantic versioning. The single source of the current version is
   It does not exhaust/reload models through automatic retries. Manual
   transcription remains available, including after a previous partial handoff.
   Failed chunks still use retryable `emptyOutput`.
+- Doubt-marker insertion uses String mutation compatible with the Swift 6.0
+  toolchain on macOS 14, rather than newer substring concatenation overloads.
 - Installer fixture processes are tracked outside command-substitution
   subshells and reaped during cleanup; their safety checks no longer leave
   orphaned sleep processes.

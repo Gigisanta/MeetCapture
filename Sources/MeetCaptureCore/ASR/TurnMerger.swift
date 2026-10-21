@@ -82,7 +82,9 @@ enum TurnMerger {
             cut = text.index(before: cut)
         }
         guard cut > text.startIndex else { return text }
-        return text[..<cut] + doubtMarker + text[cut...]
+        var marked = text
+        marked.insert(contentsOf: doubtMarker, at: cut)
+        return marked
     }
 
     private static func endsSentence(_ text: String) -> Bool {
