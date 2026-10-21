@@ -62,19 +62,20 @@ final class ASRRegressionTests: XCTestCase {
         }
     }
 
-    func testParakeetTokensBecomeTimedWords() throws {
-        func t(_ token: String, _ start: Double, _ end: Double) -> TokenTiming {
-            TokenTiming(token: token, tokenId: 0, startTime: start, endTime: end, confidence: 1)
+    func testParakeetTokensBecomeTimedWordsWithTheirWeakestConfidence() throws {
+        func t(_ token: String, _ start: Double, _ end: Double, _ confidence: Float = 1) -> TokenTiming {
+            TokenTiming(token: token, tokenId: 0, startTime: start, endTime: end, confidence: confidence)
         }
         let result = ASRResult(text: "Hola, CEDEAR mañana.", confidence: 1, duration: 2, processingTime: 0, tokenTimings: [
-            t("▁Ho", 0.0, 0.2), t("la", 0.2, 0.4), t(",", 0.4, 0.45),
-            t("▁", 0.5, 0.5), t("CE", 0.6, 0.7), t("DEAR", 0.7, 0.9),
+            t("▁Ho", 0.0, 0.2, 0.9), t("la", 0.2, 0.4, 0.4), t(",", 0.4, 0.45, 0.8),
+            t("▁", 0.5, 0.5, 0.1), t("CE", 0.6, 0.7), t("DEAR", 0.7, 0.9, 0.7),
             t(" mañana", 1.0, 1.4), t(".", 1.4, 1.5),
         ])
         let words = try ParakeetEngine.timedWords(from: result)
-        XCTAssertEqual(words, [Segment(start: 0, end: 0.45, text: "Hola,"),
-                               Segment(start: 0.6, end: 0.9, text: "CEDEAR"),
-                               Segment(start: 1.0, end: 1.5, text: "mañana.")])
+        XCTAssertEqual(words, [Segment(start: 0, end: 0.45, text: "Hola,", confidence: 0.4),
+                               Segment(start: 0.6, end: 0.9, text: "CEDEAR", confidence: 0.7),
+                               Segment(start: 1.0, end: 1.5, text: "mañana.", confidence: 1)],
+                       "an empty boundary piece carries no text and no confidence")
     }
 
     func testSDKTextRequiresRealValidTimingsButEmptyOutputIsAllowed() throws {

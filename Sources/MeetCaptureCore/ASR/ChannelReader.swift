@@ -1,9 +1,9 @@
 // ChannelReader.swift
 // Splits a capture into the 16 kHz mono WAVs the pipeline reads: L (system,
-// the remote side) and R (mic, Gio). Imports, legacy mono files and a system
+// the remote side) and R (the local mic). Imports, legacy mono files and a system
 // channel that stayed silent the whole meeting (always, in mic-only captures,
 // which write the mic to R only) give one channel, diarized as a whole and
-// with no "Gio".
+// without a forced local-speaker label.
 
 import Foundation
 

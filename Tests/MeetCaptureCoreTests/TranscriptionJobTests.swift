@@ -41,7 +41,7 @@ final class TranscriptionJobTests: XCTestCase {
         }
     }
 
-    func testDualChannelCaptureBecomesGioAndNumberedParticipants() async throws {
+    func testDualChannelCaptureSeparatesMicAndNumberedParticipants() async throws {
         let dir = TestSupport.makeTempDir(self, "job-dual")
         let audio = try capture(dir, left: WAVFixture.tone(seconds: 4), right: gio(4))
         // Call 0 is the remote channel, call 1 the mic.
@@ -58,7 +58,7 @@ final class TranscriptionJobTests: XCTestCase {
         let outcome = try await job.run { _ in }
 
         XCTAssertEqual(TranscriptFormatter.text(for: outcome.segments),
-                       "[Participante 1]: Hola AppSheet\n[Gio]: Buenas\n[Participante 2]: listo\n[Gio]: listo",
+                       "[Participante 1]: Hola AppSheet\n[Yo]: Buenas\n[Participante 2]: listo\n[Yo]: listo",
                        "independent mic speech that survived the acoustic gate must not be deleted by text")
         XCTAssertEqual(outcome.engineUsed, .parakeet)
         XCTAssertEqual(outcome.modelUsed, FakeRecognizer.testIdentity.model)
@@ -73,7 +73,7 @@ final class TranscriptionJobTests: XCTestCase {
         let again = try await TranscriptionJob(audioPath: audio, captureSampleRate: 16_000, language: "es",
                                                diarize: true, recognizer: FakeRecognizer { _, _ in [] },
                                                diarizer: diarizer).run { _ in }
-        XCTAssertEqual(again.segments.map(\.speaker), ["Participante 1", "Gio", "Participante 2", "Gio"])
+        XCTAssertEqual(again.segments.map(\.speaker), ["Participante 1", "Yo", "Participante 2", "Yo"])
         let diarizations = await diarizer.calls
         XCTAssertEqual(diarizations, 1)
     }
@@ -87,7 +87,7 @@ final class TranscriptionJobTests: XCTestCase {
         let outcome = try await TranscriptionJob(audioPath: audio, captureSampleRate: 16_000, language: "es",
                                                  diarize: true, recognizer: recognizer,
                                                  diarizer: FakeDiarizer(nil)).run { _ in }
-        XCTAssertEqual(TranscriptFormatter.text(for: outcome.segments), "[Participante]: remoto\n[Gio]: local")
+        XCTAssertEqual(TranscriptFormatter.text(for: outcome.segments), "[Participante]: remoto\n[Yo]: local")
     }
 
     func testSilentSystemChannelTranscribesTheMicAloneWithoutLabels() async throws {
@@ -101,6 +101,20 @@ final class TranscriptionJobTests: XCTestCase {
         XCTAssertEqual(TranscriptFormatter.text(for: outcome.segments), "solo")
         let calls = await recognizer.calls
         XCTAssertEqual(calls, 1, "one channel, one chunk")
+    }
+
+    /// Every chunk decoded with no words is silence: terminal, not the
+    /// retryable `emptyOutput` reserved for chunks that all failed.
+    func testNoWordsInAnyChunkIsNoSpeech() async throws {
+        let dir = TestSupport.makeTempDir(self, "job-no-speech")
+        let audio = try capture(dir, left: WAVFixture.tone(seconds: 2), right: gio(2))
+        let job = TranscriptionJob(audioPath: audio, captureSampleRate: 16_000, language: "es", diarize: false,
+                                   recognizer: FakeRecognizer { _, _ in [] }, diarizer: FakeDiarizer([]))
+        do {
+            _ = try await job.run { _ in }
+            XCTFail("expected noSpeech")
+        } catch TranscriptionError.noSpeech {}
+        XCTAssertTrue(FileManager.default.fileExists(atPath: audio))
     }
 
     /// The capture writes the mic to R and silence to L (AudioCaptureService).

@@ -1,5 +1,5 @@
 #!/bin/bash
-# gen_test_corpus.sh — generates real two-speaker Spanish speech with macOS
+# gen_test_corpus.sh — generates synthetic two-speaker Spanish speech with macOS
 # say. The benchmark scores the resulting audio against ref.txt with WER.
 set -euo pipefail
 

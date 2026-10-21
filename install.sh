@@ -3,6 +3,34 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
+if [ "$#" -eq 1 ] && [ "$1" = "--help" ]; then
+  printf '%s\n' 'Usage: ./install.sh' \
+    'Build the checked-out source and install to ~/meetings/MeetCapture.app.' \
+    'Finish recording/transcription and quit MeetCapture before updating.' \
+    'Requires native Apple Silicon, macOS 14.4+, Swift 6.0+ and a macOS SDK.' \
+    'The selected Xcode/Command Line Tools may require a newer macOS host; see README.md.' \
+    'Local builds are ad-hoc signed, not notarized binary downloads.'
+  exit 0
+fi
+if [ "$#" -ne 0 ]; then
+  printf '%s\n' 'ERROR: install.sh takes no options other than --help; no installation was attempted.' >&2
+  exit 1
+fi
+if [ "$(uname -s)" != "Darwin" ]; then
+  printf '%s\n' 'ERROR: MeetCapture installation requires macOS.' >&2
+  exit 1
+fi
+if [ "$(uname -m)" != "arm64" ]; then
+  printf '%s\n' 'ERROR: installation requires a native Apple Silicon terminal (arm64), not Intel or Rosetta.' >&2
+  exit 1
+fi
+# Missing inspection tools must not look like an idle app or an idle capture.
+for command_name in lsof pgrep ditto unzip plutil sips codesign open; do
+  if ! command -v "$command_name" >/dev/null 2>&1; then
+    printf 'ERROR: required macOS utility is unavailable: %s. Check PATH before installing.\n' "$command_name" >&2
+    exit 1
+  fi
+done
 # lsof reports the physical executable path even when ~/meetings is reached
 # through a symlink. Resolve the parent once so process identity is stable.
 mkdir -p "$HOME/meetings"

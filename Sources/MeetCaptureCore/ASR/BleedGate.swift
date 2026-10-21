@@ -2,9 +2,9 @@
 // With Mac speakers the mic (R) also hears the remote side (L), a few ms
 // late. A 0.5 s window of R is muted when it follows L delayed 0–100 ms
 // (normalized cross-correlation above 0.4) and is not clearly louder than L:
-// that is the remote voice coming back through the mic, not Gio. Calibrated
+// that is the remote voice coming back through the mic, not the local speaker. Calibrated
 // on real calls with the eval harness: 0.4 mutes the bleed and keeps >95 % of
-// Gio's words; without the gate Gio's WER was 100–220 %.
+// local words; without the gate local WER was 100–220 %.
 
 import Accelerate
 

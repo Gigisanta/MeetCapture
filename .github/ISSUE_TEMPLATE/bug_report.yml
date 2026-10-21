@@ -1,0 +1,50 @@
+name: Bug report
+description: Report a reproducible recording, transcription, installation or history problem.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Read the installation requirements and known recognition limits in the README first.
+        Never attach meeting audio, transcripts, databases, config files, tokens or private logs.
+        If speech recognition is wrong, describe the failure without posting meeting content.
+  - type: input
+    id: version
+    attributes:
+      label: MeetCapture version
+      description: Use the version shown in the app or the release tag you built.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: macOS and Apple Silicon chip
+      placeholder: macOS version; M1, M2, M3, M4 or newer
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Include the operation and relevant settings, without meeting content or identifying details.
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and actual behavior
+      description: Include the exact error or notice, whether input audio was retained, and whether the app recovered.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized diagnostics
+      description: Optional build/test output. Remove paths identifying people, meeting titles, credentials and transcript text.
+      render: text
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy
+      options:
+        - label: This report contains no private recordings, transcripts, databases, configuration or credentials.
+          required: true

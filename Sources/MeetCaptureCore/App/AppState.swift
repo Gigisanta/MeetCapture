@@ -133,14 +133,7 @@ final class AppState: ObservableObject {
         postProcessor = PostProcessor(store: store)
         self.recordingDriver = recordingDriver ?? .live(recorder: recorder)
         self.transcriptionRunner = transcriptionRunner ?? { job, progress in
-            let task = Task.detached(priority: .userInitiated) {
-                try await job.run(progress: progress)
-            }
-            return try await withTaskCancellationHandler {
-                try await task.value
-            } onCancel: {
-                task.cancel()
-            }
+            try await TranscriptionWorkerClient.shared.run(job, progress: progress)
         }
         self.errorDismissalDelay = max(0, errorDismissalDelay)
         self.recoveryRetryDelays = recoveryRetryDelays
@@ -421,6 +414,13 @@ final class AppState: ObservableObject {
             recordingOrigin = nil
             callDetector.reconcileSuspended = false
             self.session = nil
+        } catch TranscriptionError.noSpeech {
+            logger.info("transcripción sin habla")
+            errorMessage = TranscriptionError.noSpeech.errorDescription
+            phase = .idle
+            transcriptionProgress = 0
+            self.session = nil
+            settleSilent(audioPath: audioPath, isCapture: applyRetention)
         } catch {
             logger.error("transcripción falló: \(error.localizedDescription, privacy: .public)")
             errorMessage = Strings.errorTranscription(error.localizedDescription)
@@ -570,6 +570,10 @@ final class AppState: ObservableObject {
             logger.info("grabación recuperada: \(result.pendingPath, privacy: .public)")
         } catch is CancellationError {
             logger.info("recuperación cancelada")
+        } catch TranscriptionError.noSpeech {
+            logger.info("grabación recuperada sin habla")
+            errorMessage = TranscriptionError.noSpeech.errorDescription
+            settleSilent(audioPath: recording.audioPath, isCapture: true)
         } catch {
             logger.error("recuperación falló: \(error.localizedDescription, privacy: .public)")
             // The attempt was already counted when it started.
@@ -577,6 +581,23 @@ final class AppState: ObservableObject {
                                         countsAsAttempt: false, title: session.displayTitle)
         }
         recoveringPath = nil
+    }
+
+    /// Silence is a final result, not a failure: the audio stays, the chunk
+    /// checkpoints go, and a capture without a transcript stops being retried
+    /// automatically. No history row, handoff or "exhausted" notice.
+    private func settleSilent(audioPath: String, isCapture: Bool) {
+        do {
+            // Preserve terminal state before removing gaps.json: an earlier
+            // partial handoff may already have a processed marker.
+            if isCapture, RecordingRecovery.needsTranscript(audioPath: audioPath) {
+                try RecordingRecovery.recordTerminal(audioPath: audioPath, reason: TranscriptionError.noSpeech.rawValue)
+            }
+            ChunkedTranscription.removeWork(forAudio: audioPath)
+        } catch {
+            errorMessage = Strings.errorTranscription(error.localizedDescription)
+            logger.error("no se pudo conservar el estado sin habla: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     /// Records a failed or gapped attempt with its next retry time; the attempt

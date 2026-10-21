@@ -7,6 +7,70 @@ semantic versioning. The single source of the current version is
 
 ## [Unreleased]
 
+## [7.1.0] - 2026-10-21
+
+### Changed
+- Every transcription runs in a fresh helper process. The menu-bar process
+  never loads recognition/diarization models; concurrent requests queue FIFO.
+  Cancelling a queued request never launches it. EOF and SIGTERM cancel an
+  active worker, with a ten-second shutdown bound even if the parent dies.
+  Inherited same-group pipe owners are cleaned up after worker termination.
+- Words with minimum token confidence below 0.50 carry `[?]` before trailing
+  punctuation. Confidence survives chunk checkpoints; old checkpoints decode
+  with no confidence and are not marked. Aliases preserve uncertainty; `.txt`,
+  SQLite and handoff text keep the marks, which FTS ignores.
+- Source installation reports unsupported hosts and missing tools before a
+  staging bundle is replaced. Public installation is from a pinned release,
+  not an unnotarized binary download.
+- Removed the retired static website, duplicate web assets and deploy helper;
+  the product page has one owner in the MaatWork website repository.
+- Microphone turns use the generic label `Yo` instead of a developer's name.
+  Existing transcripts and history are not renamed.
+- Added a frozen operational baseline with input hashes and a comparison
+  observer patch, plus privacy-safe bug reporting and an evidence-first PR template.
+
+### Fixed
+- Fully decoded audio without speech is terminal `noSpeech`: keep the audio,
+  remove chunk work, show a notice, and create no new history row or handoff.
+  It does not exhaust/reload models through automatic retries. Manual
+  transcription remains available, including after a previous partial handoff.
+  Failed chunks still use retryable `emptyOutput`.
+- Doubt-marker insertion uses String mutation compatible with the Swift 6.0
+  toolchain on macOS 14, rather than newer substring concatenation overloads.
+- Installer fixture processes are tracked outside command-substitution
+  subshells and reaped during cleanup; their safety checks no longer leave
+  orphaned sleep processes.
+
+### Evidence and limits
+- No acoustic model was trained or changed. The confidence threshold was
+  selected only on seven dev blocks: 88/9811 words marked (0.90%), precision
+  51.14%, recall 7.67%. Precision varies strongly by source (OpenSLR61 7.14%,
+  MediaSpeech 59.46%). Most errors, and all deletions, stay unmarked.
+  Holdout remains closed; this is not real-meeting accuracy validation.
+- Final same-host 91 s import QA: main-process physical footprint was
+  16.56/16.69/16.64 MiB after three jobs and 19.49 MiB after five idle seconds;
+  the 7.0.2 probe saw 671/851/902 MiB and 902 MiB idle. An earlier baseline
+  run returned to 27 MiB, so cleanup timing varied; RSS is not proof of a leak.
+  The helper's peak RSS was 762 MiB: model memory moved, not disappeared.
+  Three transcripts match the baseline after removing doubt markers.
+  The largest added job interval was 1.053 s, within the predeclared +2 s limit.
+- Digital silence (30 s) produces one `noSpeech` result, retains its imported
+  WAV, and creates no transcript or handoff. Import and capture retain the
+  known exact-word failure `pongo` → `puego`; this release does not fix it.
+- Local verification: 159 Swift tests, 15 installer safety cases, 31 dispatcher
+  tests, 15 real-summary checks and four legacy privacy tests passed. Final
+  staging signatures, version, shellcheck and strict hosted-icon smoke (10/10)
+  passed. Real dual-channel capture with diarization completed with two
+  participant labels and zero dropped callbacks; the exact-word gate above
+  still failed. Native QA exercised import, re-transcription, search, the
+  no-speech notice and visible doubt markers without changing the installed app.
+- No new-meeting silver benchmark yet: it requires at least 60 minutes of
+  retained audio. Legacy text-only corrections are separate private copies,
+  not an ASR reference or a migration of the meeting database.
+- The frozen baseline, measured input identities and reproduction steps are
+  published in [`docs/BASELINE.md`](docs/BASELINE.md). Public distribution is
+  pinned source; CI artifacts are not notarized app downloads.
+
 ## [7.0.2] - 2026-10-21
 
 ### Fixed

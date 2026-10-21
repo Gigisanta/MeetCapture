@@ -1,14 +1,18 @@
 // TranscriptionJob.swift
-// Transcription of one capture: split L (remote) and R (Gio's mic) into
+// Transcription of one capture: split L (remote) and R (local mic) into
 // 16 kHz WAVs, gate the remote voice out of the mic, transcribe each channel
 // in checkpointed chunks with Parakeet, diarize the remote channel and merge
 // both into speaker turns. Runs off the main actor; reports coarse progress.
 
 import Foundation
 
-enum TranscriptionError: LocalizedError {
+/// Raw values cross the worker process boundary (`TranscriptionWorker`).
+enum TranscriptionError: String, Codable, LocalizedError {
     case emptyAudio
     case emptyOutput
+    /// Every chunk was decoded and none had words: silence, not a failure.
+    /// Terminal: retrying would only reload the models to hear nothing again.
+    case noSpeech
 
     var errorDescription: String? {
         switch self {
@@ -16,6 +20,8 @@ enum TranscriptionError: LocalizedError {
             return "El archivo de audio está vacío; no se generó ninguna transcripción"
         case .emptyOutput:
             return "El motor de transcripción no produjo texto; se conserva el audio para reintentar"
+        case .noSpeech:
+            return "No se detectó habla; el audio se conserva"
         }
     }
 }
@@ -36,7 +42,7 @@ struct TranscriptionJob: Sendable {
     var recognizer: any SpeechRecognizer = ParakeetEngine.shared
     var diarizer: any SpeakerDiarizing = FluidDiarizer()
 
-    struct Outcome: Sendable {
+    struct Outcome: Codable, Equatable, Sendable {
         var segments: [Segment]
         var engineUsed: ASREngine
         var modelUsed: String
@@ -107,7 +113,8 @@ struct TranscriptionJob: Sendable {
         let gaps = remote.gaps + (mic?.gaps ?? [])
         let turns = Aliases.apply(aliases, to: TurnMerger.merge(words))
         let result = TranscriptFormatter.cleaned((turns + gaps).sorted { $0.start < $1.start })
-        guard !result.isEmpty else { throw TranscriptionError.emptyOutput }
+        // Gaps are segments, so an empty result means every chunk was decoded.
+        guard !result.isEmpty else { throw TranscriptionError.noSpeech }
         try Task.checkCancellation()
         progress(1.0)
         return Outcome(segments: result, engineUsed: identity.engine, modelUsed: identity.model,

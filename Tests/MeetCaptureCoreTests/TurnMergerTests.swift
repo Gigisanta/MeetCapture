@@ -56,4 +56,39 @@ final class TurnMergerTests: XCTestCase {
         XCTAssertTrue(turns[0].text.hasSuffix("fin."))
         XCTAssertTrue(turns[1].text.hasPrefix("palabra"))
     }
+
+    func testOnlyWordsUnderTheThresholdAreMarkedBeforeTheirPunctuation() {
+        func c(_ start: Double, _ text: String, _ confidence: Float?) -> Segment {
+            Segment(start: start, end: start + 0.3, text: text, speaker: "Gio", confidence: confidence)
+        }
+        let below = TurnMerger.doubtfulBelow.nextDown
+        let turns = TurnMerger.merge([
+            c(0, "hola,", below), c(0.4, "¿no?", below), c(0.8, "seguro", TurnMerger.doubtfulBelow),
+            c(1.2, "viejo", nil), c(1.6, "...", 0.01),
+        ])
+        XCTAssertEqual(turns.map(\.text), ["hola[?], ¿no[?]? seguro viejo ..."],
+                       "at the threshold and without confidence (old checkpoints) nothing is marked")
+        XCTAssertNil(turns[0].confidence, "a turn carries no word confidence")
+    }
+
+    func testCheckpointWithoutConfidenceDecodes() throws {
+        let old = Data(#"[{"start":0,"end":0.5,"text":"hola"}]"#.utf8)
+        let words = try JSONDecoder().decode([Segment].self, from: old)
+        XCTAssertEqual(words, [Segment(start: 0, end: 0.5, text: "hola")])
+    }
+
+    func testAliasesPreserveDoubtAndMatchPunctuatedVariants() {
+        let aliases = ["AppSheet": ["app sheet"], "EEUU": ["EE.UU."]]
+        for (input, expected) in [
+            ("abrí app[?] sheet[?], y listo[?]", "abrí AppSheet[?], y listo[?]"),
+            ("en EE.UU[?]. hoy", "en EEUU[?] hoy"),
+            ("en EE.UU. hoy", "en EEUU hoy"),
+        ] {
+            let turns = [Segment(start: 0, end: 1, text: input)]
+            XCTAssertEqual(Aliases.apply(aliases, to: turns).map(\.text), [expected])
+            let plain = [Segment(start: 0, end: 1, text: input.replacingOccurrences(of: "[?]", with: ""))]
+            XCTAssertEqual(Aliases.apply(aliases, to: turns)[0].text.replacingOccurrences(of: "[?]", with: ""),
+                           Aliases.apply(aliases, to: plain)[0].text)
+        }
+    }
 }

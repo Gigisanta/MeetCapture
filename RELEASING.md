@@ -1,5 +1,37 @@
 # Releasing
 
+## Source-first distribution contract
+
+7.1.0 is distributed as pinned source for a local build. The canonical public
+installation instructions are in `README.md`; they must name the published
+release tag, not `main`. Do not label a tag or release as available before it
+exists on GitHub.
+
+The manifest minimum is Swift tools 6.0 for both MeetCapture and the pinned
+FluidAudio dependency. Runtime support starts at Apple Silicon/macOS 14.4,
+with diarization on macOS 15+. The build host must also support its chosen
+Xcode/Command Line Tools: Apple's Xcode 16–16.2 route needs macOS 14.5+.
+Record the actual compiler/SDK and OS used for release evidence; satisfying
+a manifest minimum is not proof of a clean-machine install.
+
+Local and CI bundles use ad-hoc signing by default. No Developer ID signing
+identity or notarization account has been provisioned for this release.
+Do not attach a CI bundle as a supported public binary, advertise a DMG/app
+download, call `codesign --verify` a notarization check, or suggest disabling
+Gatekeeper/removing quarantine. Source builds remain subject to macOS and
+organization security policy. A future binary channel needs a separately
+provisioned Developer ID/notarization workflow and verification on another Mac.
+
+Release notes must disclose the optional summary endpoint's text egress,
+the source-build prerequisites, permissions, backup/rollback path and known
+ASR limits. In particular, 7.1.0 does not retrain the model or establish a WER
+improvement, the `pongo` → `puego` reference failure remains, confidence marks
+miss most errors, and a retained real-meeting benchmark is still unavailable.
+Do not turn historical text-only corrections or unit-test counts into
+accuracy claims.
+
+## Release checklist
+
 1. Update `CFBundleShortVersionString` and `CFBundleVersion` in
    `Resources/Info.plist` with the same value. Move the `Unreleased` notes in
    `CHANGELOG.md` under the new version and date them.
@@ -153,16 +185,35 @@
    14. It does not currently prove the real capture/import contract or
    hardware behavior.
 
-5. After merging, tag and publish:
+5. After the reviewed changes have been merged and the evidence above is
+   accepted, tag the exact reviewed commit and publish its source release.
+   Check that the version metadata, changelog, release title and README
+   installation tag all agree on `7.1.0` / `v7.1.0`. Tagging and publication
+   are production actions, separate from building a staged app:
 
    ```bash
-   git tag -a vX.Y.Z -m "MeetCapture X.Y.Z"
-   git push origin vX.Y.Z
-   gh release create vX.Y.Z --title "MeetCapture X.Y.Z" --notes-file <(sed -n '/^## \[X.Y.Z\]/,/^## \[/p' CHANGELOG.md | sed '$d')
+   git tag -a v7.1.0 <reviewed-merge-commit> -m "MeetCapture 7.1.0"
+   git push origin v7.1.0
+   gh release create v7.1.0 --verify-tag --title "MeetCapture 7.1.0" --notes-file <reviewed-release-notes>
    ```
 
-   The CI artifact is ad-hoc signed. Users on other Macs need a local build,
-   or a separately authorized Developer ID signing and notarization flow.
+   Review the release notes before sending them; include only measured
+   evidence, remaining failures and installation instructions. Do not upload
+   private audio, transcripts, databases, configuration or local evidence
+   containing meeting data. GitHub's generated source archives are source,
+   not installed app bundles. Keep the source tag available for reproducible
+   cloning; do not silently move a published release tag to a later commit.
 
-6. Landing changes are published by maintainers with
-   `scripts/deploy-site.sh` when `site/` content changed.
+   On this Mac, finish recordings and transcription, quit the exact installed
+   bundle, back up data and run `./install.sh` from the reviewed checkout.
+   Preserve its zipped app backup and any recovery paths it reports. Verify
+   permissions and a consented capture after installation; installer liveness
+   alone does not prove the app works. The installer does not migrate or
+   start the optional summary agent. See README for update/rollback details.
+
+6. The public product page is maintained in
+   [`Gigisanta/maatwork-landing`](https://github.com/Gigisanta/maatwork-landing)
+   at `https://maat.work/casos/meetcapture`; `meetcapture.maat.work` redirects
+   there. This app repository does not deploy a second website. Verify that
+   the linked page and source-first setup instructions describe the released
+   behavior. Publish page changes through its owning repository and checks.

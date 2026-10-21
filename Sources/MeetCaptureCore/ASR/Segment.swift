@@ -1,6 +1,6 @@
 // Segment.swift
 // One timed transcript segment (a word while transcribing, a speaker turn in
-// the transcript). `speaker` is "Gio", "Participante N" or nil.
+// the transcript). `speaker` is "Yo", "Participante N" or nil.
 
 import Foundation
 
@@ -9,12 +9,16 @@ struct Segment: Codable, Equatable, Sendable {
     var end: Double
     var text: String
     var speaker: String?
+    /// A word's lowest token confidence. nil for turns, gaps and checkpoints
+    /// written before 7.1.0, which are never marked as doubtful.
+    var confidence: Float?
 
-    init(start: Double, end: Double, text: String, speaker: String? = nil) {
+    init(start: Double, end: Double, text: String, speaker: String? = nil, confidence: Float? = nil) {
         self.start = start
         self.end = end
         self.text = text
         self.speaker = speaker
+        self.confidence = confidence
     }
 
     var hasValidTiming: Bool {
@@ -43,7 +47,7 @@ enum TranscriptFormatter {
             guard !text.isEmpty, seg.hasValidTiming else { return nil }
             var speaker = seg.speaker?.trimmingCharacters(in: .whitespacesAndNewlines)
             if speaker == "?" || speaker?.isEmpty == true { speaker = nil }
-            return Segment(start: seg.start, end: seg.end, text: text, speaker: speaker)
+            return Segment(start: seg.start, end: seg.end, text: text, speaker: speaker, confidence: seg.confidence)
         }
     }
 

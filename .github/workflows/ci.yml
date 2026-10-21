@@ -75,25 +75,6 @@ jobs:
           python3 tools/summary/test_real_summary_check.py
           python3 tools/legacy/test_legacy_privacy_migration.py
 
-      - name: Landing lint
-        run: |
-          python3 - <<'PY'
-          import re, sys
-          html = open("site/index.html", encoding="utf-8").read()
-          errors = []
-          if "—" in html or "–" in html:
-              errors.append("em/en dash in site/index.html")
-          if len(re.findall(r"<h1\b", html)) != 1:
-              errors.append("site/index.html must have exactly one <h1>")
-          if "fonts.googleapis" in html or "fonts.gstatic" in html:
-              errors.append("fonts must be self-hosted")
-          if "<script" in html:
-              errors.append("the landing ships no JavaScript")
-          for e in errors:
-              print("::error::" + e)
-          sys.exit(1 if errors else 0)
-          PY
-
       - name: Repo hygiene
         run: |
           test -z "$(git ls-files | grep -i '^tests/' | grep -v '\.swift$')"

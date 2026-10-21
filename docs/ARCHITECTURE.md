@@ -3,9 +3,9 @@
 MeetCapture is a native macOS menu-bar app with no main window or Dock icon.
 Clicking its AppKit `NSStatusItem` opens an `NSPopover` that hosts SwiftUI
 `PopoverContent` through `NSHostingController`.
-The app process has no daemon or
-socket companion: it records from the process tap, transcribes on the
-machine, and publishes a JSON handoff. The canonical Python dispatcher in
+The app process has no persistent daemon or socket companion: it records from
+the process tap, transcribes locally in a short-lived worker per job, and
+publishes a JSON handoff. The canonical Python dispatcher in
 `tools/summary/` consumes that handoff; an optional per-user launchd agent
 only schedules the dispatcher. Nothing leaves the Mac unless the configured
 summary endpoint is remote. The retired `com.maatwork.meetcapture.daemon`
@@ -20,17 +20,16 @@ Sources/MeetCaptureCore/           everything else, one directory per layer
   App/        AppState, RecordingCoordinator, MeetingDetectionPolicy, Notifier
   Capture/    CoreAudioTap, AudioRingBuffer, AudioResampler, PCMFileWriter, AudioFormatSidecar, ChannelLevels, InputDevices, AudioCaptureService
   Detection/  CallDetector, CallActivityDebouncer, CalendarService, MeetingFilter
-  ASR/        TranscriptionJob, RecognitionIdentity, ChannelReader, PCMToWAV, BleedGate, ChunkedTranscription, ParakeetEngine, TurnMerger, Aliases, Segment
+  ASR/        TranscriptionWorker, TranscriptionJob, RecognitionIdentity, ChannelReader, PCMToWAV, BleedGate, ChunkedTranscription, ParakeetEngine, TurnMerger, Aliases, Segment
   Pipeline/   MeetingSession, PendingContractV2, PostProcessor, Retention, AudioImporter, RecordingRecovery, MeetingNotesStore
   Store/      MeetingStore (sqlite3 + FTS5)
   Settings/   Settings, LocalConfig, SummaryDispatcherConfig, AppPaths
   Support/    ProcessRunner, ISO8601, AppInfo, Signposts
   UI/         PopoverContent, PopoverSnapshot, SettingsView, Strings, Brand, MeetCaptureApp
 Tests/MeetCaptureCoreTests/        XCTest, pure logic and on-disk contracts
-scripts/                           version check and site deploy (no runtime scripts)
+scripts/                           version check (no runtime scripts)
 tools/summary/                      canonical summary dispatcher, optional launchd template, tests
 qa/                                checks that need a built app, audio or a human eye
-site/                              landing page (static, no JavaScript)
 ```
 
 Dependencies point downward: `UI` and `App` know every layer; `Pipeline`
@@ -66,16 +65,17 @@ and `Settings` only know `Support`. Nothing below `App` touches SwiftUI.
    `AudioFormatSidecar` writes `<file>.pcm.format.json` with schema
    `meetcapture.audio.v1` so no consumer guesses the byte layout.
 3. **Transcribe.** There is no live transcription. After capture stops,
-   `TranscriptionJob` runs in-process; nothing is spawned.
+   `TranscriptionWorkerClient` launches this app's executable in worker mode
+   and runs `TranscriptionJob` there, never in the menu-bar process.
    - *Split.* `ChannelReader` writes one 16 kHz mono WAV per channel
-     (`PCMToWAV`): L (system, the remote side) and R (mic, Gio). A
+     (`PCMToWAV`): L (system, the remote side) and R (the local mic). A
      microphone-only capture, an import, a legacy mono file, or a system
      channel that stayed silent the whole meeting gives a single channel.
    - *Bleed gate.* With Mac speakers the mic also hears the remote side.
      `BleedGate` mutes each 0.5 s mic window where the system level is above
      −55 dBFS, the mic is less than 10 dB above it, and the 200 Hz–4 kHz
      band-passed signals correlate above 0.4 at a lag of 0–100 ms. Double talk
-     stays because Gio is then clearly louder.
+     stays because the local speaker is then clearly louder.
    - *Chunks.* `ChunkedTranscription` cuts each channel into ~5 min chunks at
      the quietest 100 ms frame within ±10 s of each boundary and transcribes
      them with `ParakeetEngine` (FluidAudio, Parakeet TDT 0.6B "ultra"), which
@@ -88,29 +88,35 @@ and `Settings` only know `Support`. Nothing below `App` touches SwiftUI.
      content, recognizer/model artifact identity, SDK and effective configuration
      must match before reuse. Mismatches or corrupt checkpoints rebuild derived
      work without deleting source audio. A chunk failing twice becomes
-     `[fragmento sin transcribir hh:mm:ss–hh:mm:ss]` and the audio is kept.
+     `[fragmento sin transcribir hh:mm:ss–hh:mm:ss]` and the audio is kept. If
+     every chunk fails the job throws `emptyOutput` and recovery retries it; if
+     every chunk decodes and none has words the job throws `noSpeech`, which is
+     terminal: `RecordingRecovery.recordTerminal` uses up the automatic attempts
+     (`terminal: "no_speech"`), the audio stays for a manual run, and no history
+     row, handoff or "exhausted" notice is produced.
    - *Diarize.* With diarization on, FluidAudio's offline diarizer (pyannote
      community-1 segmentation and embeddings, VBx clustering) runs on the
      remote channel only; its spans are cached in `<audio>.work/diarization.json`
      against actual source content, not just file size. It requires macOS 15
      (macOS 14 crashes in BNNS) and is skipped there.
-   - *Merge.* `TurnMerger` labels mic words `Gio` and remote words
+   - *Merge.* `TurnMerger` labels mic words `Yo` and remote words
      `Participante 1..N` by order of first appearance, or `Participante` when
      diarization is off or failed. Lexical matching never deletes a microphone
      word merely because the remote speaker said it too; the acoustic gate is
      the echo control. A new turn opens on a speaker change, a gap over 1.5 s,
-     or a sentence end after 45 s. `Aliases` applies configured spelling fixes
-     to the merged turns.
+     or a sentence end after 45 s. A word whose weakest token confidence is under
+     `TurnMerger.doubtfulBelow` (0.50) is written with `[?]` before its trailing
+     punctuation (`hola[?],`); checkpoints from before 7.1.0 carry no confidence
+     and are never marked. `Aliases` applies configured spelling fixes to the
+     merged turns; a match containing doubtful words keeps a marker on the
+     canonical spelling, including variants with trailing punctuation.
 
    `install.sh` downloads the models to `~/Library/Application Support/FluidAudio/`
-   (`MEETCAPTURE_PREFETCH_MODELS=1`), or the first job does. Each transcription
-   leases a single-flight model load. Completion, error and cancellation release
-   the lease; the final user clears app-held references and invokes SDK cleanup.
-   Capture no longer warms models and there is no ten-minute idle unload timer;
-   the disk cache is retained. Cleanup does not guarantee immediate RSS recovery:
-   real UI observations remained elevated after completed jobs, with no established
-   cause or demonstrated return to baseline. Hardware placement and GPU contention
-   are not instrumented.
+   (`MEETCAPTURE_PREFETCH_MODELS=1`), or the first worker does. Completion,
+   error and cancellation release the worker's model lease and invoke SDK
+   cleanup; process exit then releases its entire address space. Capture
+   never warms models, the disk cache is retained, and no idle unload timer
+   is needed. Hardware placement and GPU contention are not instrumented.
 4. **Hand off.** `PostProcessor` is an actor: it rejects empty transcripts,
    writes the `.txt` transcript, commits `MeetingStore`, writes the
    `.processed.json` marker, and only then publishes the `.pending`
@@ -149,7 +155,7 @@ to that id; existing recordings and history keep their original paths.
 | `~/meetings/transcripts/recording-meet-<epoch>-<uuid>.pcm` + `.pcm.format.json` | Capture | ASR, retention | Int16 stereo 16 kHz; sidecar schema `meetcapture.audio.v1` (`sample_rate`, `sample_format`, `channels`, `layout`, `tap_strategy`, `tap_info`). |
 | `<audio>.work/` (`remote/`, `mic/`, `diarization.json`, `gaps.json`) | ASR | ASR | Per-channel manifest version 4 binds audio/reference SHA-256, actual model artifacts, SDK and effective recognition configuration. Stale/corrupt derived checkpoints are rebuilt without deleting source audio; diarization is content-bound too. `gaps.json` remains while the handed-off transcript has gaps and is removed after a complete transcript is handed off. Older manifests are invalidated, not compatibility-shimmed. |
 | `<audio>.recovery.json` | AppState | AppState | `attempts`, `last_error`, `updated_at` and `next_attempt_at` (ISO 8601 with milliseconds; absent once the automatic attempts are used up). Automatic recovery runs a capture only after `next_attempt_at`, at most three attempts within 48 h of the capture. Removed when a transcript without gaps is handed off. |
-| `~/meetings/transcripts/[recording-]meet-<epoch>-<uuid>.txt` | PostProcessor | dispatcher, popover | Live recordings use the `recording-` prefix; retranscriptions use the job id directly. Imports keep a unique dated basename in `~/meetings/imports/`. One `[speaker]: text` line per turn, for example `[Gio]: …` or `[Participante 2]: …`. |
+| `~/meetings/transcripts/[recording-]meet-<epoch>-<uuid>.txt` | PostProcessor | dispatcher, popover | Live recordings use the `recording-` prefix; retranscriptions use the job id directly. Imports keep a unique dated basename in `~/meetings/imports/`. One `[speaker]: text` line per turn, for example `[Yo]: …` or `[Participante 2]: …`. |
 | `~/meetings/meet-<epoch>-<uuid>.pending` | PostProcessor | dispatcher | Version 2, 14 sorted keys: `audioPath` (null if deleted or if the transcript has gaps), `checksum` (SHA-256 of the transcript text), `durationSec`, `endedAt`, `engine`, `language`, `meetingId`, `model`, `segments` (`start`, `end`, `text`, optional `speaker`), `speakerCount`, `startedAt`, `title`, `transcriptPath`, `version`. Written to a temp file and renamed. |
 | `<transcript basename>.processed.json` | PostProcessor | app | Schema `meetcapture.processed.v1`: `processed_at`, `transcript_path`, `meeting_title`, `retention`. Makes post-processing idempotent. |
 | `~/meetings/meet-<epoch>-<uuid>.done`, `.summary.json`, `.summary.html` | dispatcher | popover | Acknowledged handoff and the summary. |
@@ -176,13 +182,60 @@ runtime behavior.
 
 | Process | Started by | Lifetime | Input and output |
 | --- | --- | --- | --- |
+| `MeetCapture` with `MEETCAPTURE_TRANSCRIPTION_WORKER=1` | TranscriptionWorkerClient | one transcription | One JSON request on stdin, `MCW1 ` progress and final outcome/error lines on stdout; stderr drained separately. |
 | `afconvert` | AudioImporter | per import | Converts wav, m4a, aiff, caf to 16 kHz Int16. |
 | `afplay` | RealPipelineCheck | per `capture` check | Plays the known WAV into the capture. |
 | `meetcapture_summary_dispatcher.py` | optional `ai.hermes.meetcapture-summary` launchd agent or manual invocation | one pass per trigger | `.pending` in, `.summary.*` and `.done` out. |
 
-All app-side processes go through `ProcessRunner`, which drains both pipes
-and escalates SIGTERM to SIGKILL; there is no other `Process` harness.
-Transcription and diarization are not processes.
+`ProcessRunner` handles conversion/playback with drained pipes and
+SIGTERM → SIGKILL escalation. `TranscriptionWorkerClient` uses a streaming
+process harness because transcription also needs progress and a stdin
+lifetime lease.
+
+### Transcription worker
+
+The menu-bar process never loads transcription or diarization models. Each
+job runs in a fresh copy of the app executable, so model memory belongs to
+that worker and disappears when it exits. The client queues jobs FIFO:
+only one worker runs at a time on the single ANE, avoiding duplicate model
+working sets. A cancelled queued job never launches a process.
+
+The request contains the audio path, capture sample rate, language,
+diarization option and aliases; the worker does not read app settings.
+Prefetch, snapshot, launch-probe and QA mode triggers are removed from the
+child environment. The parent keeps stdin open until completion; EOF or
+SIGTERM cancels the worker task, preserving atomic chunk checkpoints.
+Cancellation closes stdin, waits up to ten seconds, then kills a worker
+that has not exited. The worker also enforces its own ten-second shutdown
+deadline, so a dead parent cannot leave a model load running indefinitely.
+Both output pipes are drained concurrently; worker termination starts the
+same grace period to kill same-group descendants holding inherited pipes.
+Unrelated stdout lines are ignored and failure diagnostics retain only the
+last 4 KiB of stderr. A crash remains a recoverable transcription failure.
+
+### Doubt-marker calibration
+
+The 2026-10-21 calibration used only seven frozen dev blocks (9907 reference
+tokens); holdout audio/references stayed closed. Words follow the adapter's
+SentencePiece boundary rule, with minimum token confidence. Levenshtein aligns
+case-folded Unicode alphanumeric tokens; a word is erroneous if any of its
+tokens is substituted or inserted. Deleted words cannot be marked.
+
+Thresholds 0.05 through 0.95 in steps of 0.05 were swept. The predeclared choice
+was maximum F1 with at most 5% marked words and precision at least 50%.
+`confidence < 0.50` won: F1 0.1333, 88 marked out of 9811 hypothesis words.
+Three repeated jobs per block had identical text; only one counted.
+
+| Dev source | Marked / hypothesis words | Precision | Recall of erroneous words |
+| --- | ---: | ---: | ---: |
+| OpenSLR61 | 14 / 4175 | 7.14% | 0.83% |
+| MediaSpeech | 74 / 5636 | 59.46% | 9.42% |
+| Combined | 88 / 9811 | 51.14% | 7.67% |
+
+The pooled rule passes narrowly and is not reliable per source. These are read
+and broadcast clips, not spontaneous meetings. An unmarked word is not a
+correctness guarantee. ASR itself remains unchanged (455 substitutions,
+221 deletions and 142 insertions over 9907 reference tokens, WER 8.26%).
 
 ## Build and signing
 

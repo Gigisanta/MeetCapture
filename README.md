@@ -3,13 +3,18 @@
 
 # MeetCapture
 
+[![CI](https://github.com/Gigisanta/MeetCapture/actions/workflows/ci.yml/badge.svg)](https://github.com/Gigisanta/MeetCapture/actions/workflows/ci.yml)
+
+[Install](#install-from-a-pinned-release) · [Releases](https://github.com/Gigisanta/MeetCapture/releases) · [Measured baseline](docs/BASELINE.md) · [Report a bug](https://github.com/Gigisanta/MeetCapture/issues/new?template=bug_report.yml)
+
 MeetCapture is a native macOS menu-bar app for recording calls, transcribing
 them locally, and keeping the resulting meeting history on the Mac. It has no
 main window or Dock icon. Opening the app from Finder or Spotlight shows its
 controls below the menu-bar icon; later, click that icon to reopen them.
-Opening the app again while it is running also shows the controls. It is one
-native process with no Python: transcription and speaker labels run locally
-through [FluidAudio](https://github.com/FluidInference/FluidAudio) and Core ML.
+Opening the app again while it is running also shows the controls. The native
+Swift app uses short-lived transcription helpers, with no Python in the app.
+Speech and speaker labels run locally through
+[FluidAudio](https://github.com/FluidInference/FluidAudio) and Core ML.
 Parakeet requests CPU/Neural Engine execution; actual device placement and GPU
 contention are not instrumented. Summary generation is a separate, optional
 Python dispatcher; its default endpoint is the local gateway at
@@ -31,10 +36,17 @@ Website: https://meetcapture.maat.work
   An acoustic bleed gate mutes remote audio leaking into the microphone;
   identical words from different speakers are not deleted by lexical matching.
   The actual engine and model are recorded in the handoff.
-- **Speaker labels.** The microphone channel is labeled `Gio`. With "Identificar
+- **Speaker labels.** The microphone channel is labeled `Yo`. With "Identificar
   hablantes" on (macOS 15 or newer), the call channel is diarized into
   `Participante 1`, `Participante 2`… by order of appearance; otherwise it is
-  one `Participante`. Transcript lines read `[Gio]: text`.
+  one `Participante`. Transcript lines read `[Yo]: text`; old transcripts are not renamed.
+- **Doubtful words.** A word the recognizer was unsure of is written as
+  `palabra[?]` (before any punctuation). The threshold was calibrated on read
+  and broadcast Spanish, not real meetings: about 1 in 100 words is marked,
+  roughly half of those are wrong, and most errors stay unmarked; a dropped
+  word is never marked. Search ignores the marker.
+- **Silence.** A recording with no speech ends with "No se detectó habla"; the
+  audio is kept for a manual run and is not retried automatically.
 - **Summaries.** The canonical dispatcher at
   `tools/summary/meetcapture_summary_dispatcher.py` consumes each `.pending`
   handoff and writes JSON, HTML and a portable Markdown note with decisions,
@@ -53,46 +65,178 @@ the summary dispatcher removes handoff audio after a successful summary unless
 
 ## Requirements
 
-- Apple Silicon Mac, macOS 14.4 or newer; speaker diarization needs macOS 15.
-- Network once: `install.sh` downloads the speech models (about 0.6 GB) to
-  `~/Library/Application Support/FluidAudio/`; otherwise they download on
-  first use.
-- Permissions when requested: Microphone, Screen and System Audio Recording,
-  Calendar, and Notifications. Calendar auto-recording is optional.
+- **App runtime:** a native Apple Silicon Mac (`arm64`), macOS 14.4 or newer.
+  Speaker diarization needs macOS 15. Intel Macs and running the build from a
+  Rosetta terminal are not supported.
+- **Source build:** Swift **6.0 or newer** plus the macOS SDK, Git and Apple's
+  build/signing tools. Both `Package.swift` and the pinned FluidAudio
+  `Package.swift` declare Swift tools 6.0; Swift 5 language mode does not lower
+  that compiler requirement. Use a compatible Xcode 16 or newer, or Command
+  Line Tools that provide Swift 6.0+ and the macOS SDK.
+  [Apple's compatibility table](https://developer.apple.com/xcode/system-requirements/)
+  lists the required host OS: Xcode 16–16.2 require **macOS 14.5+**. A Mac
+  still on 14.4 must update for that source-build route. The app's 14.4 runtime
+  target is not a promise that a current Xcode installs on 14.4.
+- **Initial downloads:** network access to GitHub for the pinned dependency
+  source and checksum-verified binary dependency, then to Hugging Face for
+  speech models (about 0.6 GB). `install.sh` attempts to prepare the models in
+  `~/Library/Application Support/FluidAudio/`; a failed download is deferred
+  to first transcription. Speaker-label models may download separately.
+  Leave disk space for the toolchain, build cache, models and retained audio.
+- **Optional summaries:** a separately available Python 3 interpreter and a
+  working OpenAI-compatible endpoint. Neither Python, Whisper nor a summary
+  service is required to capture and transcribe with the native app.
+
+If no developer tools are installed, run `xcode-select --install` and finish
+the macOS installer before continuing. On an older macOS, choose a compatible
+version through [Apple Developer Downloads](https://developer.apple.com/download/all/)
+instead of assuming the latest Xcode supports your Mac. If using the full
+Xcode app, open it once and finish its setup. Check the selected tools:
+
+```bash
+uname -m
+sw_vers -productVersion
+xcode-select -p
+swift --version
+xcrun --sdk macosx --show-sdk-path
+git --version
+```
+
+`uname -m` must report `arm64`, and `swift --version` must report 6.0 or newer.
+The build script checks the host, compiler and SDK before replacing a staging
+bundle; an outdated Command Line Tools installation is not sufficient.
 
 ## Local resources
 
 ASR and speaker labeling need no cloud service or subscription after the model
-download. Models load for transcription, not when a recording starts. On
-completion, failure or cancellation the final job drops app-held model
-references and invokes SDK cleanup; another active job keeps its shared load.
-There is no ten-minute idle retention timer, and the disk cache remains.
-This does not guarantee immediate RAM reclamation: process RSS remained elevated
-after real UI jobs, and return to the pre-ASR level was not demonstrated.
-See `CHANGELOG.md` for the distinct live-process and command-peak measurements.
+download. Each transcription runs in a fresh helper process; the menu-bar
+process never loads the models. Jobs queue one at a time, and the helper exits
+on completion, failure or cancellation. The disk cache remains.
 
-For a local-only deployment, keep the optional summary endpoint on loopback or
-leave its scheduler disabled. Installing the app does not authorize starting
-that scheduler, external training or a cloud runtime.
+In the 91 s import check, the menu-bar process stayed near 17 MiB of physical
+footprint after each of three jobs. This moves model memory to a short-lived
+child; it does not remove the roughly 0.8 GiB recognition working set.
+The 7.0.2 baseline's physical footprint recovered after five idle seconds in
+one run but not the repeat; high RSS alone was not evidence of a leak. See
+[`docs/BASELINE.md`](docs/BASELINE.md) for the frozen 7.1.0 measurements, input
+hashes, reproduction steps and explicit acceptance failures.
 
-## Install
+For local-only summaries, keep the endpoint and every gateway upstream local,
+or leave the optional scheduler disabled. Installing the app does not install
+that scheduler, a model server, external training or a cloud runtime.
+
+## Install from a pinned release
+
+MeetCapture's public installation path is a **local source build**, not a
+downloadable notarized app. The commands below target `v7.1.0`. First confirm
+that tag and its notes are present on
+[GitHub Releases](https://github.com/Gigisanta/MeetCapture/releases).
+If the tag is not published yet, stop; a pull request or `main` checkout is
+not a substitute for the release.
+
+Do not install while a call, recording or transcription is active. The
+installer launches the app when it succeeds, and automatic recording is on
+by default. Review the onboarding below before using it for a real meeting.
+Run as your normal macOS user, **without `sudo`**:
 
 ```bash
-git clone https://github.com/Gigisanta/MeetCapture.git
-cd MeetCapture
+git clone --branch v7.1.0 --depth 1 https://github.com/Gigisanta/MeetCapture.git MeetCapture-7.1.0 && \
+cd MeetCapture-7.1.0 && \
 ./install.sh
 ```
 
+This checks out the release rather than the moving `main` branch.
+`Package.swift` and `Package.resolved` pin FluidAudio; do not run a dependency
+update to work around an installation error.
+
 `install.sh` builds and verifies a staging bundle, backs up the current local
 bundle, installs to `~/meetings/MeetCapture.app`, then launches and checks the
-exact installed process. It restores the previous bundle if installation or
-launch verification fails. Finish any recording and quit the running app before
-updating; the installer refuses to replace a live bundle. It checks for recent
-recordings before building and again immediately before the swap, and refuses
-installation if that inspection fails. Backups are kept as zipped bundles in
-`~/meetings/.backups/` for manual recovery. Run `qa/app-smoke-test.sh` and the real
-pipeline checks separately; a successful launch alone does not prove capture,
-transcription, import, SQLite publication, or summary delivery.
+exact installed executable. It refuses to replace a live installed bundle,
+checks for recent recordings before building and immediately before the swap,
+and refuses installation if that inspection fails. A failed install/launch
+attempt restores the previous bundle when it can safely confirm the candidate
+has stopped; otherwise it preserves recovery paths and prints them. It never
+kills a recording process to force an update.
+
+After installation, use `open "$HOME/meetings/MeetCapture.app"` or open that
+exact bundle in Finder. Opening it again reveals the menu-bar controls.
+A successful installer launch proves process liveness, not successful audio
+capture or transcription; make a short, consented recording and review both
+channels and the transcript before relying on it.
+
+### Local signing and Gatekeeper
+
+The default build is signed ad-hoc on your Mac. Signature verification checks
+bundle integrity; it is **not** Developer ID identity verification or Apple
+notarization. CI app artifacts and a ZIP copied from another Mac are not the
+supported public installation route. Building locally does not disable
+Gatekeeper or organization-managed security policy. If macOS blocks a build,
+keep that protection in place, save the exact message and use the support
+steps below. There is no quarantine-removal or Gatekeeper-bypass step.
+
+### First launch and permissions
+
+1. Open the menu-bar controls, then Settings. In General, review **"Grabar
+   llamadas y reuniones automáticamente"** before joining a call; turn it off
+   if you want manual recording only. Obtain participants' consent as required
+   before recording.
+2. Allow **Microphone** for your voice. For the call's audio, allow MeetCapture
+   under System Settings › Privacy & Security › **Screen & System Audio
+   Recording** (the label varies by macOS). After changing audio permissions,
+   quit and reopen the installed bundle. If the call channel is silent, the
+   app warns you; a transcript from the microphone alone is not proof that
+   other participants were captured.
+3. **Calendar** is optional for calendar-based meeting detection. **Notifications**
+   are optional for completion alerts. Declining either does not prevent
+   manual recording. macOS may request permissions again after an ad-hoc rebuild.
+4. In General, review **"Audio original"** retention before recording. For
+   later listening or re-transcription, choose to keep audio; the normal
+   default is 24 hours. If you enable summaries, also review `keep_audio` in
+   `~/.meetcapture/summary.json`: a successful summary can delete its handoff
+   audio unless that option is true.
+5. Leave the optional summary scheduler uninstalled unless you have configured
+   and reviewed its endpoint. The loopback default does not install a local
+   model server, and a local gateway can itself forward to a remote provider.
+   Confirm the gateway's routing before treating summaries as local-only.
+
+### Update, backup and rollback
+
+Before updating, finish recording **and** transcription, then use the app's
+Quit control. If you enabled the optional summary agent, pause it with
+`tools/summary/install-summary-agent.sh --uninstall` from its source checkout
+and wait for summary work to finish before making a consistent data backup.
+Keep that checkout: the agent runs its Python files in place.
+
+The installer backs up only the old **app bundle** as
+`~/meetings/.backups/MeetCapture-<date>-<time>-<pid>.app.zip`. It does not back up
+meeting data, settings or credentials. With the app and dispatcher stopped,
+use Time Machine or a private backup of:
+
+- `~/meetings/` in full, including `meetcapture.db`, any `-wal`/`-shm` companions,
+  transcripts, imports, audio/format sidecars, checkpoints and handoffs;
+- `~/.meetcapture/`, including any summary credentials;
+- preferences exported with `defaults export com.maatwork.meetcapture <private-backup-path>/preferences.plist`
+  if you have saved app settings.
+
+Protect this backup as meeting content; do not upload it to an issue.
+For an update, use a fresh checkout of the chosen published tag and run its
+`./install.sh` as above. Do not `git pull` a working production checkout onto
+`main`, delete the model cache, or replace a running `.app` by dragging files
+over it. Personal configuration remains outside the checkout.
+
+If the new version launches but has a functional regression, quit it and run
+`./install.sh` from your retained, previously working release checkout. This
+uses that release's installer rather than a live-bundle overwrite. App
+rollback does **not** roll back SQLite or meeting data; preserve the data
+backup and check the release notes for downgrade compatibility first. Keep
+zipped app backups for manual recovery; extract one only into a separate
+recovery directory for inspection, not over a running app, and do not launch
+multiple production-identity copies. If automatic recovery reports preserved
+paths, keep them and request support instead of deleting them.
+
+If summaries were enabled, deliberately reinstall their agent from the chosen
+checkout after reviewing its configuration; `install.sh` does not update,
+enable or migrate that service.
 
 ## Configuration
 
@@ -124,6 +268,15 @@ An apparently newer tag is not a reason to discard the tested model revision.
 
 ## Summaries
 
+The app installer does not start a model server or install this scheduler.
+Before running the dispatcher or its installer, review `summary.json` and
+confirm where the endpoint actually sends requests. Summary requests contain
+the meeting title/date, transcript, notes and any configured tag names; a
+remote endpoint receives that text, but not raw audio. Optional post-summary
+hooks can also send summary/notes to another service. A loopback gateway alone
+does not guarantee its upstream provider is local. Do not enable the scheduler
+until that data flow and both audio-retention settings are acceptable.
+
 The canonical summary implementation is the Python dispatcher in the nested
 `tools/summary/` directory. The optional per-user launchd agent is
 `ai.hermes.meetcapture-summary` and only schedules that dispatcher. Its
@@ -143,6 +296,7 @@ states and retry behavior. The retired `com.maatwork.meetcapture.daemon`
 launchd service is not part of the current architecture and must not be
 re-enabled.
 
+
 ## Build without installing
 
 ```bash
@@ -150,8 +304,9 @@ re-enabled.
 codesign --verify --deep --strict /tmp/meetcapture-stage/MeetCapture.app
 ```
 
-Local builds are ad-hoc signed. Developer ID signing and notarization are
-separate distribution steps.
+Local builds are ad-hoc signed by default. Developer ID signing and
+notarization are separate, unprovisioned distribution steps; see
+[`RELEASING.md`](RELEASING.md). Neither is required for this source-build path.
 
 ## Tests and evidence boundaries
 
@@ -260,6 +415,17 @@ A real transcription that produces no segments is exit `1`; it publishes no
 See [`qa/README.md`](qa/README.md) for the current check matrix and
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the data-flow contracts.
 
+## Known recognition limits
+
+7.1.0 changes process isolation, silence handling and review markers; it does
+not retrain the recognizer or establish a word-error-rate improvement. The
+known exact-word failure `pongo` → `puego` remains in the public 91-second
+Spanish reference check. `[?]` misses most errors and cannot flag deleted
+words. No ≥60-minute retained real-meeting benchmark is available for this
+release; read/broadcast development audio is not a substitute. Review names,
+numbers and important wording against retained audio before using a
+transcript or generated summary as a record.
+
 ## Troubleshooting
 
 1. **No menu-bar icon.** Open System Settings › Menu Bar and check that
@@ -280,6 +446,15 @@ See [`qa/README.md`](qa/README.md) for the current check matrix and
    System Settings › Privacy and restart the app; the process tap requires it.
    A meeting whose system channel stayed silent is transcribed from the
    microphone alone.
+
+For installation or app issues, use
+[GitHub Issues](https://github.com/Gigisanta/MeetCapture/issues) with the release
+tag/commit, macOS version, `uname -m`, `swift --version`, the failed command
+and its exact error. For runtime errors, Console can filter the app's unified
+logs by subsystem `com.maatwork.meetcapture`; summary logs are at
+`~/meetings/.logs/summary.log`. Review and redact logs before sharing. Do not
+attach audio, private transcripts, the database, configuration files or API
+keys. Include only a consented, non-sensitive reproduction if one is needed.
 
 ## License
 

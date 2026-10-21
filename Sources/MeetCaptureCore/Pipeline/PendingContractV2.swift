@@ -20,7 +20,7 @@ struct PendingContractV2: Equatable, Sendable {
 
     var speakerCount: Int { TranscriptFormatter.speakerCount(segments) }
 
-    /// Labels in order of first appearance, so the summary names "Gio" and
+    /// Labels in order of first appearance, so the summary names "Yo" and
     /// "Participante N" instead of inventing attendees.
     var speakers: [String] { Self.speakers(of: segments) }
 

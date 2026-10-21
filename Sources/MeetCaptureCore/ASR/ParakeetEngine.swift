@@ -206,10 +206,13 @@ actor ParakeetEngine: SpeechRecognizer {
                   token.startTime >= 0, token.endTime >= token.startTime
             else { throw AdapterError.invalidTimedWords }
             if boundary || boundaryPending || words.isEmpty {
-                words.append(Segment(start: token.startTime, end: token.endTime, text: text))
+                words.append(Segment(start: token.startTime, end: token.endTime, text: text,
+                                     confidence: token.confidence))
             } else {
                 words[words.count - 1].text += text
                 words[words.count - 1].end = token.endTime
+                // A word is as doubtful as its weakest piece.
+                words[words.count - 1].confidence = min(words[words.count - 1].confidence ?? 1, token.confidence)
             }
             boundaryPending = false
         }
