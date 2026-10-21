@@ -176,7 +176,8 @@ enum ChunkedTranscription {
                 continue
             }
             let shifted = found.map {
-                Segment(start: $0.start + offset, end: $0.end + offset, text: $0.text, speaker: $0.speaker)
+                Segment(start: $0.start + offset, end: $0.end + offset, text: $0.text, speaker: $0.speaker,
+                        confidence: $0.confidence)
             }
             try Task.checkCancellation()
             try JSONEncoder().encode(shifted).write(to: doneURL, options: .atomic)

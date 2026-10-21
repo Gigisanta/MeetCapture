@@ -51,11 +51,9 @@ enum Retention {
         guard let names = try? fm.contentsOfDirectory(atPath: directory) else { return }
         for name in names where name.hasPrefix("recording-") && name.hasSuffix(".pcm") {
             let audioPath = directory + "/" + name
-            let transcript = RecordingRecovery.transcriptPath(forAudio: audioPath)
             var isDir: ObjCBool = false
             guard fm.fileExists(atPath: audioPath, isDirectory: &isDir), !isDir.boolValue,
-                  fm.fileExists(atPath: ProcessedMarker.path(forTranscript: transcript)),
-                  !RecordingRecovery.hasGaps(audioPath: audioPath),
+                  !RecordingRecovery.needsTranscript(audioPath: audioPath),
                   let modified = (try? fm.attributesOfItem(atPath: audioPath))?[.modificationDate] as? Date,
                   modified < cutoff
             else { continue }

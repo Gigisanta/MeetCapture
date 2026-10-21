@@ -114,6 +114,23 @@ variables and acceptance behavior are fixed:
   WER/reference checks; app exit `0` by itself is not a WER pass. `ui` is a
   manual interaction review and never converts a report counter into PASS.
 
+### Memory samples
+
+Successful `import` and `capture` reports include `memory.samples` at `start`,
+after each job (`after-import-1`, `after-import-2`, `after-retranscribe`, or
+`after-capture`), and `idle-5s`. Each sample contains `label` and `elapsedSec`;
+`physFootprintBytes` and `residentBytes` are included when the main process's
+Mach task-info measurement succeeds.
+The report's top-level `elapsedSec` excludes the five-second idle wait.
+`memory.children_max_rss_bytes` is the macOS `getrusage(RUSAGE_CHILDREN)` peak
+RSS of reaped children, not current memory or their combined footprint
+(`0` without children, `-1` if measurement fails).
+
+Compare matching jobs and text on the same host, with fresh output directories,
+before interpreting memory changes. RSS and physical footprint are distinct;
+one idle sample does not establish cleanup timing or prove a leak. A helper's
+exit bounds its lifetime but does not eliminate the model's working set.
+
 ### Building and driving the real QA UI
 
 Build a separate staging-only bundle; the installed production app can stay

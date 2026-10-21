@@ -499,6 +499,120 @@ final class AppStateRegressionTests: XCTestCase {
         XCTAssertNil(RecordingRecovery.nextAttemptAt(forAudio: audio))
     }
 
+    /// Silence is terminal: one attempt, audio kept, no history, no retries.
+    func testSilentCaptureIsSettledWithoutHistoryOrRetries() async throws {
+        let outputDir = TestSupport.makeTempDir(self, "app-silent")
+        let paths = AppPaths(environment: ["MEETCAPTURE_TEST_OUTPUT_DIR": outputDir], home: outputDir)
+        useSettings([Settings.Key.notifyHermes.rawValue: false,
+                     Settings.Key.retention.rawValue: RetentionPolicy.deleteAfterHandoff.rawValue])
+        let backend = FakeRecordingBackend()
+        backend.suspendStart = false
+        backend.writesRecoverableCapture = true
+        let store = MeetingStore(path: paths.databasePath)
+        let calls = TranscriptionCallCounter()
+        let state = AppState(
+            paths: paths, store: store, recordingDriver: backend.driver,
+            transcriptionRunner: { job, _ in
+                calls.increment()
+                try FileManager.default.createDirectory(
+                    atPath: ChunkedTranscription.workDirectory(forAudio: job.audioPath),
+                    withIntermediateDirectories: true)
+                throw TranscriptionError.noSpeech
+            },
+            errorDismissalDelay: 300, recoveryRetryDelays: [0.05, 0.05])
+
+        state.startRecording()
+        try await waitUntil { backend.isRecording }
+        state.stopRecording()
+        try await waitUntil { state.phase == .idle && state.errorMessage != nil }
+        try await Task.sleep(nanoseconds: 400_000_000)
+
+        let audio = try XCTUnwrap(backend.outputPath)
+        XCTAssertEqual(calls.value, 1, "silence is never retried automatically")
+        XCTAssertEqual(state.errorMessage, TranscriptionError.noSpeech.errorDescription)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: audio), "the audio is kept")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: ChunkedTranscription.workDirectory(forAudio: audio)))
+        XCTAssertEqual(store.count(), 0)
+        XCTAssertTrue(try pendingFiles(in: outputDir).isEmpty)
+        XCTAssertTrue(RecordingRecovery.isSilent(forAudio: audio))
+        XCTAssertNil(RecordingRecovery.nextAttemptAt(forAudio: audio))
+        XCTAssertEqual(state.recoverableRecordings.map(\.audioPath), [audio], "still offered for a manual run")
+        XCTAssertEqual(state.exhaustedRecordingCount, 0, "silence is not an exhausted failure")
+    }
+
+    func testRecoveryOfASilentOrphanSettlesItInOneAttempt() async throws {
+        let outputDir = TestSupport.makeTempDir(self, "app-silent-recovery")
+        let paths = AppPaths(environment: ["MEETCAPTURE_TEST_OUTPUT_DIR": outputDir], home: outputDir)
+        useSettings([Settings.Key.notifyHermes.rawValue: false])
+        let audio = try writeCapture(paths, "silent")
+        let store = MeetingStore(path: paths.databasePath)
+        let calls = TranscriptionCallCounter()
+        let state = AppState(
+            paths: paths, store: store, recordingDriver: FakeRecordingBackend().driver,
+            transcriptionRunner: { _, _ in calls.increment(); throw TranscriptionError.noSpeech },
+            recoveryRetryDelays: [0.05, 0.05])
+
+        state.recoverRecordings(automaticOnly: true)
+        try await waitUntil { calls.value == 1 && !state.isRecovering }
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        XCTAssertEqual(calls.value, 1)
+        XCTAssertTrue(RecordingRecovery.isSilent(forAudio: audio))
+        XCTAssertTrue(RecordingRecovery.automatic(state.recoverableRecordings).isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: audio))
+        XCTAssertEqual(store.count(), 0)
+        XCTAssertEqual(state.errorMessage, TranscriptionError.noSpeech.errorDescription)
+    }
+
+    func testSilentRetryOfPartialCaptureKeepsAudioAndAllowsManualCompletion() async throws {
+        let outputDir = TestSupport.makeTempDir(self, "app-gap-to-silence")
+        let paths = AppPaths(environment: ["MEETCAPTURE_TEST_OUTPUT_DIR": outputDir], home: outputDir)
+        useSettings([Settings.Key.notifyHermes.rawValue: false,
+                     Settings.Key.retention.rawValue: RetentionPolicy.keep24h.rawValue])
+        let audio = try writeCapture(paths, "gap-to-silence")
+        let store = MeetingStore(path: paths.databasePath)
+        let calls = TranscriptionCallCounter()
+        let state = AppState(
+            paths: paths, store: store, recordingDriver: FakeRecordingBackend().driver,
+            transcriptionRunner: { _, _ in
+                calls.increment()
+                if calls.value == 1 {
+                    return TranscriptionJob.Outcome(
+                        segments: [Segment(start: 0, end: 10, text: "[fragmento sin transcribir]")],
+                        engineUsed: .parakeet, modelUsed: "fixture", failedChunks: 1)
+                }
+                if calls.value == 2 || calls.value == 3 { throw TranscriptionError.noSpeech }
+                if calls.value == 4 { throw FakeEngineError() }
+                if calls.value == 5 { throw CancellationError() }
+                return Self.completeOutcome
+            }, recoveryRetryDelays: [3_600, 3_600])
+
+        state.recoverRecordings(automaticOnly: true)
+        try await waitUntil { calls.value == 1 && !state.isRecovering }
+        for attempt in 2...5 {
+            state.recoverRecordings(automaticOnly: false)
+            try await waitUntil { calls.value == attempt && !state.isRecovering }
+
+            XCTAssertTrue(RecordingRecovery.isSilent(forAudio: audio))
+            XCTAssertTrue(RecordingRecovery.needsTranscript(audioPath: audio))
+            let available = try XCTUnwrap(state.recoverableRecordings.first)
+            XCTAssertEqual(available.audioPath, audio)
+            XCTAssertTrue(RecordingRecovery.automatic(state.recoverableRecordings).isEmpty)
+            Retention.cleanupOldRecordings(in: paths.transcriptsDir, policy: .keep24h,
+                                          now: Date().addingTimeInterval(90_000))
+            XCTAssertTrue(FileManager.default.fileExists(atPath: audio), "a partial marker must not authorize deletion")
+            XCTAssertEqual(store.count(), 1, "silence and failed attempts create no replacement history row")
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: ChunkedTranscription.workDirectory(forAudio: audio)))
+
+        state.recoverRecordings(automaticOnly: false)
+        try await waitUntil { !state.isRecovering }
+        XCTAssertEqual(calls.value, 6, "the silent capture remains available through failed manual attempts")
+        XCTAssertFalse(RecordingRecovery.needsTranscript(audioPath: audio))
+        XCTAssertTrue(state.recoverableRecordings.isEmpty)
+        XCTAssertEqual(store.count(), 1)
+    }
+
     private func writeCapture(_ paths: AppPaths, _ suffix: String) throws -> String {
         try FileManager.default.createDirectory(atPath: paths.transcriptsDir, withIntermediateDirectories: true)
         let audio = paths.transcriptsDir + "/recording-meet-1789474169-\(suffix).pcm"

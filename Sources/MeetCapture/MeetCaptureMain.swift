@@ -8,6 +8,7 @@ import MeetCaptureCore
 enum MeetCaptureMain {
     @MainActor
     static func main() {
+        if TranscriptionWorker.runIfRequested() { return }
         if ModelPrefetch.runIfRequested() { return }
         if RealPipelineCheck.runIfRequested() { return }
         if PopoverSnapshot.runIfRequested() { return }

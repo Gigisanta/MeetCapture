@@ -103,6 +103,20 @@ final class TranscriptionJobTests: XCTestCase {
         XCTAssertEqual(calls, 1, "one channel, one chunk")
     }
 
+    /// Every chunk decoded with no words is silence: terminal, not the
+    /// retryable `emptyOutput` reserved for chunks that all failed.
+    func testNoWordsInAnyChunkIsNoSpeech() async throws {
+        let dir = TestSupport.makeTempDir(self, "job-no-speech")
+        let audio = try capture(dir, left: WAVFixture.tone(seconds: 2), right: gio(2))
+        let job = TranscriptionJob(audioPath: audio, captureSampleRate: 16_000, language: "es", diarize: false,
+                                   recognizer: FakeRecognizer { _, _ in [] }, diarizer: FakeDiarizer([]))
+        do {
+            _ = try await job.run { _ in }
+            XCTFail("expected noSpeech")
+        } catch TranscriptionError.noSpeech {}
+        XCTAssertTrue(FileManager.default.fileExists(atPath: audio))
+    }
+
     /// The capture writes the mic to R and silence to L (AudioCaptureService).
     func testMicOnlyCaptureTranscribesTheMicChannel() throws {
         let dir = TestSupport.makeTempDir(self, "job-miconly")

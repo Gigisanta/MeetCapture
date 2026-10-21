@@ -7,9 +7,10 @@ MeetCapture is a native macOS menu-bar app for recording calls, transcribing
 them locally, and keeping the resulting meeting history on the Mac. It has no
 main window or Dock icon. Opening the app from Finder or Spotlight shows its
 controls below the menu-bar icon; later, click that icon to reopen them.
-Opening the app again while it is running also shows the controls. It is one
-native process with no Python: transcription and speaker labels run locally
-through [FluidAudio](https://github.com/FluidInference/FluidAudio) and Core ML.
+Opening the app again while it is running also shows the controls. The native
+Swift app uses short-lived transcription helpers, with no Python in the app.
+Speech and speaker labels run locally through
+[FluidAudio](https://github.com/FluidInference/FluidAudio) and Core ML.
 Parakeet requests CPU/Neural Engine execution; actual device placement and GPU
 contention are not instrumented. Summary generation is a separate, optional
 Python dispatcher; its default endpoint is the local gateway at
@@ -35,6 +36,13 @@ Website: https://meetcapture.maat.work
   hablantes" on (macOS 15 or newer), the call channel is diarized into
   `Participante 1`, `Participante 2`… by order of appearance; otherwise it is
   one `Participante`. Transcript lines read `[Gio]: text`.
+- **Doubtful words.** A word the recognizer was unsure of is written as
+  `palabra[?]` (before any punctuation). The threshold was calibrated on read
+  and broadcast Spanish, not real meetings: about 1 in 100 words is marked,
+  roughly half of those are wrong, and most errors stay unmarked; a dropped
+  word is never marked. Search ignores the marker.
+- **Silence.** A recording with no speech ends with "No se detectó habla"; the
+  audio is kept for a manual run and is not retried automatically.
 - **Summaries.** The canonical dispatcher at
   `tools/summary/meetcapture_summary_dispatcher.py` consumes each `.pending`
   handoff and writes JSON, HTML and a portable Markdown note with decisions,
@@ -63,13 +71,16 @@ the summary dispatcher removes handoff audio after a successful summary unless
 ## Local resources
 
 ASR and speaker labeling need no cloud service or subscription after the model
-download. Models load for transcription, not when a recording starts. On
-completion, failure or cancellation the final job drops app-held model
-references and invokes SDK cleanup; another active job keeps its shared load.
-There is no ten-minute idle retention timer, and the disk cache remains.
-This does not guarantee immediate RAM reclamation: process RSS remained elevated
-after real UI jobs, and return to the pre-ASR level was not demonstrated.
-See `CHANGELOG.md` for the distinct live-process and command-peak measurements.
+download. Each transcription runs in a fresh helper process; the menu-bar
+process never loads the models. Jobs queue one at a time, and the helper exits
+on completion, failure or cancellation. The disk cache remains.
+
+In the 91 s import check, the menu-bar process stayed near 17 MiB of physical
+footprint after each of three jobs. This moves model memory to a short-lived
+child; it does not remove the roughly 0.8 GiB recognition working set.
+The 7.0.2 baseline's physical footprint recovered after five idle seconds in
+one run but not the repeat; high RSS alone was not evidence of a leak. See
+`CHANGELOG.md`.
 
 For a local-only deployment, keep the optional summary endpoint on loopback or
 leave its scheduler disabled. Installing the app does not authorize starting

@@ -16,6 +16,8 @@ struct RecoverableRecording: Equatable, Sendable {
     var attempts: Int
     /// When automatic recovery may try it again; nil means it is due now.
     var nextAttemptAt: Date? = nil
+    /// Decoded completely and found no speech; kept only for a manual run.
+    var silent = false
 
     /// Used up its automatic attempts; only a manual run transcribes it.
     var exhausted: Bool { attempts >= RecordingRecovery.maxAutomaticAttempts }
@@ -69,9 +71,10 @@ enum RecordingRecovery {
             && fm.fileExists(atPath: gapsPath(forAudio: audioPath))
     }
 
-    /// No complete transcript yet: never handed off, or handed off with gaps.
+    /// No complete transcript yet: never handed off, gapped, or a silent
+    /// retry whose earlier partial transcript still has a processed marker.
     static func needsTranscript(audioPath: String) -> Bool {
-        hasGaps(audioPath: audioPath)
+        isSilent(forAudio: audioPath) || hasGaps(audioPath: audioPath)
             || !FileManager.default.fileExists(
                 atPath: ProcessedMarker.path(forTranscript: transcriptPath(forAudio: audioPath)))
     }
@@ -89,7 +92,8 @@ enum RecordingRecovery {
             let transcript = transcriptPath(forAudio: audioPath)
             let sidecarPath = AudioFormatSidecar.path(forAudio: audioPath)
             let handedOff = fm.fileExists(atPath: ProcessedMarker.path(forTranscript: transcript))
-            guard handedOff ? hasGaps(audioPath: audioPath) : !isSettledTranscript(transcript, now: now),
+            let silent = isSilent(forAudio: audioPath)
+            guard silent || (handedOff ? hasGaps(audioPath: audioPath) : !isSettledTranscript(transcript, now: now)),
                   let sidecar = AudioFormatSidecar.read(forAudio: audioPath),
                   sidecar.tapStrategy != "import",
                   let audio = try? fm.attributesOfItem(atPath: audioPath),
@@ -100,7 +104,8 @@ enum RecordingRecovery {
             return RecoverableRecording(audioPath: audioPath, transcriptPath: transcript,
                                         startedAt: min(startedAt ?? endedAt, endedAt), endedAt: endedAt,
                                         attempts: attempts(forAudio: audioPath),
-                                        nextAttemptAt: nextAttemptAt(forAudio: audioPath))
+                                        nextAttemptAt: nextAttemptAt(forAudio: audioPath),
+                                        silent: silent)
         }
         .sorted { $0.endedAt > $1.endedAt }
     }
@@ -117,7 +122,7 @@ enum RecordingRecovery {
     /// Within the automatic window and under the attempt cap, due or not.
     static func retryable(_ recordings: [RecoverableRecording], now: Date = Date()) -> [RecoverableRecording] {
         recordings.filter {
-            now.timeIntervalSince($0.endedAt) <= automaticWindow && $0.attempts < maxAutomaticAttempts
+            !$0.silent && now.timeIntervalSince($0.endedAt) <= automaticWindow && $0.attempts < maxAutomaticAttempts
         }
     }
 
@@ -153,6 +158,26 @@ enum RecordingRecovery {
         return dateFormatter().date(from: value)
     }
 
+    static func isSilent(forAudio audioPath: String) -> Bool {
+        record(forAudio: audioPath)["terminal"] as? String == noSpeechTerminal
+    }
+
+    static let noSpeechTerminal = "no_speech"
+
+    /// A capture with no speech is final: it uses up the automatic attempts
+    /// at once, so recovery never reloads the models to hear silence again.
+    /// A manual "Transcribir" still runs it.
+    static func recordTerminal(audioPath: String, reason: String, now: Date = Date()) throws {
+        let record: [String: Any] = [
+            "attempts": maxAutomaticAttempts,
+            "last_error": reason,
+            "terminal": noSpeechTerminal,
+            "updated_at": dateFormatter().string(from: now),
+        ]
+        let data = try JSONSerialization.data(withJSONObject: record, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: URL(fileURLWithPath: attemptsPath(forAudio: audioPath)), options: .atomic)
+    }
+
     /// Counts a failed attempt next to the audio so automatic recovery stops
     /// retrying a recording that cannot be transcribed, and saves when the
     /// next automatic attempt is due so the backoff survives a relaunch.
@@ -162,13 +187,18 @@ enum RecordingRecovery {
                               retryDelays: [TimeInterval] = RecordingRecovery.retryDelays,
                               now: Date = Date()) {
         let formatter = dateFormatter()
-        let attempts = attempts(forAudio: audioPath) + (countsAsAttempt ? 1 : 0)
+        let previous = record(forAudio: audioPath)
+        let attempts = (previous["attempts"] as? Int ?? 0) + (countsAsAttempt ? 1 : 0)
         var record: [String: Any] = [
             "attempts": attempts,
             "last_error": reason,
             "updated_at": formatter.string(from: now),
         ]
-        if attempts >= 1, attempts <= retryDelays.count, attempts < maxAutomaticAttempts {
+        // A manual attempt must not remove the only protection left by an
+        // earlier silent retry. Successful completion removes this record.
+        if let terminal = previous["terminal"] as? String {
+            record["terminal"] = terminal
+        } else if attempts >= 1, attempts <= retryDelays.count, attempts < maxAutomaticAttempts {
             record["next_attempt_at"] = formatter.string(from: now.addingTimeInterval(retryDelays[attempts - 1]))
         }
         guard let data = try? JSONSerialization.data(withJSONObject: record, options: [.prettyPrinted, .sortedKeys])

@@ -7,6 +7,59 @@ semantic versioning. The single source of the current version is
 
 ## [Unreleased]
 
+## [7.1.0] - 2026-10-21
+
+### Changed
+- Every transcription runs in a fresh helper process. The menu-bar process
+  never loads recognition/diarization models; concurrent requests queue FIFO.
+  Cancelling a queued request never launches it. EOF and SIGTERM cancel an
+  active worker, with a ten-second shutdown bound even if the parent dies.
+  Inherited same-group pipe owners are cleaned up after worker termination.
+- Words with minimum token confidence below 0.50 carry `[?]` before trailing
+  punctuation. Confidence survives chunk checkpoints; old checkpoints decode
+  with no confidence and are not marked. Aliases preserve uncertainty; `.txt`,
+  SQLite and handoff text keep the marks, which FTS ignores.
+
+### Fixed
+- Fully decoded audio without speech is terminal `noSpeech`: keep the audio,
+  remove chunk work, show a notice, and create no new history row or handoff.
+  It does not exhaust/reload models through automatic retries. Manual
+  transcription remains available, including after a previous partial handoff.
+  Failed chunks still use retryable `emptyOutput`.
+- Installer fixture processes are tracked outside command-substitution
+  subshells and reaped during cleanup; their safety checks no longer leave
+  orphaned sleep processes.
+
+### Evidence and limits
+- No acoustic model was trained or changed. The confidence threshold was
+  selected only on seven dev blocks: 88/9811 words marked (0.90%), precision
+  51.14%, recall 7.67%. Precision varies strongly by source (OpenSLR61 7.14%,
+  MediaSpeech 59.46%). Most errors, and all deletions, stay unmarked.
+  Holdout remains closed; this is not real-meeting accuracy validation.
+- Final same-host 91 s import QA: the candidate's main-process physical
+  footprint stayed near 17 MiB after three jobs; the 7.0.2 probe saw roughly
+  671/820/825 MiB immediately after jobs and 825 MiB after five idle seconds.
+  An earlier baseline run returned to 27 MiB after five seconds, so cleanup
+  timing varied; high RSS alone was not evidence of a leak. The helper's peak
+  RSS was 754 MiB: the worker relocates model memory, not the working set.
+  The three candidate transcripts match the baseline byte for byte after
+  removing doubt markers; added per-job latency was under 0.1 s in both runs.
+- Digital silence (30 s) produces one `noSpeech` result, retains its imported
+  WAV, and creates no transcript or handoff. Import and capture retain the
+  known exact-word failure `pongo` → `puego`; this release does not fix it.
+- Local verification: 159 Swift tests, 13 installer safety cases, 31 dispatcher
+  tests, 15 real-summary checks and four legacy privacy tests passed. Final
+  staging signatures, version, shellcheck and strict hosted-icon smoke (10/10)
+  passed. Real dual-channel capture with diarization completed with two
+  participant labels and zero dropped callbacks; the exact-word gate above
+  still failed. Native QA exercised import, re-transcription, search, the
+  no-speech notice and visible doubt markers without changing the installed app.
+- No new-meeting silver benchmark yet: it requires at least 60 minutes of
+  retained audio. Legacy text-only corrections are separate private copies,
+  not an ASR reference or a migration of the meeting database.
+- Bundles are staged only. Installation and release publication require
+  separate approval.
+
 ## [7.0.2] - 2026-10-21
 
 ### Fixed

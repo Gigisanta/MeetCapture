@@ -468,7 +468,7 @@ extension AppState: PopoverStateModel {
 
     var canRequestAudioPermission: Bool { audioCapture.canRequestPermission() }
     var pendingRecordingCount: Int { recoverableRecordings.count }
-    var exhaustedRecordingCount: Int { recoverableRecordings.filter(\.exhausted).count }
+    var exhaustedRecordingCount: Int { recoverableRecordings.filter { $0.exhausted && !$0.silent }.count }
 
     func requestAudioPermission() { requestMicAccess() }
 
