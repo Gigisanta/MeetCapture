@@ -7,7 +7,7 @@ import Foundation
 enum RecordingOrigin: String, Equatable, Sendable {
     case manual    // user clicked Record: never auto-stopped
     case liveCall  // mic in use by a call app: stops when the call ends
-    case calendar  // calendar meeting: stops at endDate + grace
+    case calendar  // calendar meeting: stops or hands off at endDate + grace
 }
 
 enum AppPhase: String, CaseIterable, Sendable {
@@ -37,8 +37,8 @@ enum MeetingDetectionPolicy {
     }
 
     static func action(callActive: Bool, phase: AppPhase, origin: RecordingOrigin?, autoRecord: Bool) -> Action? {
-        guard autoRecord else { return nil }
         if callActive {
+            guard autoRecord else { return nil }
             switch phase {
             case .idle: return .start(.liveCall)
             case .approaching: return .start(.calendar)
@@ -54,8 +54,14 @@ enum MeetingDetectionPolicy {
         return .start(.calendar)
     }
 
-    static func shouldStopCalendarRecording(meeting: Meeting, now: Date) -> Bool {
-        now > meeting.endDate.addingTimeInterval(calendarEndGrace)
+    enum CalendarEnd: Equatable {
+        case stop
+        case handOffToLiveCall
+    }
+
+    static func calendarEndAction(meeting: Meeting, now: Date, callActive: Bool) -> CalendarEnd? {
+        guard now >= meeting.endDate.addingTimeInterval(calendarEndGrace) else { return nil }
+        return callActive ? .handOffToLiveCall : .stop
     }
 
     static func shouldStopForMaxDuration(elapsed: TimeInterval, maximum: TimeInterval) -> Bool {
