@@ -40,6 +40,7 @@ final class MeetingDetectionPolicyTests: XCTestCase {
     func testCallActivityActions() {
         typealias P = MeetingDetectionPolicy
         XCTAssertNil(P.action(callActive: true, phase: .idle, origin: nil, autoRecord: false))
+        XCTAssertNil(P.action(callActive: true, phase: .approaching, origin: nil, autoRecord: false))
         XCTAssertEqual(P.action(callActive: true, phase: .idle, origin: nil, autoRecord: true), .start(.liveCall))
         XCTAssertEqual(P.action(callActive: true, phase: .approaching, origin: nil, autoRecord: true), .start(.calendar))
         XCTAssertNil(P.action(callActive: true, phase: .recording, origin: .manual, autoRecord: true))
@@ -71,5 +72,9 @@ final class MeetingDetectionPolicyTests: XCTestCase {
         XCTAssertNil(MeetingDetectionPolicy.calendarEndAction(meeting: m, now: now.addingTimeInterval(119), callActive: true))
         XCTAssertEqual(MeetingDetectionPolicy.calendarEndAction(meeting: m, now: now.addingTimeInterval(120), callActive: true), .handOffToLiveCall)
         XCTAssertEqual(MeetingDetectionPolicy.calendarEndAction(meeting: m, now: now.addingTimeInterval(121), callActive: true), .handOffToLiveCall)
+        XCTAssertEqual(MeetingDetectionPolicy.action(callActive: false, phase: .recording, origin: .liveCall, autoRecord: false), .stop,
+                       "disabling automatic starts must not prevent stopping a handed-off recording when the call ends")
+        XCTAssertNil(MeetingDetectionPolicy.action(callActive: false, phase: .recording, origin: .manual, autoRecord: false),
+                     "manual recordings remain exempt from call-end stops")
     }
 }

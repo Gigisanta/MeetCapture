@@ -37,8 +37,8 @@ enum MeetingDetectionPolicy {
     }
 
     static func action(callActive: Bool, phase: AppPhase, origin: RecordingOrigin?, autoRecord: Bool) -> Action? {
-        guard autoRecord else { return nil }
         if callActive {
+            guard autoRecord else { return nil }
             switch phase {
             case .idle: return .start(.liveCall)
             case .approaching: return .start(.calendar)

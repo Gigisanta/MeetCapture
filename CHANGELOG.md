@@ -9,6 +9,7 @@ semantic versioning. The single source of the current version is
 
 ### Fixed
 - A calendar-started recording no longer stops at the event end while the call is still active; it continues as a live-call recording (lost 40 min on 2026-10-23).
+- Disabling automatic recording during a call no longer prevents an existing live-call recording, including one handed off from calendar, from stopping when the call ends.
 
 ## [7.1.0] - 2026-10-21
 
