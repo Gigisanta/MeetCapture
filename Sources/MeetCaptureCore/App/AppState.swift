@@ -709,10 +709,19 @@ final class AppState: ObservableObject {
         if MeetingDetectionPolicy.shouldStopForMaxDuration(elapsed: elapsed, maximum: Settings.maxRecordingDuration) {
             logger.info("duración máxima alcanzada")
             stopRecording()
-        } else if recordingOrigin == .calendar, let meeting = currentMeeting,
-                  MeetingDetectionPolicy.shouldStopCalendarRecording(meeting: meeting, now: Date()) {
-            logger.info("reunión de calendario terminada")
-            stopRecording()
+        } else if recordingOrigin == .calendar, let meeting = currentMeeting {
+            switch MeetingDetectionPolicy.calendarEndAction(meeting: meeting, now: Date(),
+                                                           callActive: callDetector.isCallActive) {
+            case .stop:
+                logger.info("reunión de calendario terminada")
+                stopRecording()
+            case .handOffToLiveCall:
+                recordingOrigin = .liveCall
+                callDetector.reconcileSuspended = false
+                logger.info("Calendar event ended with call active: continuing as live call")
+            case nil:
+                break
+            }
         }
     }
 
