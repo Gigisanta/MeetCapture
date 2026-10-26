@@ -12,6 +12,17 @@ public enum RealPipelineCheck {
         guard let mode = env["MEETCAPTURE_REAL_CHECK"] else { return false }
         var reportURL: URL?
         do {
+            let timeoutSeconds: Int
+            if Bundle.main.bundleIdentifier == "com.maatwork.meetcapture.qa",
+               let value = env["MEETCAPTURE_CHECK_TIMEOUT_SECONDS"] {
+                guard !value.isEmpty, value.utf8.allSatisfy({ $0 >= 48 && $0 <= 57 }),
+                      let parsed = Int(value), (60...7_200).contains(parsed) else {
+                    throw CheckError.failed("MEETCAPTURE_CHECK_TIMEOUT_SECONDS must be an integer from 60 to 7200")
+                }
+                timeoutSeconds = parsed
+            } else {
+                timeoutSeconds = 240
+            }
             guard ["import", "capture", "ui"].contains(mode),
                   let output = env["MEETCAPTURE_TEST_OUTPUT_DIR"],
                   let input = env["MEETCAPTURE_CHECK_INPUT"],
@@ -86,8 +97,8 @@ public enum RealPipelineCheck {
                 }
             }
             Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 240_000_000_000)
-                finish(["status": "failed", "mode": mode, "error": "pipeline exceeded 240 seconds"],
+                try? await Task.sleep(nanoseconds: UInt64(timeoutSeconds) * 1_000_000_000)
+                finish(["status": "failed", "mode": mode, "error": "pipeline exceeded \(timeoutSeconds) seconds"],
                        to: target, code: 1)
             }
             application.run()
@@ -98,10 +109,21 @@ public enum RealPipelineCheck {
         return true
     }
 
+    private static func fileSHA256(_ url: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var hash = SHA256()
+        while let bytes = try handle.read(upToCount: 64 * 1024), !bytes.isEmpty {
+            try Task.checkCancellation()
+            hash.update(data: bytes)
+        }
+        return hash.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
     @MainActor
     private static func run(_ app: AppState, mode: String, source: URL) async throws -> [String: Any] {
         let start = Date()
-        let original = try Data(contentsOf: source)
+        let originalHash = try fileSHA256(source)
         let duration = PCMToWAV.wavDurationSeconds(source.path)
         var capture: [String: Any] = [:]
         if mode == "capture" {
@@ -140,7 +162,7 @@ public enum RealPipelineCheck {
             }
         }
         try requireDone(app)
-        guard try Data(contentsOf: source) == original else { throw CheckError.failed("source audio changed") }
+        guard try fileSHA256(source) == originalHash else { throw CheckError.failed("source audio changed") }
         let reopened = MeetingStore(path: app.paths.databasePath)
         let history = reopened.recent(limit: 10)
         guard history.count == (mode == "capture" ? 1 : 3),
