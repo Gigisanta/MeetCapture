@@ -6,7 +6,7 @@
 import Foundation
 
 struct Meeting: Identifiable, Equatable, Sendable {
-    let id: String
+    let id: String?
     let title: String
     let startDate: Date
     let endDate: Date
@@ -17,27 +17,15 @@ struct Meeting: Identifiable, Equatable, Sendable {
     func isActive(now: Date = Date()) -> Bool { startDate <= now && endDate > now }
 }
 
-struct CalendarEventSnapshot: Equatable, Sendable {
-    struct Attendee: Equatable, Sendable {
-        var email: String
-        var isCurrentUser: Bool
-    }
-    var id: String
-    var title: String?
-    var start: Date
-    var end: Date
-    var url: URL?
-    var notes: String?
-    var attendees: [Attendee]
-}
 
 enum MeetingFilter {
-    static let meetURLPattern = #"https?://meet\.google\.com/[a-z0-9]+-[a-z0-9]+-[a-z0-9]+"#
+    private static let meetNotesPattern = try! NSRegularExpression(
+        pattern: #"https?://meet\.google\.com/[a-z0-9]+-[a-z0-9]+-[a-z0-9]+"#)
 
     static func meeting(from event: CalendarEventSnapshot, whitelist: Set<String>) -> Meeting? {
         guard let url = meetURL(in: event) else { return nil }
         let external = event.attendees.compactMap { attendee -> String? in
-            let email = attendee.email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard let email = attendee.email?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() else { return nil }
             guard !email.isEmpty, !attendee.isCurrentUser, !whitelist.contains(email) else { return nil }
             return email
         }
@@ -47,14 +35,17 @@ enum MeetingFilter {
     }
 
     static func meetURL(in event: CalendarEventSnapshot) -> URL? {
-        if let url = event.url,
-           let host = url.host?.lowercased(),
-           host == "meet.google.com" {
-            return url
+        if let url = event.url, ConferenceURL.platform(for: url) == .meet { return url }
+        guard let notes = event.notes else { return nil }
+        for url in ConferenceURL.urls(in: notes) where ConferenceURL.platform(for: url) == .meet {
+            let raw = url.absoluteString
+            let range = NSRange(raw.startIndex..<raw.endIndex, in: raw)
+            if let match = meetNotesPattern.firstMatch(in: raw, range: range),
+               let matchRange = Range(match.range, in: raw) {
+                return URL(string: String(raw[matchRange]))
+            }
         }
-        guard let notes = event.notes,
-              let range = notes.range(of: meetURLPattern, options: .regularExpression) else { return nil }
-        return URL(string: String(notes[range]))
+        return nil
     }
 
     /// Meetings sorted by start, dropping the ones that already ended.

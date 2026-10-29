@@ -220,7 +220,9 @@ final class AppState: ObservableObject {
             requestMicAccess(thenStart: origin)
             return
         }
-        let session = MeetingSession(startedAt: Date(), title: currentMeeting?.title)
+        let startedAt = Date()
+        let context = calendarService.captureContext(at: startedAt, activeBundleIDs: callDetector.activeCallBundleIDs())
+        let session = MeetingSession(startedAt: startedAt, title: context.calendarEvent?.title, context: context)
         self.session = session
         meetingNotes = ""
         isStartingRecording = true
@@ -239,7 +241,13 @@ final class AppState: ObservableObject {
         stopRequested = false
         recordingStartTask = Task { @MainActor [weak self] in
             guard let self else { return }
+            defer {
+                if !FileManager.default.fileExists(atPath: outputPath) {
+                    try? FileManager.default.removeItem(atPath: MeetingSession.metadataPath(forAudio: outputPath))
+                }
+            }
             do {
+                try session.write(forAudio: outputPath)
                 try await self.recordingDriver.start(outputPath, configuration)
             } catch is CancellationError {
                 guard self.session?.id == session.id else { return }
@@ -377,6 +385,7 @@ final class AppState: ObservableObject {
             finalInput.engine = outcome.engineUsed
             finalInput.model = outcome.modelUsed
             finalInput.audioDurationSec = outcome.audioDurationSec
+            finalInput.quality = outcome.quality
             finalInput.partial = outcome.failedChunks > 0
             if finalInput.partial { try RecordingRecovery.markGaps(audioPath: audioPath, chunks: outcome.failedChunks) }
             let result = try await postProcessor.run(finalInput)
@@ -441,8 +450,17 @@ final class AppState: ObservableObject {
         phase = .transcribing
         transcriptionProgress = 0
         do {
+            let source = try existingSession(audioPath: url.path, startedAt: Date(), fallbackTitle: nil)
             let prepared = try await AudioImporter.prepare(url: url, importsDir: paths.importsDir)
-            let session = MeetingSession(startedAt: Date(), title: prepared.title)
+            let importedAt = Date()
+            let session = MeetingSession(
+                startedAt: source?.startedAt ?? importedAt,
+                title: source == nil ? prepared.title : source?.title,
+                context: source?.context ?? .unmatched(),
+                supersedesMeetingId: source.map { $0.supersedesMeetingId ?? $0.id },
+                sourceAudioEndedAt: source?.sourceAudioEndedAt ?? (source == nil ? importedAt : nil),
+                startedAtIsAuthoritative: source?.startedAtIsAuthoritative)
+            try session.write(forAudio: prepared.durableAudioPath)
             self.session = session
             await transcribe(session: session, audioPath: prepared.workPath,
                              durableAudioPath: prepared.durableAudioPath,
@@ -464,23 +482,36 @@ final class AppState: ObservableObject {
         guard FileManager.default.fileExists(atPath: audio) else { errorMessage = Strings.errorAudioGone; return }
         // Two jobs on one capture would share and delete each other's channel WAVs.
         guard audio != recoveringPath else { errorMessage = Strings.errorAudioRecovering; return }
-        if let session = captureSession(audioPath: audio, startedAt: Date(),
-                                        fallbackTitle: self.session?.title ?? Strings.retranscription) {
-            // A capture is redone in place: same transcript, history row and handoff.
+        do {
+            let source = try existingSession(audioPath: audio, startedAt: Date(), fallbackTitle: nil)
+            let isCapture = (audio as NSString).deletingLastPathComponent == paths.transcriptsDir
+                && RecordingRecovery.sessionId(forAudio: audio) != nil
+            let session: MeetingSession
+            let transcript: String
+            if isCapture {
+                session = source ?? MeetingSession(startedAt: Date())
+                transcript = RecordingRecovery.transcriptPath(forAudio: audio)
+                activeCapturePath = audio
+            } else {
+                let importedAt = Date()
+                session = MeetingSession(
+                    startedAt: source?.startedAt ?? importedAt, title: source?.title,
+                    context: source?.context ?? .unmatched(),
+                    supersedesMeetingId: source.map { $0.supersedesMeetingId ?? $0.id },
+                    sourceAudioEndedAt: source?.sourceAudioEndedAt ?? (source == nil ? importedAt : nil),
+                    startedAtIsAuthoritative: source?.startedAtIsAuthoritative)
+                transcript = "\(paths.transcriptsDir)/\(session.id).txt"
+                try session.write(forAudio: audio)
+            }
             self.session = session
-            activeCapturePath = audio
             await transcribe(session: session, audioPath: audio, durableAudioPath: audio,
-                             transcriptPath: RecordingRecovery.transcriptPath(forAudio: audio), applyRetention: true)
+                             transcriptPath: transcript, applyRetention: isCapture)
             if activeCapturePath == audio { activeCapturePath = nil }
             scanRecoverableRecordings()
             scheduleRecoveryWake()
-            return
+        } catch {
+            errorMessage = Strings.errorImport(error.localizedDescription)
         }
-        let session = MeetingSession(startedAt: Date(), title: session?.title ?? Strings.retranscription)
-        self.session = session
-        await transcribe(session: session, audioPath: audio, durableAudioPath: audio,
-                         transcriptPath: "\(paths.transcriptsDir)/\(session.id).txt",
-                         applyRetention: false)
     }
 
     // MARK: - Recovery
@@ -539,11 +570,12 @@ final class AppState: ObservableObject {
         // Count the attempt up front so a crash mid-job also counts.
         RecordingRecovery.recordFailure(audioPath: recording.audioPath, reason: "attempt started",
                                         retryDelays: recoveryRetryDelays)
-        let session = captureSession(audioPath: recording.audioPath, startedAt: recording.startedAt,
-                                     fallbackTitle: Strings.recoveredRecording)
-            ?? MeetingSession(startedAt: recording.startedAt, title: Strings.recoveredRecording)
-        let job = makeJob(audioPath: recording.audioPath, captureSampleRate: 16_000)
+        var recoveryTitle = Strings.recoveredRecording
         do {
+            let session = try existingSession(audioPath: recording.audioPath, startedAt: recording.startedAt, fallbackTitle: nil)
+                ?? MeetingSession(startedAt: recording.startedAt)
+            recoveryTitle = session.displayTitle
+            let job = makeJob(audioPath: recording.audioPath, captureSampleRate: 16_000)
             let outcome = try await transcriptionRunner(job) { _ in }
             try Task.checkCancellation()
             let input = PostProcessInput(
@@ -553,6 +585,7 @@ final class AppState: ObservableObject {
                 applyRetention: true, retention: Settings.retention, meetingsDir: paths.meetingsDir,
                 audioDurationSec: outcome.audioDurationSec, audioEndedAt: recording.endedAt)
             var finalInput = input
+            finalInput.quality = outcome.quality
             finalInput.partial = outcome.failedChunks > 0
             if finalInput.partial {
                 try RecordingRecovery.markGaps(audioPath: recording.audioPath, chunks: outcome.failedChunks)
@@ -578,7 +611,7 @@ final class AppState: ObservableObject {
             logger.error("recuperación falló: \(error.localizedDescription, privacy: .public)")
             // The attempt was already counted when it started.
             await recordRecoveryFailure(audioPath: recording.audioPath, reason: error.localizedDescription,
-                                        countsAsAttempt: false, title: session.displayTitle)
+                                        countsAsAttempt: false, title: recoveryTitle)
         }
         recoveringPath = nil
     }
@@ -636,14 +669,71 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// The session a capture was recorded under, keeping the title its
-    /// history row already has; nil for audio that is not a capture.
-    private func captureSession(audioPath: String, startedAt: Date, fallbackTitle: String?) -> MeetingSession? {
+    /// Persisted evidence wins over today's calendar. Legacy audio may reuse
+    /// an identity only when its exact transcript or canonical capture is known.
+    private func existingSession(audioPath: String, startedAt: Date, fallbackTitle: String?) throws -> MeetingSession? {
+        if var saved = try MeetingSession.read(forAudio: audioPath) {
+            if let existing = store.summary(id: saved.id) {
+                saved.startedAt = existing.startedAt
+                saved.title = existing.title
+                saved.startedAtIsAuthoritative = true
+                saved.sourceAudioEndedAt = nil
+            } else if saved.startedAtIsAuthoritative != true, saved.sourceAudioEndedAt == nil,
+                      audioPath.hasSuffix(".pcm") {
+                saved.sourceAudioEndedAt = RecordingRecovery.modificationDate(audioPath)
+            }
+            return saved
+        }
+        let transcript = URL(fileURLWithPath: audioPath).deletingPathExtension().appendingPathExtension("txt").path
+        if let existing = store.summary(transcriptPath: transcript) {
+            return MeetingSession(
+                id: existing.id, startedAt: existing.startedAt, title: existing.title,
+                supersedesMeetingId: existingSupersedesMeetingId(id: existing.id, transcriptPath: transcript),
+                startedAtIsAuthoritative: true)
+        }
         guard (audioPath as NSString).deletingLastPathComponent == paths.transcriptsDir,
               let id = RecordingRecovery.sessionId(forAudio: audioPath) else { return nil }
-        let existing = store.record(id: id)
-        return MeetingSession(id: id, startedAt: existing?.startedAt ?? startedAt,
-                              title: existing?.title ?? fallbackTitle)
+        let existing = store.summary(id: id)
+        let audioEndedAt = RecordingRecovery.modificationDate(audioPath)
+        // The sidecar may have been recreated. Without saved metadata/history,
+        // only the PCM's last write can anchor the measured audio span.
+        let capturedAt = existing?.startedAt ?? min(
+            RecordingRecovery.modificationDate(AudioFormatSidecar.path(forAudio: audioPath)) ?? startedAt,
+            audioEndedAt ?? startedAt)
+        return MeetingSession(
+            id: id, startedAt: capturedAt, title: existing?.title ?? fallbackTitle,
+            supersedesMeetingId: existingSupersedesMeetingId(id: id, transcriptPath: transcript),
+            sourceAudioEndedAt: existing == nil ? audioEndedAt : nil,
+            startedAtIsAuthoritative: existing != nil)
+    }
+
+    private struct ExistingHandoff: Decodable {
+        var version: Int
+        var meetingId: String
+        var transcriptPath: String
+        var supersedesMeetingId: String?
+    }
+
+    /// A legacy handoff supplies ancestry, not calendar or clock evidence.
+    /// Read only the known id's files, and require their exact transcript link.
+    private func existingSupersedesMeetingId(id: String, transcriptPath: String) -> String? {
+        guard !id.isEmpty, id != ".", id != "..",
+              (id as NSString).lastPathComponent == id else { return nil }
+        var root: String?
+        for suffix in ["pending", "done"] {
+            let url = URL(fileURLWithPath: paths.meetingsDir).appendingPathComponent("\(id).\(suffix)")
+            guard let data = try? Data(contentsOf: url),
+                  let handoff = try? JSONDecoder().decode(ExistingHandoff.self, from: data),
+                  (2...3).contains(handoff.version), handoff.meetingId == id,
+                  handoff.transcriptPath == transcriptPath,
+                  let supersedes = handoff.supersedesMeetingId,
+                  !supersedes.isEmpty, supersedes != id,
+                  supersedes != ".", supersedes != "..",
+                  (supersedes as NSString).lastPathComponent == supersedes else { continue }
+            if let root, root != supersedes { return nil }
+            root = supersedes
+        }
+        return root
     }
 
     private static func gapReason(_ chunks: Int) -> String { "\(chunks) fragmento(s) sin transcribir" }

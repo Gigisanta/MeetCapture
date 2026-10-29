@@ -33,7 +33,8 @@ enum AudioImporter {
             let durable = uniquePath(base + ".pcm")
             let jobBase = URL(fileURLWithPath: durable).deletingPathExtension().path
             try fm.copyItem(at: url, to: URL(fileURLWithPath: durable))
-            try AudioFormatSidecar.imported().write(forAudio: durable)
+            let format = AudioFormatSidecar.read(forAudio: url.path) ?? .imported()
+            try format.write(forAudio: durable)
             return PreparedImport(workPath: durable, durableAudioPath: durable,
                                   transcriptPath: jobBase + ".txt", title: title)
         }
@@ -82,6 +83,7 @@ enum AudioImporter {
         let fm = FileManager.default
         guard !fm.fileExists(atPath: audioPath) else { return true }
         guard !fm.fileExists(atPath: AudioFormatSidecar.path(forAudio: audioPath)) else { return true }
+        guard !fm.fileExists(atPath: MeetingSession.metadataPath(forAudio: audioPath)) else { return true }
 
         let url = URL(fileURLWithPath: audioPath)
         let transcriptPath = url.deletingPathExtension().path + ".txt"

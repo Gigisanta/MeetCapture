@@ -2,7 +2,7 @@
 
 This directory contains the canonical summary implementation:
 `meetcapture_summary_dispatcher.py`. It is a stdlib-only Python consumer of
-MeetCapture's version 2 `.pending` handoff. It validates the contract and
+MeetCapture's version 2 or 3 `.pending` handoff. It validates the contract and
 transcript checksum, writes `<meeting-id>.summary.json` and
 `<meeting-id>.summary.html`, and then acknowledges the handoff as `.done`.
 

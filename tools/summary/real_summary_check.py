@@ -444,7 +444,7 @@ def _make_fixture(root: Path, keep_audio: bool, model: str) -> dict:
 
 
 class FixtureError(RuntimeError):
-    """The supplied handoff fixture is not safe or not a v2 corpus."""
+    """The supplied handoff fixture is not safe or has an unsupported schema."""
 
 
 def _confined_path(root: Path, value: object) -> Path:
@@ -520,8 +520,8 @@ def _existing_fixture(root: Path, temp_root: Path, model: str) -> dict:
         except (OSError, ValueError) as exc:
             raise FixtureError("no se pudo leer %s: %s" % (pending.name, exc)) from exc
         base = pending.name[: -len(".pending")]
-        if contract.get("version") != 2 or contract.get("meetingId") != base:
-            raise FixtureError("handoff v2 inválido: %s" % pending.name)
+        if contract.get("version") not in (2, 3) or contract.get("meetingId") != base:
+            raise FixtureError("handoff v2/v3 inválido: %s" % pending.name)
         transcript = _confined_path(root, contract.get("transcriptPath"))
         if not transcript.is_file():
             raise FixtureError("transcript ausente: %s" % transcript)
@@ -835,7 +835,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default=DEFAULT_MODEL, help="alias del gateway (default: %(default)s)")
     parser.add_argument(
         "--fixture-dir",
-        help="procesa .pending v2 existentes en una fixture /tmp/meetcapture-real.* sin recrearlos",
+        help="procesa .pending v2/v3 existentes en una fixture /tmp/meetcapture-real.* sin recrearlos",
     )
     return parser
 

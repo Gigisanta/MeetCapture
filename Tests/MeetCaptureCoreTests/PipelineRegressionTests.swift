@@ -49,9 +49,7 @@ final class PipelineRegressionTests: XCTestCase {
         do {
             _ = try await post.run(value, now: TestSupport.fixedDate.addingTimeInterval(30))
             XCTFail("an empty transcript must be rejected")
-        } catch let error as PostProcessError {
-            XCTAssertTrue(error.localizedDescription.contains("no produjo texto"))
-        }
+        } catch PostProcessError.emptyTranscript {}
 
         XCTAssertTrue(FileManager.default.fileExists(atPath: capture))
         XCTAssertTrue(FileManager.default.fileExists(atPath: AudioFormatSidecar.path(forAudio: capture)))
@@ -76,9 +74,7 @@ final class PipelineRegressionTests: XCTestCase {
         do {
             _ = try await PostProcessor(store: store).run(value, now: TestSupport.fixedDate.addingTimeInterval(30))
             XCTFail("the invalid store must reject the durable write")
-        } catch let error as PostProcessError {
-            XCTAssertTrue(error.localizedDescription.contains("historial"))
-        }
+        } catch PostProcessError.storeWriteFailed {}
 
         XCTAssertTrue(FileManager.default.fileExists(atPath: capture))
         XCTAssertTrue(FileManager.default.fileExists(atPath: AudioFormatSidecar.path(forAudio: capture)))
@@ -101,9 +97,7 @@ final class PipelineRegressionTests: XCTestCase {
         do {
             _ = try await PostProcessor(store: store).run(value, now: TestSupport.fixedDate.addingTimeInterval(30))
             XCTFail("a marker path that is a directory must fail")
-        } catch let error as PostProcessError {
-            XCTAssertTrue(error.localizedDescription.contains("marker"))
-        }
+        } catch PostProcessError.markerWriteFailed {}
 
         XCTAssertEqual(store.count(), 1, "the store write precedes marker publication")
         XCTAssertTrue(FileManager.default.fileExists(atPath: capture))

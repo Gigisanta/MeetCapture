@@ -29,6 +29,19 @@ final class MeetingFilterTests: XCTestCase {
         XCTAssertEqual(MeetingFilter.meeting(from: e, whitelist: [])?.externalAttendees, ["colleague@example.com"])
     }
 
+    func testMissingCalendarIDAndUnknownAttendeeDoNotDisableAutomaticPolicy() throws {
+        var snapshot = event(url: URL(string: "https://meet.google.com/abc-defg-hij"), attendees: [
+            .init(name: "Unknown account", email: nil, isCurrentUser: false),
+            .init(email: "Guest@Client.test", isCurrentUser: false),
+        ])
+        snapshot.id = nil
+        snapshot.start = now.addingTimeInterval(60)
+        let meeting = try XCTUnwrap(MeetingFilter.meeting(from: snapshot, whitelist: []))
+        XCTAssertNil(meeting.id, "an absent calendar ID is never replaced by a fabricated identifier")
+        XCTAssertEqual(meeting.externalAttendees, ["guest@client.test"])
+        XCTAssertNotNil(MeetingDetectionPolicy.approachingMeeting(in: [meeting], now: now))
+    }
+
     func testUpcomingDropsEndedAndSortsByStart() {
         func m(_ id: String, _ start: TimeInterval, _ end: TimeInterval) -> Meeting {
             Meeting(id: id, title: id, startDate: now.addingTimeInterval(start), endDate: now.addingTimeInterval(end),

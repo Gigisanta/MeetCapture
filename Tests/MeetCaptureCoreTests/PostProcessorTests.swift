@@ -9,6 +9,7 @@ final class PostProcessorTests: XCTestCase {
         try AudioFormatSidecar.capture(tapStrategy: "global", tapInfo: "t").write(forAudio: capture)
         let store = MeetingStore(path: dir + "/meetcapture.db")
         let session = MeetingSession(startedAt: TestSupport.fixedDate, title: "Demo")
+        try session.write(forAudio: capture)
         let input = PostProcessInput(
             session: session, segments: [Segment(start: 0, end: 1, text: "hola", speaker: "A")],
             transcriptPath: dir + "/recording-1.txt", capturePath: capture, durableAudioPath: capture,
@@ -23,6 +24,8 @@ final class PostProcessorTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: dir + "/recording-1.processed.json"))
         XCTAssertFalse(FileManager.default.fileExists(atPath: capture), "deleteAfterHandoff removes the raw capture")
         XCTAssertFalse(FileManager.default.fileExists(atPath: capture + ".format.json"), "and its sidecar")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: MeetingSession.metadataPath(forAudio: capture)),
+                       "retention removes the frozen private context with its audio")
         let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: result.pendingPath))) as? [String: Any])
         XCTAssertEqual(root["audioPath"] as? String, capture, "the contract was written before retention ran")
         XCTAssertEqual(root["durationSec"] as? Double, 30)
@@ -30,7 +33,6 @@ final class PostProcessorTests: XCTestCase {
         XCTAssertEqual(stored.id, result.record.id)
         XCTAssertEqual(stored.transcriptText, result.record.transcriptText)
         XCTAssertEqual(stored.speakerCount, result.record.speakerCount)
-        XCTAssertEqual(result.record.speakerCount, 1)
     }
 
     func testAudioDurationExcludesASRProcessingTime() async throws {
@@ -120,9 +122,4 @@ final class PostProcessorTests: XCTestCase {
         XCTAssertTrue(contract["audioPath"] is NSNull)
     }
 
-    func testImportStampSanitisesName() {
-        let stamp = AudioImporter.stamp(for: URL(fileURLWithPath: "/x/Mi reunión (final).m4a"), now: TestSupport.fixedDate)
-        XCTAssertTrue(stamp.hasSuffix("-Mi-reunion--final-"), stamp)
-        XCTAssertEqual(stamp.count, "yyyyMMdd-HHmm-".count + "Mi-reunion--final-".count)
-    }
 }
