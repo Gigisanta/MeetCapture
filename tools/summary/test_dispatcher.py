@@ -81,7 +81,8 @@ class DispatcherTests(unittest.TestCase):
         return sorted(n for n in os.listdir(MEETINGS) if not n.startswith("."))
 
     def test_pending_becomes_done_with_artifacts(self):
-        _contract("meet-1")
+        _contract("meet-1", version=3, calendarEvent=None, calendarMatch="none", platform="unknown",
+                  timeZone="America/Argentina/Buenos_Aires", speakerMap={}, quality=None)
         self.assertEqual(mod.run_once(self.cfg), 1)
         self.assertIn("meet-1.done", self.names())
         self.assertIn("meet-1.summary.json", self.names())

@@ -1,6 +1,6 @@
 // PostProcessor.swift
 // Everything that happens after the engine returns segments, off the main
-// actor: .txt → SQLite → processed marker → .pending v2 → retention.
+// actor: .txt → frozen meeting evidence → SQLite → local marker → .pending v3 → retention.
 
 import Foundation
 
@@ -24,6 +24,7 @@ struct PostProcessInput: Sendable {
     /// retention is skipped and the handoff leaves `audioPath` null: the
     /// summary dispatcher must not delete audio a retry still needs.
     var partial = false
+    var quality: TranscriptionQuality? = nil
 }
 
 struct PostProcessResult: Sendable {
@@ -70,19 +71,36 @@ actor PostProcessor {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw PostProcessError.emptyTranscript
         }
-        let endedAt = input.audioEndedAt ?? now
-        let duration = input.audioDurationSec ?? endedAt.timeIntervalSince(input.session.startedAt)
+        let observedEnd = input.session.sourceAudioEndedAt ?? input.audioEndedAt ?? now
+        let duration = input.audioDurationSec ?? observedEnd.timeIntervalSince(input.session.startedAt)
         guard duration.isFinite, duration >= 0 else { throw PostProcessError.invalidDuration }
         var session = input.session
-        session.startedAt = endedAt.addingTimeInterval(-duration)
+        // A sidecar written before the driver starts is not start evidence.
+        // Only history or an explicitly accredited source clock preserves it.
+        let sourceStart: Date?
+        if input.audioDurationSec != nil {
+            sourceStart = store.summary(id: session.id)?.startedAt
+                ?? (session.startedAtIsAuthoritative == true ? session.startedAt : nil)
+        } else {
+            sourceStart = nil
+        }
+        let endedAt = sourceStart?.addingTimeInterval(duration) ?? observedEnd
+        session.startedAt = sourceStart ?? endedAt.addingTimeInterval(-duration)
+        if input.audioDurationSec != nil {
+            session.sourceAudioEndedAt = nil
+            session.startedAtIsAuthoritative = true
+        }
         let speakerCount = TranscriptFormatter.speakerCount(segments)
 
         let transcriptURL = URL(fileURLWithPath: input.transcriptPath)
         try AppPaths.ensurePrivateDirectory(transcriptURL.deletingLastPathComponent().path)
         try text.write(to: URL(fileURLWithPath: input.transcriptPath), atomically: true, encoding: .utf8)
+        if FileManager.default.fileExists(atPath: input.durableAudioPath) {
+            try session.write(forAudio: input.durableAudioPath)
+        }
 
         let record = MeetingRecord(
-            id: input.session.id, title: input.session.displayTitle,
+            id: session.id, title: session.displayTitle,
             startedAt: session.startedAt, endedAt: endedAt,
             durationSec: duration,
             engine: input.engine.rawValue, model: input.model, language: input.language,
@@ -93,7 +111,7 @@ actor PostProcessor {
         guard store.insert(record) else { throw PostProcessError.storeWriteFailed }
 
         do {
-            try ProcessedMarker.write(transcriptPath: input.transcriptPath, title: input.session.displayTitle, now: now)
+            try ProcessedMarker.write(transcriptPath: input.transcriptPath, title: session.displayTitle, now: now)
         } catch {
             let reason = error.localizedDescription
             logger.error("marker: \(reason, privacy: .public)")
@@ -103,10 +121,10 @@ actor PostProcessor {
         // This is the publication point observed by the summary dispatcher.
         // It must be last among local durable writes so a failed store/marker
         // can never expose a handoff that invites external cleanup.
-        let contract = PendingContractV2(
+        let contract = PendingContract(
             session: session, endedAt: endedAt, transcriptPath: input.transcriptPath,
             transcriptText: text, audioPath: input.partial ? nil : input.durableAudioPath, engine: input.engine,
-            model: input.model, language: input.language, segments: segments)
+            model: input.model, language: input.language, segments: segments, quality: input.quality)
         let pendingPath = input.session.pendingPath(in: input.meetingsDir)
         try contract.write(to: pendingPath)
 

@@ -2,7 +2,7 @@
 
 ## Source-first distribution contract
 
-7.1.0 is distributed as pinned source for a local build. The canonical public
+7.2.0 is distributed as pinned source for a local build. The canonical public
 installation instructions are in `README.md`; they must name the published
 release tag, not `main`. Do not label a tag or release as available before it
 exists on GitHub.
@@ -24,7 +24,7 @@ provisioned Developer ID/notarization workflow and verification on another Mac.
 
 Release notes must disclose the optional summary endpoint's text egress,
 the source-build prerequisites, permissions, backup/rollback path and known
-ASR limits. In particular, 7.1.0 does not retrain the model or establish a WER
+ASR limits. In particular, 7.2.0 does not retrain the model or establish a WER
 improvement, the `pongo` → `puego` reference failure remains, confidence marks
 miss most errors, and a retained real-meeting benchmark is still unavailable.
 Do not turn historical text-only corrections or unit-test counts into
@@ -173,6 +173,12 @@ accuracy claims.
    auto-report or emit PASS. The harness must avoid calendar/automatic
    operations and persistent UserDefaults.
 
+   Producer-v3 evidence and ancestry checks also stay entirely in temporary
+   AppPaths. Never reimport production recordings into `~/meetings` as QA:
+   a live consumer may create external work for every new id. Intentional
+   production improvements require explicit authorization and a verified
+   `supersedesMeetingId` carried through `.done`.
+
    Treat exit `77` as blocked by a prerequisite and exit `1` as a failure.
    Exit `0` means the selected pipeline completed; the import/capture wrapper
    then validates the report and WER/reference before returning a release
@@ -188,13 +194,13 @@ accuracy claims.
 5. After the reviewed changes have been merged and the evidence above is
    accepted, tag the exact reviewed commit and publish its source release.
    Check that the version metadata, changelog, release title and README
-   installation tag all agree on `7.1.0` / `v7.1.0`. Tagging and publication
+   installation tag all agree on `7.2.0` / `v7.2.0`. Tagging and publication
    are production actions, separate from building a staged app:
 
    ```bash
-   git tag -a v7.1.0 <reviewed-merge-commit> -m "MeetCapture 7.1.0"
-   git push origin v7.1.0
-   gh release create v7.1.0 --verify-tag --title "MeetCapture 7.1.0" --notes-file <reviewed-release-notes>
+   git tag -a v7.2.0 <reviewed-merge-commit> -m "MeetCapture 7.2.0"
+   git push origin v7.2.0
+   gh release create v7.2.0 --verify-tag --title "MeetCapture 7.2.0" --notes-file <reviewed-release-notes>
    ```
 
    Review the release notes before sending them; include only measured

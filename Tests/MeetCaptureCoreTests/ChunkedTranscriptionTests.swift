@@ -112,6 +112,13 @@ final class ChunkedTranscriptionTests: XCTestCase {
         XCTAssertEqual(first.failedChunks, 1)
         XCTAssertEqual(first.words.map(\.text), ["hola"])
         XCTAssertEqual(first.gaps.map(\.text), ["[fragmento sin transcribir 00:05:00–00:11:40]"])
+        XCTAssertEqual(first.quality.audioDurationSec, 700)
+        XCTAssertEqual(try XCTUnwrap(first.quality.decodingCoverage), 300.0 / 700.0, accuracy: 1e-12)
+        XCTAssertEqual(first.quality.decodedDurationSec, 300, "coverage is the processed audio, not the one second of words")
+        XCTAssertEqual(first.quality.silenceSkippedDurationSec, 0)
+        XCTAssertEqual(first.quality.failedChunks, [.init(start: 300, end: 700)])
+        XCTAssertEqual(first.quality.unmeasuredIntervals, [])
+        XCTAssertNil(first.quality.bleedGate)
         let firstCalls = await failing.calls
         XCTAssertEqual(firstCalls, 3, "a failed chunk is tried twice")
 
@@ -123,6 +130,24 @@ final class ChunkedTranscriptionTests: XCTestCase {
                                       Segment(start: 303, end: 304, text: "chau")])
         let secondCalls = await healthy.calls
         XCTAssertEqual(secondCalls, 1, "chunk 0 came from its checkpoint")
+        XCTAssertEqual(second.quality.decodingCoverage, 1)
+        XCTAssertEqual(second.quality.decodedDurationSec, 700, "cached measurements and newly decoded samples both count")
+        XCTAssertEqual(second.quality.failedChunks, [])
+
+        // A pre-metadata word-array checkpoint remains valid, but its missing
+        // measured sample counts cannot turn into full/zero coverage.
+        let legacy = URL(fileURLWithPath: dir + "/work/remote/chunk-000.json")
+        try JSONEncoder().encode([Segment(start: 1, end: 2, text: "hola")]).write(to: legacy)
+        let unused = FakeRecognizer { _, _ in throw FakeEngineError() }
+        let fromLegacy = try await run(wav, dir, unused)
+        XCTAssertEqual(fromLegacy.words, second.words)
+        XCTAssertNil(fromLegacy.quality.decodingCoverage)
+        XCTAssertNil(fromLegacy.quality.decodedDurationSec)
+        XCTAssertNil(fromLegacy.quality.silenceSkippedDurationSec)
+        XCTAssertEqual(fromLegacy.quality.unmeasuredIntervals, [.init(start: 0, end: 300)])
+        XCTAssertEqual(fromLegacy.quality.failedChunks, [])
+        let legacyCalls = await unused.calls
+        XCTAssertEqual(legacyCalls, 0, "missing metrics never invalidate valid words")
     }
 
     func testLanguageChangeInvalidatesCheckpoints() async throws {
@@ -209,15 +234,26 @@ final class ChunkedTranscriptionTests: XCTestCase {
                        "a short AVAudioFile read must not drop the end of a chunk")
     }
 
-    func testSilentChunksSkipTheEngine() async throws {
-        let dir = TestSupport.makeTempDir(self, "chunk-silent")
-        let wav = URL(fileURLWithPath: dir + "/silence.wav")
-        try WAVFixture.write([Int16](repeating: 0, count: 10 * rate), to: wav)
-        let recognizer = FakeRecognizer { _, _ in [Segment(start: 0, end: 1, text: "inventado")] }
-        let result = try await run(wav, dir, recognizer)
-        XCTAssertEqual(result.words, [])
-        let calls = await recognizer.calls
-        XCTAssertEqual(calls, 0)
+    func testEmptyResultsDistinguishDecodedAudioFromSkippedSilenceAcrossResume() async throws {
+        for silent in [true, false] {
+            let dir = TestSupport.makeTempDir(self, "chunk-empty-\(silent)")
+            let wav = URL(fileURLWithPath: dir + "/empty.wav")
+            try WAVFixture.write(silent ? [Int16](repeating: 0, count: 10 * rate) : WAVFixture.tone(seconds: 10), to: wav)
+            let recognizer = FakeRecognizer { _, _ in [] }
+            let result = try await run(wav, dir, recognizer)
+            XCTAssertEqual(result.words, [])
+            XCTAssertEqual(result.quality.decodingCoverage, 1)
+            XCTAssertEqual(result.quality.decodedDurationSec, silent ? 0 : 10)
+            XCTAssertEqual(result.quality.silenceSkippedDurationSec, silent ? 10 : 0)
+            let calls = await recognizer.calls
+            XCTAssertEqual(calls, silent ? 0 : 1)
+
+            let unused = FakeRecognizer { _, _ in throw FakeEngineError() }
+            let resumed = try await run(wav, dir, unused)
+            XCTAssertEqual(resumed.quality, result.quality, "an empty word list does not erase its decoding/silence evidence")
+            let resumedCalls = await unused.calls
+            XCTAssertEqual(resumedCalls, 0)
+        }
     }
 
     func testChangedAudioInvalidatesCheckpointsIncludingSameSizeEdits() async throws {
@@ -250,6 +286,8 @@ final class ChunkedTranscriptionTests: XCTestCase {
         let firstRecognizer = FakeRecognizer { _, _ in [Segment(start: 0, end: 1, text: "before gate")] }
         let before = try await run(micURL, dir, bytes: 1, gateReference: systemURL, firstRecognizer)
         XCTAssertEqual(before.words.map(\.text), ["before gate"])
+        XCTAssertEqual(before.quality.bleedGate?.gatedSamples, 0)
+        XCTAssertEqual(before.quality.bleedGate?.complete, true)
         // Same byte count, but now the reference proves this mic signal is bleed.
         try WAVFixture.write(system, to: systemURL)
         let recognizer = FakeRecognizer { _, samples in
@@ -258,6 +296,65 @@ final class ChunkedTranscriptionTests: XCTestCase {
         let result = try await run(micURL, dir, bytes: 1, gateReference: systemURL, recognizer)
         XCTAssertEqual(result.words, [], "a fully gated chunk is silent and never reaches the engine")
         let calls = await recognizer.calls
+        XCTAssertEqual(calls, 0)
+        XCTAssertEqual(result.quality.decodingCoverage, 1)
+        XCTAssertEqual(result.quality.decodedDurationSec, 0)
+        XCTAssertEqual(result.quality.silenceSkippedDurationSec, 4)
+        XCTAssertEqual(result.quality.bleedGate,
+                       .init(measuredSamples: 4 * rate, gatedSamples: 4 * rate, gatedDurationSec: 4, complete: true))
+        let unused = FakeRecognizer { _, _ in throw FakeEngineError() }
+        let resumed = try await run(micURL, dir, bytes: 1, gateReference: systemURL, unused)
+        XCTAssertEqual(resumed.quality, result.quality, "gate counts survive a cached empty/silent chunk")
+        let resumedCalls = await unused.calls
+        XCTAssertEqual(resumedCalls, 0)
+    }
+
+    func testUnavailableGateCountsKeepValidWordsWithoutInventingCompleteness() async throws {
+        let dir = TestSupport.makeTempDir(self, "chunk-legacy-metrics")
+        // Two chunks, but a silent reference keeps this migration test out of
+        // NCC. Only the first checkpoint will lose its measurement metadata.
+        let mic = try makeWAV(dir, seconds: 451, silences: [300])
+        let system = URL(fileURLWithPath: dir + "/system.wav")
+        try WAVFixture.write([Int16](repeating: 0, count: 451 * rate), to: system)
+        let original = try await run(mic, dir, gateReference: system,
+                                     FakeRecognizer { _, _ in [Segment(start: 1, end: 2, text: "conservado")] })
+        let checkpoint = URL(fileURLWithPath: dir + "/work/mic/chunk-000.json")
+        let measured = try Data(contentsOf: checkpoint)
+        for legacy in [true, false] {
+            if legacy {
+                try JSONEncoder().encode([original.words[0]]).write(to: checkpoint)
+            } else {
+                var object = try XCTUnwrap(JSONSerialization.jsonObject(with: measured) as? [String: Any])
+                var quality = try XCTUnwrap(object["quality"] as? [String: Any])
+                quality["gatedSamples"] = -1
+                object["quality"] = quality
+                try JSONSerialization.data(withJSONObject: object).write(to: checkpoint)
+            }
+            let unused = FakeRecognizer { _, _ in throw FakeEngineError() }
+            let resumed = try await run(mic, dir, gateReference: system, unused)
+            XCTAssertEqual(resumed.words, original.words)
+            XCTAssertEqual(resumed.quality.audioDurationSec, 451)
+            XCTAssertNil(resumed.quality.decodingCoverage)
+            XCTAssertNil(resumed.quality.decodedDurationSec)
+            XCTAssertNil(resumed.quality.silenceSkippedDurationSec)
+            XCTAssertEqual(resumed.quality.bleedGate,
+                           .init(measuredSamples: 151 * rate, gatedSamples: 0, gatedDurationSec: 0, complete: false),
+                           "a measured zero for the known tail is not a complete meeting total or a re-run of NCC")
+            XCTAssertEqual(resumed.quality.unmeasuredIntervals, [.init(start: 0, end: 300)])
+            let calls = await unused.calls
+            XCTAssertEqual(calls, 0)
+        }
+        // When every checkpoint lacks metrics, even a zero gate count is unknown.
+        try JSONEncoder().encode([original.words[0]]).write(to: checkpoint)
+        try JSONEncoder().encode([original.words[1]])
+            .write(to: URL(fileURLWithPath: dir + "/work/mic/chunk-001.json"))
+        let unused = FakeRecognizer { _, _ in throw FakeEngineError() }
+        let unmeasured = try await run(mic, dir, gateReference: system, unused)
+        XCTAssertEqual(unmeasured.words, original.words)
+        XCTAssertNil(unmeasured.quality.bleedGate)
+        XCTAssertEqual(unmeasured.quality.unmeasuredIntervals,
+                       [.init(start: 0, end: 300), .init(start: 300, end: 451)])
+        let calls = await unused.calls
         XCTAssertEqual(calls, 0)
     }
 

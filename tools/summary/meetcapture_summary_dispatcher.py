@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""meetcapture_summary_dispatcher.py — consumidor de handoffs .pending v2 de MeetCapture.
+"""meetcapture_summary_dispatcher.py — consumidor de handoffs .pending v2/v3 de MeetCapture.
 
 Lee los contratos .pending que MeetCapture escribe en ~/meetings (o
 $MEETCAPTURE_MEETINGS_DIR),
@@ -283,8 +283,8 @@ def validate_contract(contract, base: str) -> dict:
     if not isinstance(contract, dict):
         raise ValueError("contrato no es un objeto JSON")
 
-    if contract.get("version") != 2:
-        raise ValueError("version=%r != 2 (contrato no soportado)" % contract.get("version"))
+    if contract.get("version") not in (2, 3):
+        raise ValueError("version=%r no soportada (se acepta 2 o 3)" % contract.get("version"))
     if not isinstance(contract.get("meetingId"), str) or contract["meetingId"] != base:
         raise ValueError("meetingId=%r no coincide con el handoff %r" % (contract.get("meetingId"), base))
     if not isinstance(contract.get("transcriptPath"), str) or not contract["transcriptPath"].strip():

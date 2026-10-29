@@ -5,7 +5,21 @@ All notable changes to MeetCapture. The format follows
 semantic versioning. The single source of the current version is
 `Resources/Info.plist` (`scripts/version.sh`).
 
-## [Unreleased]
+## [7.2.0] - Unreleased
+
+### Added
+- Producer-v3 handoffs preserve the v2 base fields and exact transcript SHA-256,
+  adding full calendar evidence, explicit `matched`/`none`/`ambiguous` matching,
+  evidenced platform, frozen IANA time zone and conservative speaker annotations.
+  Generic browsers, conflicting events and unavailable diarization never invent
+  a platform, calendar association or speaker identity.
+- Measured per-channel audio/decoding coverage, failed intervals and gated
+  microphone samples travel through the transcription worker into `quality`.
+  Legacy checkpoint words remain reusable with explicitly unavailable counters;
+  reporting does not rerun recognition or acoustic correlation.
+- Private meeting sidecars preserve context across crashes and reprocessing.
+  Known intentional derived imports carry `supersedesMeetingId` back to the
+  original meeting and preserve its time; source files are not modified.
 
 ### Fixed
 - The acoustic bleed gate now detects speaker audio reaching the microphone
@@ -15,6 +29,21 @@ semantic versioning. The single source of the current version is
   correlation and level thresholds are unchanged.
 - A calendar-started recording no longer stops at the event end while the call is still active; it continues as a live-call recording (lost 40 min on 2026-10-23).
 - Disabling automatic recording during a call no longer prevents an existing live-call recording, including one handed off from calendar, from stopping when the call ends.
+
+### Evidence and release status
+- Local verification passed 182 Swift tests, 15 installer safety cases, 31
+  dispatcher tests and 15 summary checks. Normal/QA builds, strict signatures
+  and the isolated non-strict bundle smoke (10/10) passed.
+- Temporary native QA exercised import, re-transcription, matching/nonmatching
+  history search and recovery after an invalid WAV. Both CLI and UI outputs
+  retain the checked source clock and explicit root ancestry; no live meeting
+  directory was used for v3 QA.
+- Real dual-channel synthetic capture passed the reference wrapper with WER
+  0.004 and zero dropped callbacks. This is not a real-meeting accuracy claim.
+- Release remains blocked: the real import wrapper fails the required word
+  `pongo` (`puego` in the transcript), the documented recognition limitation.
+  No reference word or threshold was weakened. Strict hosted-icon verification
+  is also pending; the installed app was left running without confirmed control.
 
 ## [7.1.0] - 2026-10-21
 

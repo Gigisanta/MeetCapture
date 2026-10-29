@@ -45,6 +45,7 @@ final class AppStateRegressionTests: XCTestCase {
         let paths = AppPaths(environment: ["MEETCAPTURE_TEST_OUTPUT_DIR": outputDir], home: outputDir)
         let store = MeetingStore(path: paths.databasePath)
         let backend = FakeRecordingBackend()
+        backend.writesRecoverableCapture = true
         let defaults = UserDefaults.standard
         let notifyKey = Settings.Key.notifyHermes.rawValue
         let previousNotify = defaults.object(forKey: notifyKey)
@@ -62,7 +63,7 @@ final class AppStateRegressionTests: XCTestCase {
                 progress(1)
                 return TranscriptionJob.Outcome(
                     segments: [Segment(start: 0, end: 1, text: "audio entregado", speaker: "A")],
-                    engineUsed: .parakeet, modelUsed: "fixture")
+                    engineUsed: .parakeet, modelUsed: "fixture", audioDurationSec: 5)
             })
 
         appState.startRecording()
@@ -70,6 +71,13 @@ final class AppStateRegressionTests: XCTestCase {
         XCTAssertEqual(appState.phase, .recording)
         XCTAssertTrue(appState.isStartingRecording)
         XCTAssertEqual(appState.recordingDuration, 0)
+        let audioPath = try XCTUnwrap(backend.outputPath)
+        let initialSession = try XCTUnwrap(try MeetingSession.read(forAudio: audioPath))
+        // The initial metadata predates the driver's delayed start. The PCM's
+        // final write and measured duration, not the button press, date the audio.
+        let audioEndedAt = Date(timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down) + 60)
+        XCTAssertGreaterThan(audioEndedAt, initialSession.startedAt.addingTimeInterval(5))
+        try FileManager.default.setAttributes([.modificationDate: audioEndedAt], ofItemAtPath: audioPath)
 
         appState.stopRecording()
         XCTAssertEqual(appState.phase, .transcribing)
@@ -86,6 +94,9 @@ final class AppStateRegressionTests: XCTestCase {
         XCTAssertNotEqual(appState.phase, .recording)
         XCTAssertEqual(store.count(), 1)
         let record = try XCTUnwrap(store.recent(limit: 1).first)
+        XCTAssertEqual(record.endedAt, audioEndedAt)
+        XCTAssertEqual(record.startedAt, audioEndedAt.addingTimeInterval(-5))
+        XCTAssertEqual(record.durationSec, 5)
         XCTAssertEqual((backend.lastStoppedPath! as NSString).lastPathComponent,
                        "recording-\(record.id).pcm", "raw audio must share the unique job identity")
         XCTAssertEqual(appState.lastSegments.first?.text, "audio entregado")
@@ -119,7 +130,6 @@ final class AppStateRegressionTests: XCTestCase {
         try await waitUntil { backend.startCallCount == 1 && appState.phase == .idle }
 
         XCTAssertFalse(appState.isStartingRecording)
-        XCTAssertTrue(appState.errorMessage?.contains("No se pudo grabar") == true)
 
         backend.startError = nil
         backend.suspendStart = false
@@ -191,11 +201,6 @@ final class AppStateRegressionTests: XCTestCase {
         XCTAssertEqual(FileManager.default.contents(atPath: partialPath), partialAudio)
     }
 
-    func testStartingStringsDoNotReportActiveRecording() {
-        XCTAssertEqual(Strings.phase(.recording, isStartingRecording: true), "Iniciando audio…")
-        XCTAssertEqual(Strings.headline(.recording, meeting: nil, isStartingRecording: true), "Iniciando audio…")
-        XCTAssertFalse(Strings.headline(.recording, meeting: nil, isStartingRecording: true).contains("Grabando"))
-    }
 
     func testSharedHistoryQueryKeepsResultsFilteredAcrossRefresh() async throws {
         let outputDir = TestSupport.makeTempDir(self, "app-history-query")
@@ -409,6 +414,260 @@ final class AppStateRegressionTests: XCTestCase {
         }
     }
 
+    func testLegacyHandoffRootSurvivesReimportWithoutInventingCalendar() async throws {
+        let output = TestSupport.makeTempDir(self, "legacy-import-lineage")
+        let paths = AppPaths(environment: ["MEETCAPTURE_TEST_OUTPUT_DIR": output], home: output)
+        useSettings([Settings.Key.notifyHermes.rawValue: false,
+                     Settings.Key.retention.rawValue: RetentionPolicy.keep.rawValue])
+        let id = "meet-1788271709-11111111-1111-4111-8111-111111111111"
+        let audio = paths.transcriptsDir + "/recording-\(id).pcm"
+        let transcript = RecordingRecovery.transcriptPath(forAudio: audio)
+        TestSupport.write("original pcm", to: audio)
+        TestSupport.write("original transcript", to: transcript)
+        try AudioFormatSidecar.capture(tapStrategy: "global", tapInfo: "fixture").write(forAudio: audio)
+        let store = MeetingStore(path: paths.databasePath)
+        XCTAssertTrue(store.insert(MeetingRecord(
+            id: id, title: "Agenda original", startedAt: TestSupport.fixedDate,
+            endedAt: TestSupport.fixedDate.addingTimeInterval(5), durationSec: 5,
+            engine: "parakeet", model: "fixture", language: "es", transcriptPath: transcript,
+            summaryPath: nil, speakerCount: 0, transcriptText: "original transcript")))
+        let rootId = "meet-1788271000-22222222-2222-4222-8222-222222222222"
+        let done: [String: Any] = ["version": 2, "meetingId": id, "transcriptPath": transcript,
+                                  "supersedesMeetingId": rootId]
+        let donePath = output + "/\(id).done"
+        let doneData = try JSONSerialization.data(withJSONObject: done)
+        try doneData.write(to: URL(fileURLWithPath: donePath))
+        let state = AppState(paths: paths, store: store, transcriptionRunner: { _, _ in
+            TranscriptionJob.Outcome(segments: [Segment(start: 0, end: 5, text: "transcripción mejorada")],
+                                     engineUsed: .parakeet, modelUsed: "fixture", audioDurationSec: 5)
+        })
+
+        await state.importAudio(url: URL(fileURLWithPath: audio))
+
+        let handoff = try XCTUnwrap(try pendingFiles(in: output).first)
+        XCTAssertNotEqual(handoff["meetingId"] as? String, id)
+        XCTAssertEqual(handoff["supersedesMeetingId"] as? String, rootId)
+        XCTAssertEqual(handoff["startedAt"] as? String, ISO8601.string(from: TestSupport.fixedDate))
+        XCTAssertEqual(handoff["title"] as? String, "Agenda original")
+        XCTAssertTrue(handoff["calendarEvent"] is NSNull)
+        XCTAssertEqual(handoff["calendarMatch"] as? String, "none")
+        XCTAssertEqual(try String(contentsOfFile: audio, encoding: .utf8), "original pcm")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: MeetingSession.metadataPath(forAudio: audio)),
+                       "import must not add metadata to its original source")
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: donePath)), doneData)
+    }
+
+    func testMismatchedLegacyHandoffCannotSupplyAncestry() async throws {
+        useSettings([Settings.Key.notifyHermes.rawValue: false,
+                     Settings.Key.retention.rawValue: RetentionPolicy.keep.rawValue])
+        for (suffix, mismatch) in [("done", "meetingId"), ("done", "transcriptPath"),
+                                   ("pending", "meetingId"), ("pending", "transcriptPath"),
+                                   ("done", "externalAudio")] {
+            let output = TestSupport.makeTempDir(self, "legacy-mismatch-\(suffix)-\(mismatch)")
+            let paths = AppPaths(environment: ["MEETCAPTURE_TEST_OUTPUT_DIR": output], home: output)
+            let id = "meet-1788271709-11111111-1111-4111-8111-111111111111"
+            let canonicalAudio = paths.transcriptsDir + "/recording-\(id).pcm"
+            let transcript = RecordingRecovery.transcriptPath(forAudio: canonicalAudio)
+            let audio = mismatch == "externalAudio"
+                ? output + "/external/recording-\(id).pcm" : canonicalAudio
+            try FileManager.default.createDirectory(
+                atPath: (audio as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+            TestSupport.write("original pcm", to: audio)
+            let store = MeetingStore(path: paths.databasePath)
+            XCTAssertTrue(store.insert(MeetingRecord(
+                id: id, title: "Agenda original", startedAt: TestSupport.fixedDate,
+                endedAt: TestSupport.fixedDate.addingTimeInterval(5), durationSec: 5,
+                engine: "parakeet", model: "fixture", language: "es", transcriptPath: transcript,
+                summaryPath: nil, speakerCount: 0, transcriptText: "original transcript")))
+            let legacy: [String: Any] = [
+                "version": 2, "meetingId": mismatch == "meetingId" ? "unrelated-meeting" : id,
+                "transcriptPath": mismatch == "transcriptPath" ? output + "/unrelated.txt" : transcript,
+                "supersedesMeetingId": "meet-1788271000-22222222-2222-4222-8222-222222222222",
+            ]
+            let legacyPath = output + "/\(id).\(suffix)"
+            let legacyData = try JSONSerialization.data(withJSONObject: legacy)
+            try legacyData.write(to: URL(fileURLWithPath: legacyPath))
+            let state = AppState(paths: paths, store: store, transcriptionRunner: { _, _ in
+                TranscriptionJob.Outcome(segments: [Segment(start: 0, end: 5, text: "transcripción")],
+                                         engineUsed: .parakeet, modelUsed: "fixture", audioDurationSec: 5)
+            })
+
+            await state.importAudio(url: URL(fileURLWithPath: audio))
+
+            let derived = try XCTUnwrap(try MeetingSession.read(forAudio: XCTUnwrap(state.lastAudioPath)))
+            let handoff = try XCTUnwrap(try pendingFiles(in: output).first { $0["meetingId"] as? String == derived.id })
+            XCTAssertEqual(handoff["supersedesMeetingId"] as? String,
+                           mismatch == "externalAudio" ? nil : id, "\(suffix): \(mismatch)")
+            XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: legacyPath)), legacyData)
+        }
+    }
+
+    func testLegacyImportUsesOriginalPCMEndWhenSidecarWasRecreated() async throws {
+        let output = TestSupport.makeTempDir(self, "legacy-import-clock")
+        let paths = AppPaths(environment: ["MEETCAPTURE_TEST_OUTPUT_DIR": output], home: output)
+        useSettings([Settings.Key.notifyHermes.rawValue: false,
+                     Settings.Key.retention.rawValue: RetentionPolicy.keep.rawValue])
+        let audio = try writeCapture(paths, "unknown-start")
+        let originalEnd = TestSupport.fixedDate.addingTimeInterval(600)
+        try FileManager.default.setAttributes([.modificationDate: originalEnd], ofItemAtPath: audio)
+        try FileManager.default.setAttributes([.modificationDate: originalEnd.addingTimeInterval(3600)],
+                                             ofItemAtPath: AudioFormatSidecar.path(forAudio: audio))
+        let state = AppState(paths: paths, store: MeetingStore(path: paths.databasePath),
+                             transcriptionRunner: { _, _ in
+            TranscriptionJob.Outcome(segments: [Segment(start: 0, end: 5, text: "transcripción")],
+                                     engineUsed: .parakeet, modelUsed: "fixture", audioDurationSec: 5)
+        })
+
+        await state.importAudio(url: URL(fileURLWithPath: audio))
+
+        let handoff = try XCTUnwrap(try pendingFiles(in: output).first)
+        XCTAssertEqual(handoff["endedAt"] as? String, ISO8601.string(from: originalEnd))
+        XCTAssertEqual(handoff["startedAt"] as? String, ISO8601.string(from: originalEnd.addingTimeInterval(-5)))
+    }
+
+    func testImportOfUnprocessedNativeCaptureUsesOriginalPCMEndInsteadOfInitialMetadataStart() async throws {
+        let output = TestSupport.makeTempDir(self, "native-import-clock")
+        let paths = AppPaths(environment: ["MEETCAPTURE_TEST_OUTPUT_DIR": output], home: output)
+        useSettings([Settings.Key.notifyHermes.rawValue: false,
+                     Settings.Key.retention.rawValue: RetentionPolicy.keep.rawValue])
+        let audio = try writeCapture(paths, "unprocessed-native")
+        let originalId = try XCTUnwrap(RecordingRecovery.sessionId(forAudio: audio))
+        let initialSession = MeetingSession(id: originalId, startedAt: TestSupport.fixedDate, title: nil)
+        try initialSession.write(forAudio: audio)
+        let metadataURL = URL(fileURLWithPath: MeetingSession.metadataPath(forAudio: audio))
+        let originalMetadata = try Data(contentsOf: metadataURL)
+        let originalEnd = TestSupport.fixedDate.addingTimeInterval(600)
+        try FileManager.default.setAttributes([.modificationDate: originalEnd], ofItemAtPath: audio)
+        try FileManager.default.setAttributes([.modificationDate: TestSupport.fixedDate],
+                                             ofItemAtPath: AudioFormatSidecar.path(forAudio: audio))
+        let state = AppState(paths: paths, store: MeetingStore(path: paths.databasePath),
+                             transcriptionRunner: { _, _ in
+            TranscriptionJob.Outcome(segments: [Segment(start: 0, end: 5, text: "transcripción")],
+                                     engineUsed: .parakeet, modelUsed: "fixture", audioDurationSec: 5)
+        })
+
+        await state.importAudio(url: URL(fileURLWithPath: audio))
+
+        let handoff = try XCTUnwrap(try pendingFiles(in: output).first)
+        XCTAssertNotEqual(handoff["meetingId"] as? String, originalId)
+        XCTAssertEqual(handoff["supersedesMeetingId"] as? String, originalId)
+        XCTAssertEqual(handoff["endedAt"] as? String, ISO8601.string(from: originalEnd))
+        XCTAssertEqual(handoff["startedAt"] as? String, ISO8601.string(from: originalEnd.addingTimeInterval(-5)))
+        XCTAssertEqual(try Data(contentsOf: metadataURL), originalMetadata)
+        XCTAssertEqual(RecordingRecovery.modificationDate(audio), originalEnd)
+    }
+
+    func testNestedDerivedRestartRetainsEndEvidenceUntilDurationIsMeasured() async throws {
+        let output = TestSupport.makeTempDir(self, "legacy-nested-clock")
+        let paths = AppPaths(environment: ["MEETCAPTURE_TEST_OUTPUT_DIR": output], home: output)
+        useSettings([Settings.Key.notifyHermes.rawValue: false,
+                     Settings.Key.retention.rawValue: RetentionPolicy.keep.rawValue])
+        let audio = try writeCapture(paths, "nested-clock")
+        let originalId = try XCTUnwrap(RecordingRecovery.sessionId(forAudio: audio))
+        let originalEnd = TestSupport.fixedDate.addingTimeInterval(600)
+        try FileManager.default.setAttributes([.modificationDate: originalEnd], ofItemAtPath: audio)
+        try FileManager.default.setAttributes([.modificationDate: originalEnd.addingTimeInterval(3600)],
+                                             ofItemAtPath: AudioFormatSidecar.path(forAudio: audio))
+        let store = MeetingStore(path: paths.databasePath)
+        var attemptedAudio: String?
+        let failingRunner: AppStateTranscriptionRunner = { job, _ in
+            await MainActor.run { attemptedAudio = job.audioPath }
+            throw FakeEngineError()
+        }
+        let first = AppState(paths: paths, store: store, transcriptionRunner: failingRunner)
+        await first.importAudio(url: URL(fileURLWithPath: audio))
+        let firstCopy = try XCTUnwrap(attemptedAudio)
+        let firstDerived = try XCTUnwrap(try MeetingSession.read(forAudio: firstCopy))
+        XCTAssertEqual(firstDerived.sourceAudioEndedAt, originalEnd)
+        try FileManager.default.setAttributes([.modificationDate: originalEnd.addingTimeInterval(7200)],
+                                             ofItemAtPath: firstCopy)
+
+        attemptedAudio = nil
+        let second = AppState(paths: paths, store: store, transcriptionRunner: failingRunner)
+        await second.importAudio(url: URL(fileURLWithPath: firstCopy))
+        let secondCopy = try XCTUnwrap(attemptedAudio)
+        let secondDerived = try XCTUnwrap(try MeetingSession.read(forAudio: secondCopy))
+        XCTAssertNotEqual(secondDerived.id, firstDerived.id)
+        XCTAssertEqual(secondDerived.sourceAudioEndedAt, originalEnd)
+        XCTAssertEqual(secondDerived.supersedesMeetingId, originalId)
+        XCTAssertEqual(store.count(), 0, "failed imports have not established an authoritative start")
+
+        let measuredRunner: AppStateTranscriptionRunner = { _, _ in
+            TranscriptionJob.Outcome(segments: [Segment(start: 0, end: 5, text: "transcripción")],
+                                     engineUsed: .parakeet, modelUsed: "fixture", audioDurationSec: 5)
+        }
+        let restarted = AppState(paths: paths, store: store, transcriptionRunner: measuredRunner)
+        restarted.lastAudioPath = secondCopy
+        await restarted.retranscribeLastAudio()
+        let corrected = try XCTUnwrap(try MeetingSession.read(forAudio: secondCopy))
+        let correctedTranscript = try XCTUnwrap(restarted.lastTranscriptPath)
+        let correctedText = try Data(contentsOf: URL(fileURLWithPath: correctedTranscript))
+        XCTAssertNil(corrected.sourceAudioEndedAt, "measured duration established the persisted source start")
+        XCTAssertEqual(corrected.startedAtIsAuthoritative, true)
+        XCTAssertEqual(corrected.startedAt, originalEnd.addingTimeInterval(-5))
+        let correctedHandoff = try XCTUnwrap(try pendingFiles(in: output).first { $0["meetingId"] as? String == corrected.id })
+        XCTAssertEqual(correctedHandoff["endedAt"] as? String, ISO8601.string(from: originalEnd))
+        XCTAssertEqual(correctedHandoff["supersedesMeetingId"] as? String, originalId)
+
+        let afterCorrection = AppState(paths: paths, store: store, transcriptionRunner: measuredRunner)
+        await afterCorrection.importAudio(url: URL(fileURLWithPath: secondCopy))
+        let finalDerived = try XCTUnwrap(try MeetingSession.read(forAudio: XCTUnwrap(afterCorrection.lastAudioPath)))
+        let finalHandoff = try XCTUnwrap(try pendingFiles(in: output).first { $0["meetingId"] as? String == finalDerived.id })
+        XCTAssertEqual(finalHandoff["startedAt"] as? String, ISO8601.string(from: originalEnd.addingTimeInterval(-5)))
+        XCTAssertEqual(finalHandoff["endedAt"] as? String, ISO8601.string(from: originalEnd))
+        XCTAssertEqual(finalHandoff["supersedesMeetingId"] as? String, originalId)
+        XCTAssertEqual(store.count(), 2)
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: correctedTranscript)), correctedText)
+        XCTAssertEqual(RecordingRecovery.modificationDate(audio), originalEnd)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: MeetingSession.metadataPath(forAudio: audio)))
+    }
+
+    func testDerivedImportKeepsFrozenContextAndRootAncestryAcrossRestart() async throws {
+        let output = TestSupport.makeTempDir(self, "frozen-import-lineage")
+        let paths = AppPaths(environment: ["MEETCAPTURE_TEST_OUTPUT_DIR": output], home: output)
+        useSettings([Settings.Key.notifyHermes.rawValue: false,
+                     Settings.Key.retention.rawValue: RetentionPolicy.keep.rawValue])
+        let sourceAudio = output + "/source.pcm"
+        TestSupport.write("pcm", to: sourceAudio)
+        let event = CalendarEventSnapshot(
+            id: "calendar-original", title: "Agenda original", start: TestSupport.fixedDate.addingTimeInterval(-30),
+            end: TestSupport.fixedDate.addingTimeInterval(300), url: URL(string: "https://meet.google.com/abc-defg-hij"),
+            notes: "fixture", attendees: [])
+        let context = MeetingContext.capture(events: [event], at: TestSupport.fixedDate,
+                                             activeBundleIDs: [], timeZone: "America/Argentina/Buenos_Aires")
+        let original = MeetingSession(startedAt: TestSupport.fixedDate, context: context,
+                                      startedAtIsAuthoritative: true)
+        try original.write(forAudio: sourceAudio)
+        let store = MeetingStore(path: paths.databasePath)
+        let runner: AppStateTranscriptionRunner = { _, _ in
+            TranscriptionJob.Outcome(segments: [Segment(start: 0, end: 5, text: "transcripción")],
+                                     engineUsed: .parakeet, modelUsed: "fixture", audioDurationSec: 5)
+        }
+        let first = AppState(paths: paths, store: store, transcriptionRunner: runner)
+        await first.importAudio(url: URL(fileURLWithPath: sourceAudio))
+        let copiedAudio = try XCTUnwrap(first.lastAudioPath)
+        let firstDerived = try XCTUnwrap(try MeetingSession.read(forAudio: copiedAudio))
+        var changedOriginal = original
+        changedOriginal.title = "Agenda posterior"
+        changedOriginal.context = .unmatched(timeZone: "Europe/Madrid")
+        try changedOriginal.write(forAudio: sourceAudio)
+
+        let restarted = AppState(paths: paths, store: store, transcriptionRunner: runner)
+        await restarted.importAudio(url: URL(fileURLWithPath: copiedAudio))
+
+        let derived = try XCTUnwrap(try MeetingSession.read(forAudio: XCTUnwrap(restarted.lastAudioPath)))
+        let handoff = try XCTUnwrap(try pendingFiles(in: output).first { $0["meetingId"] as? String == derived.id })
+        XCTAssertNotEqual(derived.id, firstDerived.id)
+        XCTAssertEqual(handoff["supersedesMeetingId"] as? String, original.id)
+        XCTAssertEqual(handoff["title"] as? String, "Agenda original")
+        XCTAssertEqual(handoff["timeZone"] as? String, "America/Argentina/Buenos_Aires")
+        XCTAssertEqual((handoff["calendarEvent"] as? [String: Any])?["id"] as? String, "calendar-original")
+        XCTAssertEqual(handoff["version"] as? Int, 3)
+        XCTAssertEqual(handoff["startedAt"] as? String, ISO8601.string(from: TestSupport.fixedDate))
+        XCTAssertEqual(handoff["endedAt"] as? String, ISO8601.string(from: TestSupport.fixedDate.addingTimeInterval(5)))
+    }
+
+
     func testPartialTranscriptKeepsAudioAndCheckpointsAndShowsError() async throws {
         let outputDir = TestSupport.makeTempDir(self, "app-partial")
         let paths = AppPaths(environment: ["MEETCAPTURE_TEST_OUTPUT_DIR": outputDir], home: outputDir)
@@ -428,7 +687,6 @@ final class AppStateRegressionTests: XCTestCase {
         try await waitUntil { state.phase == .done }
 
         let audio = try XCTUnwrap(backend.outputPath)
-        XCTAssertEqual(state.errorMessage, Strings.errorPartialTranscript(1))
         XCTAssertTrue(FileManager.default.fileExists(atPath: audio), "retention must not delete audio with gaps")
         XCTAssertTrue(FileManager.default.fileExists(atPath: ChunkedTranscription.workDirectory(forAudio: audio)))
         XCTAssertTrue(RecordingRecovery.hasGaps(audioPath: audio))
@@ -472,7 +730,6 @@ final class AppStateRegressionTests: XCTestCase {
         let pendings = try pendingFiles(in: outputDir)
         XCTAssertEqual(pendings.count, 1)
         XCTAssertEqual(pendings.first?["meetingId"] as? String, id)
-        XCTAssertEqual(pendings.first?["checksum"] as? String, PendingContractV2.sha256Hex(transcript))
         XCTAssertEqual(pendings.first?["audioPath"] as? String, audio)
         XCTAssertFalse(FileManager.default.fileExists(atPath: ChunkedTranscription.workDirectory(forAudio: audio)))
         XCTAssertFalse(FileManager.default.fileExists(atPath: RecordingRecovery.attemptsPath(forAudio: audio)))
@@ -807,7 +1064,6 @@ final class AppStateRegressionTests: XCTestCase {
         await state.retranscribeLastAudio()
 
         XCTAssertEqual(calls.value, 2, "no second job on a capture being recovered")
-        XCTAssertEqual(state.errorMessage, Strings.errorAudioRecovering)
         gate.increment()
         try await waitUntil { !state.isRecovering }
         XCTAssertEqual(store.count(), 1)

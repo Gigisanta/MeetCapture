@@ -45,11 +45,55 @@ struct ChunkManifest: Codable, Equatable {
     }
 }
 
+/// These counts describe the actual samples processed, not word timestamps.
+/// Failed chunks are deliberately not checkpointed: the next run still retries.
+private struct ChunkMeasurement: Codable {
+    enum Kind: String, Codable { case decoded, silence }
+    var sampleCount: Int
+    var kind: Kind
+    var gatedSamples: Int?
+
+    func isValid(for expectedSamples: Int, gated: Bool) -> Bool {
+        guard (0...expectedSamples).contains(sampleCount),
+              (gatedSamples != nil) == gated else { return false }
+        guard let gatedSamples else { return true }
+        return gatedSamples >= 0 && gatedSamples <= sampleCount
+            && gatedSamples % BleedGate.windowSamples == 0
+    }
+}
+
+/// New words and measurements commit atomically. Valid old word-array
+/// checkpoints stay usable without rereading/gating audio just for metrics.
+private struct ChunkCheckpoint: Codable {
+    var words: [Segment]
+    var quality: ChunkMeasurement?
+
+    init(words: [Segment], quality: ChunkMeasurement) {
+        self.words = words
+        self.quality = quality
+    }
+
+    private enum CodingKeys: String, CodingKey { case words, quality }
+
+    init(from decoder: Decoder) throws {
+        if let legacy = try? decoder.singleValueContainer().decode([Segment].self) {
+            words = legacy
+            quality = nil
+            return
+        }
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        words = try container.decode([Segment].self, forKey: .words)
+        // Corrupt/unavailable metrics must not discard valid transcript words.
+        quality = try? container.decode(ChunkMeasurement.self, forKey: .quality)
+    }
+}
+
 struct ChunkedResult: Sendable {
     var words: [Segment]
     /// One placeholder per chunk the engine failed on twice; the caller keeps the audio.
     var gaps: [Segment]
     var sourceSHA256: String
+    var quality: TranscriptionQuality.Channel
     var failedChunks: Int { gaps.count }
 }
 
@@ -61,6 +105,47 @@ enum ChunkedTranscription {
     static let attempts = 2
     /// A chunk this quiet (or fully muted by the gate) has no words to find.
     static let silentPeak: Float = 1e-4
+
+    private struct Measurements {
+        var decodedSamples = 0
+        var silenceSkippedSamples = 0
+        var gateMeasuredSamples = 0
+        var gatedSamples = 0
+        var hasGateMeasurements = false
+        var unmeasuredIntervals: [TranscriptionQuality.Interval] = []
+
+        mutating func record(_ quality: ChunkMeasurement) {
+            switch quality.kind {
+            case .decoded: decodedSamples += quality.sampleCount
+            case .silence: silenceSkippedSamples += quality.sampleCount
+            }
+            recordGate(sampleCount: quality.sampleCount, gatedSamples: quality.gatedSamples)
+        }
+
+        mutating func recordGate(sampleCount: Int, gatedSamples count: Int?) {
+            guard let count else { return }
+            hasGateMeasurements = true
+            gateMeasuredSamples += sampleCount
+            gatedSamples += count
+        }
+
+        func report(totalSamples: Int, gaps: [Segment]) -> TranscriptionQuality.Channel {
+            let rate = Double(ChunkedTranscription.sampleRate)
+            let complete = unmeasuredIntervals.isEmpty
+            let gate = hasGateMeasurements
+                ? TranscriptionQuality.Gate(measuredSamples: gateMeasuredSamples, gatedSamples: gatedSamples,
+                                            gatedDurationSec: Double(gatedSamples) / rate,
+                                            complete: gateMeasuredSamples == totalSamples)
+                : nil
+            return TranscriptionQuality.Channel(
+                audioDurationSec: Double(totalSamples) / rate,
+                decodingCoverage: complete ? Double(decodedSamples + silenceSkippedSamples) / Double(totalSamples) : nil,
+                decodedDurationSec: complete ? Double(decodedSamples) / rate : nil,
+                silenceSkippedDurationSec: complete ? Double(silenceSkippedSamples) / rate : nil,
+                failedChunks: gaps.map { .init(start: $0.start, end: $0.end) },
+                unmeasuredIntervals: unmeasuredIntervals, bleedGate: gate)
+        }
+    }
 
     static func workDirectory(forAudio path: String) -> String { path + ".work" }
 
@@ -137,25 +222,36 @@ enum ChunkedTranscription {
 
         var words: [Segment] = []
         var gaps: [Segment] = []
+        var measurements = Measurements()
         for index in 0..<count {
             try Task.checkCancellation()
             let start = cuts[index], end = cuts[index + 1]
             let offset = Double(start) / Double(sampleRate)
             let doneURL = URL(fileURLWithPath: String(format: "%@/chunk-%03d.json", work, index))
             if let data = try? Data(contentsOf: doneURL),
-               let done = try? JSONDecoder().decode([Segment].self, from: data),
-               done.allSatisfy({ $0.hasValidTiming && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
-                words += done
+               let done = try? JSONDecoder().decode(ChunkCheckpoint.self, from: data),
+               done.words.allSatisfy({ $0.hasValidTiming && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
+                words += done.words
+                if let quality = done.quality, quality.isValid(for: end - start, gated: reference != nil) {
+                    measurements.record(quality)
+                } else {
+                    measurements.unmeasuredIntervals.append(.init(start: offset, end: Double(end) / Double(sampleRate)))
+                }
                 progress(Double(index + 1) / Double(count))
                 continue
             }
             var samples = normalized(try readSamples(file, from: start, to: end))
+            let gatedSamples: Int?
             if let reference {
-                samples = BleedGate.apply(mic: samples, system: try referenceSpan(reference, from: start, count: samples.count))
+                let system = try referenceSpan(reference, from: start, count: samples.count)
+                gatedSamples = BleedGate.apply(mic: &samples, system: system)
+            } else {
+                gatedSamples = nil
             }
 
             var found: [Segment]?
-            if vDSP.maximumMagnitude(samples) < silentPeak { found = [] }
+            let silent = vDSP.maximumMagnitude(samples) < silentPeak
+            if silent { found = [] }
             for attempt in 1...attempts where found == nil {
                 try Task.checkCancellation()
                 do {
@@ -171,6 +267,7 @@ enum ChunkedTranscription {
             }
             try Task.checkCancellation()
             guard let found else {
+                measurements.recordGate(sampleCount: samples.count, gatedSamples: gatedSamples)
                 let endSec = Double(end) / Double(sampleRate)
                 gaps.append(Segment(start: offset, end: endSec,
                                     text: "[fragmento sin transcribir \(clock(offset))–\(clock(endSec))]"))
@@ -181,14 +278,18 @@ enum ChunkedTranscription {
                         confidence: $0.confidence)
             }
             try Task.checkCancellation()
-            try JSONEncoder().encode(shifted).write(to: doneURL, options: .atomic)
+            let quality = ChunkMeasurement(sampleCount: samples.count, kind: silent ? .silence : .decoded,
+                                           gatedSamples: gatedSamples)
+            try JSONEncoder().encode(ChunkCheckpoint(words: shifted, quality: quality)).write(to: doneURL, options: .atomic)
+            measurements.record(quality)
             words += shifted
             progress(Double(index + 1) / Double(count))
         }
         try Task.checkCancellation()
         // Nothing transcribed: fail so the capture stays recoverable.
         guard gaps.count < count else { throw TranscriptionError.emptyOutput }
-        return ChunkedResult(words: words, gaps: gaps, sourceSHA256: manifest.sourceSHA256)
+        return ChunkedResult(words: words, gaps: gaps, sourceSHA256: manifest.sourceSHA256,
+                             quality: measurements.report(totalSamples: total, gaps: gaps))
     }
 
     private static func invalidateCheckpoints(in work: String) throws {

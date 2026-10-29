@@ -47,7 +47,18 @@ Website: https://meetcapture.maat.work
   word is never marked. Search ignores the marker.
 - **Silence.** A recording with no speech ends with "No se detectó habla"; the
   audio is kept for a manual run and is not retried automatically.
-- **Summaries.** The canonical dispatcher at
+- **Meeting evidence.** Producer-v3 handoffs add the uniquely matched active
+  calendar event, platform evidence, frozen local IANA time zone and measured
+  decoding/gap/bleed quality. Missing or ambiguous evidence stays explicit;
+  generic browsers do not identify a conferencing platform. Speaker names
+  are annotations only for defensible one-to-one meetings with successful
+  remote diarization; transcript labels are unchanged.
+- **Derived transcripts.** Known intentional reimports keep their original
+  meeting time and carry `supersedesMeetingId`, including through subsequent
+  derived jobs. Audio keeps a private `.meeting.json` sidecar so recovery
+  does not bind it to today's calendar. Unknown sources never acquire a
+  guessed parent.
+- **Optional summaries.** The included dispatcher at
   `tools/summary/meetcapture_summary_dispatcher.py` consumes each `.pending`
   handoff and writes JSON, HTML and a portable Markdown note with decisions,
   checkable pending tasks and the full transcript. The history row opens the
@@ -128,7 +139,7 @@ that scheduler, a model server, external training or a cloud runtime.
 ## Install from a pinned release
 
 MeetCapture's public installation path is a **local source build**, not a
-downloadable notarized app. The commands below target `v7.1.0`. First confirm
+downloadable notarized app. The commands below target `v7.2.0`. First confirm
 that tag and its notes are present on
 [GitHub Releases](https://github.com/Gigisanta/MeetCapture/releases).
 If the tag is not published yet, stop; a pull request or `main` checkout is
@@ -140,8 +151,8 @@ by default. Review the onboarding below before using it for a real meeting.
 Run as your normal macOS user, **without `sudo`**:
 
 ```bash
-git clone --branch v7.1.0 --depth 1 https://github.com/Gigisanta/MeetCapture.git MeetCapture-7.1.0 && \
-cd MeetCapture-7.1.0 && \
+git clone --branch v7.2.0 --depth 1 https://github.com/Gigisanta/MeetCapture.git MeetCapture-7.2.0 && \
+cd MeetCapture-7.2.0 && \
 ./install.sh
 ```
 
@@ -417,8 +428,8 @@ See [`qa/README.md`](qa/README.md) for the current check matrix and
 
 ## Known recognition limits
 
-7.1.0 changes process isolation, silence handling and review markers; it does
-not retrain the recognizer or establish a word-error-rate improvement. The
+7.2.0 adds evidence metadata and the bounded acoustic bleed correction; it
+does not retrain the recognizer or establish a word-error-rate improvement. The
 known exact-word failure `pongo` → `puego` remains in the public 91-second
 Spanish reference check. `[?]` misses most errors and cannot flag deleted
 words. No ≥60-minute retained real-meeting benchmark is available for this

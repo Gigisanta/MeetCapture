@@ -5,10 +5,10 @@ Clicking its AppKit `NSStatusItem` opens an `NSPopover` that hosts SwiftUI
 `PopoverContent` through `NSHostingController`.
 The app process has no persistent daemon or socket companion: it records from
 the process tap, transcribes locally in a short-lived worker per job, and
-publishes a JSON handoff. The canonical Python dispatcher in
-`tools/summary/` consumes that handoff; an optional per-user launchd agent
-only schedules the dispatcher. Nothing leaves the Mac unless the configured
-summary endpoint is remote. The retired `com.maatwork.meetcapture.daemon`
+publishes a local JSON handoff. A separately configured consumer may catalogue
+it or send its contents elsewhere; the app does not start that consumer.
+The included Python dispatcher in `tools/summary/` is optional and has its
+own endpoint/retention policy. The retired `com.maatwork.meetcapture.daemon`
 service is not part of this architecture.
 
 ## Layout
@@ -19,9 +19,9 @@ Sources/MeetCapture/               executable shim: @main + AppDelegate
 Sources/MeetCaptureCore/           everything else, one directory per layer
   App/        AppState, RecordingCoordinator, MeetingDetectionPolicy, Notifier
   Capture/    CoreAudioTap, AudioRingBuffer, AudioResampler, PCMFileWriter, AudioFormatSidecar, ChannelLevels, InputDevices, AudioCaptureService
-  Detection/  CallDetector, CallActivityDebouncer, CalendarService, MeetingFilter
-  ASR/        TranscriptionWorker, TranscriptionJob, RecognitionIdentity, ChannelReader, PCMToWAV, BleedGate, ChunkedTranscription, ParakeetEngine, TurnMerger, Aliases, Segment
-  Pipeline/   MeetingSession, PendingContractV2, PostProcessor, Retention, AudioImporter, RecordingRecovery, MeetingNotesStore
+  Detection/  CallDetector, CallActivityDebouncer, CalendarService, MeetingFilter, MeetingContext
+  ASR/        TranscriptionWorker, TranscriptionJob, TranscriptionQuality, RecognitionIdentity, ChannelReader, PCMToWAV, BleedGate, ChunkedTranscription, ParakeetEngine, TurnMerger, Aliases, Segment
+  Pipeline/   MeetingSession, PendingContract, PostProcessor, Retention, AudioImporter, RecordingRecovery, MeetingNotesStore
   Store/      MeetingStore (sqlite3 + FTS5)
   Settings/   Settings, LocalConfig, SummaryDispatcherConfig, AppPaths
   Support/    ProcessRunner, ISO8601, AppInfo, Signposts
@@ -121,12 +121,12 @@ and `Settings` only know `Support`. Nothing below `App` touches SwiftUI.
    never warms models, the disk cache is retained, and no idle unload timer
    is needed. Hardware placement and GPU contention are not instrumented.
 4. **Hand off.** `PostProcessor` is an actor: it rejects empty transcripts,
-   writes the `.txt` transcript, commits `MeetingStore`, writes the
-   `.processed.json` marker, and only then publishes the `.pending`
-   contract. It applies `RetentionPolicy` after those writes succeed.
+   writes the `.txt` transcript and frozen meeting sidecar, commits `MeetingStore`,
+   writes the local `.processed.json` marker, and only then publishes the
+   producer-v3 `.pending` contract. It applies `RetentionPolicy` after those writes succeed.
    `AppState` receives the `PostProcessResult` and updates published state
    on the main actor.
-5. **Summarize.** The canonical
+5. **Consume (optional).** The included
    `tools/summary/meetcapture_summary_dispatcher.py` turns each `.pending`
    into `.summary.json`, `.summary.html` and `.summary.md`, renames it to `.done`, and
    deletes the audio unless `keep_audio` is set. A transcript over 24k characters is
@@ -150,22 +150,83 @@ display title. Every path derived from a session (`.pcm`, `.txt`,
 `.pending`, the SQLite row) uses the same id, so jobs created in the same
 second never overwrite each other. Live captures add a `recording-` prefix
 to that id; existing recordings and history keep their original paths.
+Context is frozen at recording start, not after ASR. A unique active, known
+timed conference event with a real identifier may supply its title and full
+snapshot; date-only/unknown-kind events, overlap or contradictory providers do not.
+Untitled jobs use a platform/date label without guessing a client. Imports reuse persisted context
+or remain unmatched; they never query today's calendar for historical audio.
+Capture retries retain their id. A derived import gets its own job id and
+`supersedesMeetingId = source.supersedesMeetingId ?? source.id` only for a
+known persisted session, exact history transcript, or canonical local capture.
+This link does not itself merge downstream issues.
+Matching legacy v2/v3 `.pending`/`.done` headers can restore the original link
+only when both meeting id and exact transcript path agree; the producer reads
+them without acknowledging, rewriting or invoking the consumer.
+
+The initial pre-driver timestamp is provisional. Private
+`startedAtIsAuthoritative` is set by history or measured normalization, not by
+ancestry or rereading a newly written sidecar. When only original PCM end is
+known, `sourceAudioEndedAt` survives import/restart until measured duration
+reconstructs the original start. Normalization clears that end-only marker.
+
 
 ## On-disk contracts
 
 | Path | Writer | Reader | Notes |
 | --- | --- | --- | --- |
 | `~/meetings/transcripts/recording-meet-<epoch>-<uuid>.pcm` + `.pcm.format.json` | Capture | ASR, retention | Int16 stereo 16 kHz; sidecar schema `meetcapture.audio.v1` (`sample_rate`, `sample_format`, `channels`, `layout`, `tap_strategy`, `tap_info`). |
+| `<audio>.meeting.json` (0600) | MeetingSession / PostProcessor | import, recovery, re-transcription | Private schema `meetcapture.meeting.v1`: full session, frozen context, optional original-meeting link and explicit clock evidence. Internal dates retain full Foundation precision; this is not the external wire format. Removed with its audio by retention. |
 | `<audio>.work/` (`remote/`, `mic/`, `diarization.json`, `gaps.json`) | ASR | ASR | Per-channel manifest version 4 binds audio/reference SHA-256, actual model artifacts, SDK and effective recognition configuration. Stale/corrupt derived checkpoints are rebuilt without deleting source audio; diarization is content-bound too. `gaps.json` remains while the handed-off transcript has gaps and is removed after a complete transcript is handed off. Older manifests are invalidated, not compatibility-shimmed. |
 | `<audio>.recovery.json` | AppState | AppState | `attempts`, `last_error`, `updated_at` and `next_attempt_at` (ISO 8601 with milliseconds; absent once the automatic attempts are used up). Automatic recovery runs a capture only after `next_attempt_at`, at most three attempts within 48 h of the capture. Removed when a transcript without gaps is handed off. |
 | `~/meetings/transcripts/[recording-]meet-<epoch>-<uuid>.txt` | PostProcessor | dispatcher, popover | Live recordings use the `recording-` prefix; retranscriptions use the job id directly. Imports keep a unique dated basename in `~/meetings/imports/`. One `[speaker]: text` line per turn, for example `[Yo]: …` or `[Participante 2]: …`. |
-| `~/meetings/meet-<epoch>-<uuid>.pending` | PostProcessor | dispatcher | Version 2, 14 sorted keys: `audioPath` (null if deleted or if the transcript has gaps), `checksum` (SHA-256 of the transcript text), `durationSec`, `endedAt`, `engine`, `language`, `meetingId`, `model`, `segments` (`start`, `end`, `text`, optional `speaker`), `speakerCount`, `startedAt`, `title`, `transcriptPath`, `version`. Written to a temp file and renamed. |
+| `~/meetings/meet-<epoch>-<uuid>.pending` | PostProcessor | configured consumer | Producer v3 retains the v2 base fields, including ordered `speakers`, segment labels and exact UTF-8 TXT SHA-256 in `checksum`. Adds the evidence fields below. Sorted JSON, temp-file publication and atomic rename; `audioPath` remains null for gaps or missing audio. |
 | `<transcript basename>.processed.json` | PostProcessor | app | Schema `meetcapture.processed.v1`: `processed_at`, `transcript_path`, `meeting_title`, `retention`. Makes post-processing idempotent. |
 | `~/meetings/meet-<epoch>-<uuid>.done`, `.summary.json`, `.summary.html` | dispatcher | popover | Acknowledged handoff and the summary. |
 | `~/meetings/meetcapture.db` | MeetingStore | popover | `meetings` table plus `meetings_fts` (FTS5, external content, triggers). `PRAGMA user_version = 2`. Searches use `MATCH` with a prefix on the last token, `LIMIT 50`; `LIKE` is the fallback without FTS5. |
 | `~/.meetcapture/config.json` (0600) | you | LocalConfig | `whitelistedEmails` and `aliases` (canonical spelling → variant string or array; whole-word, case-insensitive). Decoding is tolerant: unknown keys are ignored, missing keys keep defaults. Template in `Resources/config.example.json`. |
 | `~/.meetcapture/summary.json` (0600) | Settings, you | dispatcher | `endpoint`, `api_key`, `model`, `max_tokens`, `keep_audio`, `dry_run`. The app merges its fields and preserves the rest. |
 | `~/Library/Application Support/FluidAudio/` | FluidAudio | ParakeetEngine, FluidDiarizer | Parakeet and diarization Core ML models, downloaded from Hugging Face on first use. Licenses in `docs/THIRD_PARTY.md`. |
+
+### Producer v3 evidence
+
+- `calendarMatch`: `matched`, `none` or `ambiguous`; `calendarEvent` is null
+  unless there is one defensible active event with a real id and `isAllDay:false`.
+  The snapshot carries id/title/start/end, Boolean/null `isAllDay`, organizer,
+  attendees with real name/email and `isCurrentUser`, URL and notes. Missing
+  date-kind metadata cannot authorize attribution. Wire dates use ISO 8601.
+- `platform`: `meet`, `zoom`, `teams`, `other` or `unknown`.
+  `platformEvidence[]` records a recognized calendar URL/notes link or an
+  actually microphone-capturing native bundle id. A generic browser is not
+  platform proof; provider identities are compared before collapsing them to
+  `other`, so Slack/Webex or Webex/Whereby conflicts suppress attribution too.
+- `timeZone`: local IANA identifier frozen when the session is created and
+  preserved on derived jobs. Legacy audio without context uses the processing
+  machine's local zone, not an invented historical zone.
+- `speakerMap`: label → `{name, email, evidence[]}`; segment labels remain
+  `Yo` / `Participante N`. The entire map requires a matched one-to-one event,
+  identified current user and named/email peer, canonical remote label, and
+  exactly one successfully diarized remote speaker from a proven system/mic
+  source layout in supported audio schema `meetcapture.audio.v1`. Otherwise
+  it is empty. This is calendar/channel evidence, not biometric verification.
+- `quality`: measured audio duration and per-channel decoding coverage,
+  decoded/verified-silent duration, failed chunk intervals and unmeasured
+  legacy intervals. Gate counters record measured/gated samples and seconds
+  at 16 kHz; `complete:false` describes partial measurement. Unknown counters
+  are absent, never fabricated zeros. Unverified stereo is `left/right`, not
+  claimed remote/microphone. Coverage is not speech coverage, accuracy or WER.
+- Optional `supersedesMeetingId` explicitly links an intentional derived job
+  to its original meeting. The consumer must preserve it through `.done`;
+  the producer does not modify consumer state to request reprocessing.
+
+New checkpoints atomically store `{words, quality}`. Legacy word-array
+checkpoints retain their valid words with unknown metrics, without another
+ASR pass or NCC computation solely for reporting.
+
+QA must use fresh temporary AppPaths and the separate QA bundle. Do not
+validate labels or reprocessing by importing into a live meetings directory
+with an active downstream consumer. Production reimports require explicit
+authorization and a known original identity.
+
 
 `MEETCAPTURE_TEST_OUTPUT_DIR` redirects every meeting path into one
 directory, including SQLite. XCTest and fixture QA use it so tests do not

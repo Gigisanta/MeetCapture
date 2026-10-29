@@ -21,7 +21,6 @@ enum Retention {
     static func apply(policy: RetentionPolicy, audioPath: String) -> Bool {
         guard policy == .deleteAfterHandoff else { return true }
         ChunkedTranscription.removeWork(forAudio: audioPath)
-        let sidecar = AudioFormatSidecar.path(forAudio: audioPath)
         if FileManager.default.fileExists(atPath: audioPath) {
             do {
                 try FileManager.default.removeItem(atPath: audioPath)
@@ -30,14 +29,16 @@ enum Retention {
                 return false
             }
         }
-        guard FileManager.default.fileExists(atPath: sidecar) else { return true }
-        do {
-            try FileManager.default.removeItem(atPath: sidecar)
-            return true
-        } catch {
-            logger.warning("no se pudo borrar \(sidecar, privacy: .public): \(error.localizedDescription, privacy: .public)")
-            return false
+        for sidecar in [AudioFormatSidecar.path(forAudio: audioPath), MeetingSession.metadataPath(forAudio: audioPath)] {
+            guard FileManager.default.fileExists(atPath: sidecar) else { continue }
+            do {
+                try FileManager.default.removeItem(atPath: sidecar)
+            } catch {
+                logger.warning("no se pudo borrar \(sidecar, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                return false
+            }
         }
+        return true
     }
 
     /// Launch-time sweep for the 24 h policy: recording-*.pcm (+ sidecar and
@@ -58,6 +59,7 @@ enum Retention {
                   modified < cutoff
             else { continue }
             for path in [audioPath, AudioFormatSidecar.path(forAudio: audioPath),
+                         MeetingSession.metadataPath(forAudio: audioPath),
                          ChunkedTranscription.workDirectory(forAudio: audioPath),
                          RecordingRecovery.attemptsPath(forAudio: audioPath)] {
                 try? fm.removeItem(atPath: path)

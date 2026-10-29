@@ -13,6 +13,7 @@ final class CalendarService: ObservableObject {
     @Published private(set) var upcomingMeetings: [Meeting] = []
     @Published private(set) var isAuthorized = false
     @Published var lastError: String?
+    private(set) var eventSnapshots: [CalendarEventSnapshot] = []
 
     static let approachWindow: TimeInterval = 300
 
@@ -56,11 +57,22 @@ final class CalendarService: ObservableObject {
         let calendar = Calendar.current
         guard let end = calendar.date(byAdding: .day, value: 2, to: calendar.startOfDay(for: now)) else { return }
         let predicate = eventStore.predicateForEvents(withStart: now, end: end, calendars: nil)
-        let meetings = eventStore.events(matching: predicate).compactMap { event in
-            MeetingFilter.meeting(from: Self.snapshot(event), whitelist: whitelist)
-        }
+        eventSnapshots = eventStore.events(matching: predicate).map { Self.snapshot($0) }
+        let meetings = eventSnapshots.compactMap { MeetingFilter.meeting(from: $0, whitelist: whitelist) }
         upcomingMeetings = MeetingFilter.upcoming(meetings, now: now)
         scheduleNextEvaluation(now: now)
+    }
+
+    /// Query the recording instant, not a cached upcoming title. Imports and
+    /// recovery use their persisted context (or unmatched), never this method.
+    func captureContext(at date: Date, activeBundleIDs: [String],
+                        timeZone: String = TimeZone.current.identifier) -> MeetingContext {
+        guard isAuthorized else {
+            return MeetingContext.capture(events: [], at: date, activeBundleIDs: activeBundleIDs, timeZone: timeZone)
+        }
+        let predicate = eventStore.predicateForEvents(withStart: date, end: date.addingTimeInterval(1), calendars: nil)
+        let snapshots = eventStore.events(matching: predicate).map { Self.snapshot($0) }
+        return MeetingContext.capture(events: snapshots, at: date, activeBundleIDs: activeBundleIDs, timeZone: timeZone)
     }
 
     /// Re-publishes `upcomingMeetings` (which wakes AppState's sink) at
@@ -82,14 +94,23 @@ final class CalendarService: ObservableObject {
     }
 
     static func snapshot(_ event: EKEvent) -> CalendarEventSnapshot {
-        let attendees = (event.attendees ?? []).compactMap { participant -> CalendarEventSnapshot.Attendee? in
-            let raw = participant.url.absoluteString.replacingOccurrences(of: "mailto:", with: "")
-            let email = (raw.removingPercentEncoding ?? raw).lowercased()
-            guard !email.isEmpty else { return nil }
-            return .init(email: email, isCurrentUser: participant.isCurrentUser)
-        }
-        return CalendarEventSnapshot(id: event.eventIdentifier ?? UUID().uuidString, title: event.title,
+        let identifier: String? = event.eventIdentifier
+        return CalendarEventSnapshot(id: identifier.flatMap { $0.isEmpty ? nil : $0 }, title: event.title,
                                      start: event.startDate, end: event.endDate, url: event.url,
-                                     notes: event.notes, attendees: attendees)
+                                     notes: event.notes, attendees: (event.attendees ?? []).map { attendee($0) },
+                                     organizer: event.organizer.map { attendee($0) }, isAllDay: event.isAllDay)
+    }
+
+    private static func attendee(_ participant: EKParticipant) -> CalendarEventSnapshot.Attendee {
+        // A participant URL need not be mailto. Preserve the participant even
+        // when its real name or email is unavailable, instead of inventing one.
+        var email: String?
+        if participant.url.scheme?.lowercased() == "mailto",
+           let address = URLComponents(url: participant.url, resolvingAgainstBaseURL: false)?.path,
+           !address.isEmpty, address.contains("@"), !address.contains(where: { $0.isWhitespace }) {
+            email = address
+        }
+        let name = participant.name.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
+        return .init(name: name, email: email, isCurrentUser: participant.isCurrentUser)
     }
 }

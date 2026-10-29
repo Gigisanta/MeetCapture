@@ -13,28 +13,42 @@ import Foundation
 import os
 
 enum CallAppMatcher {
-    static let prefixes: [String] = [
+    private static let browserPrefixes: [String] = [
         // Browsers (Meet, web Zoom/Teams/Whereby/Jitsi run here)
         "com.google.chrome", "com.apple.safari", "org.mozilla.firefox",
         "com.microsoft.edgemac", "com.brave.browser", "com.operasoftware.opera",
         "com.vivaldi.vivaldi", "company.thebrowser",
         // Safari and other WebKit apps capture the mic from this helper.
         "com.apple.WebKit.GPU",
-        // Native conferencing apps
-        "us.zoom.xos", "com.microsoft.teams", "com.microsoft.teams2", "com.tinyspeck.slackmacgap",
-        "com.apple.facetime", "com.hnc.discord", "com.cisco.webexmeetingsapp",
-        "com.skype", "com.google.meet",
-        // Messaging apps with voice/video calls
-        "net.whatsapp.WhatsApp", "org.whispersystems.signal", "ru.keepcoder.Telegram",
     ]
+    private static let nativeApps: [(prefix: String, provider: MeetingProvider)] = [
+        ("us.zoom.xos", .zoom), ("com.microsoft.teams", .teams), ("com.microsoft.teams2", .teams),
+        ("com.tinyspeck.slackmacgap", .slack), ("com.apple.facetime", .faceTime), ("com.hnc.discord", .discord),
+        ("com.cisco.webexmeetingsapp", .webex), ("com.skype", .skype), ("com.google.meet", .meet),
+        ("net.whatsapp.WhatsApp", .whatsapp), ("org.whispersystems.signal", .signal), ("ru.keepcoder.Telegram", .telegram),
+    ]
+    static let prefixes = browserPrefixes + nativeApps.map(\.prefix)
 
     /// Case-insensitive prefix match. Empty or nil bundle IDs never match.
     static func isCallApp(bundleID: String?) -> Bool {
         guard let bid = bundleID?.lowercased(), !bid.isEmpty else { return false }
-        return prefixes.contains { prefix in
-            let prefix = prefix.lowercased()
-            return bid == prefix || bid.hasPrefix(prefix + ".")
-        }
+        return prefixes.contains { matches(bid, prefix: $0) }
+    }
+
+    /// Only a known native app's mic capture identifies its platform. Browser
+    /// and WebKit helper identities intentionally carry no platform claim.
+    static func platform(bundleID: String) -> MeetingPlatform {
+        provider(bundleID: bundleID)?.platform ?? .unknown
+    }
+
+    static func provider(bundleID: String) -> MeetingProvider? {
+        let bid = bundleID.lowercased()
+        return nativeApps.first { matches(bid, prefix: $0.prefix) }?.provider
+    }
+
+    private static func matches(_ bundleID: String, prefix: String) -> Bool {
+        let prefix = prefix.lowercased()
+        return bundleID == prefix || bundleID.hasPrefix(prefix + ".")
     }
 }
 
@@ -129,6 +143,15 @@ final class CallDetector: ObservableObject {
     /// Process objects of call apps currently capturing the mic (targeted tap).
     nonisolated func activeCallProcessIDs() -> [AudioObjectID] {
         CoreAudioProcesses.callAppProcesses(capturingInputOnly: true)
+    }
+
+    /// Fresh identities from processes actually capturing microphone input;
+    /// running applications and a generic browser name are not platform proof.
+    nonisolated func activeCallBundleIDs() -> [String] {
+        let bundles = CoreAudioProcesses.callAppProcesses(capturingInputOnly: true).compactMap {
+            CoreAudioProcesses.bundleID($0)
+        }
+        return Array(Set(bundles)).sorted()
     }
 
     private func evaluate(reason: String) {

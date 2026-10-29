@@ -8,17 +8,21 @@ final class DetectionRegressionTests: XCTestCase {
         XCTAssertTrue(CallAppMatcher.isCallApp(bundleID: "com.google.chrome.helper"))
     }
 
-    func testMeetingFilterRejectsLookalikeMeetHost() {
+    func testMeetingFilterRejectsLookalikeAndEmbeddedMeetHosts() {
         let now = TestSupport.fixedDate
-        let event = CalendarEventSnapshot(
-            id: "lookalike",
-            title: "External",
-            start: now.addingTimeInterval(300),
-            end: now.addingTimeInterval(1_800),
-            url: URL(string: "https://notmeet.google.com/abc-defg-hij"),
-            notes: nil,
-            attendees: [.init(email: "guest@example.com", isCurrentUser: false)])
-
-        XCTAssertNil(MeetingFilter.meeting(from: event, whitelist: []))
+        for address in [
+            "https://notmeet.google.com/abc-defg-hij",
+            "https://meet.google.com.evil.test/abc-defg-hij",
+            "https://evil.test/path/https://meet.google.com/abc-defg-hij",
+        ] {
+            var event = CalendarEventSnapshot(
+                id: "lookalike", title: "External", start: now.addingTimeInterval(300),
+                end: now.addingTimeInterval(1_800), url: URL(string: address), notes: nil,
+                attendees: [.init(email: "guest@example.com", isCurrentUser: false)])
+            XCTAssertNil(MeetingFilter.meeting(from: event, whitelist: []), address)
+            event.url = nil
+            event.notes = "Join: \(address)"
+            XCTAssertNil(MeetingFilter.meeting(from: event, whitelist: []), address)
+        }
     }
 }

@@ -28,26 +28,30 @@ final class BleedGateTests: XCTestCase {
     func testDelayedEchoOfTheSystemChannelIsMuted() {
         let system = noise(3 * rate, seed: 1, amp: 0.3)
         let delay = 30 * rate / 1_000
-        let mic = [Float](repeating: 0, count: delay) + system.prefix(system.count - delay).map { $0 * 0.4 }
-        let out = BleedGate.apply(mic: mic, system: withHistory(system))
-        XCTAssertEqual(muted(out), [true, true, true, true, true, true])
+        var mic = [Float](repeating: 0, count: delay) + system.prefix(system.count - delay).map { $0 * 0.4 }
+        let gatedSamples = BleedGate.apply(mic: &mic, system: withHistory(system))
+        XCTAssertEqual(muted(mic), [true, true, true, true, true, true])
+        XCTAssertEqual(gatedSamples, 3 * rate)
     }
 
     func testMicCopyAheadOfTheTapIsMuted() {
         let system = noise(3 * rate, seed: 8, amp: 0.3)
         let lead = 5 * rate / 1_000
-        let mic = system.dropFirst(lead).map { $0 * 0.4 } + [Float](repeating: 0, count: lead)
-        let out = BleedGate.apply(mic: mic, system: withHistory(system))
-        XCTAssertEqual(muted(out), [true, true, true, true, true, true])
+        var mic = system.dropFirst(lead).map { $0 * 0.4 } + [Float](repeating: 0, count: lead)
+        let gatedSamples = BleedGate.apply(mic: &mic, system: withHistory(system))
+        XCTAssertEqual(muted(mic), [true, true, true, true, true, true])
+        XCTAssertEqual(gatedSamples, 3 * rate)
     }
 
     func testGioAloneIsKeptAndTheRemoteSideSilentIsKept() {
         let gio = noise(2 * rate, seed: 2, amp: 0.3)
         let silence = [Float](repeating: 0, count: 2 * rate)
-        XCTAssertEqual(BleedGate.apply(mic: gio, system: withHistory(silence)), gio)
         let unrelated = noise(2 * rate, seed: 3, amp: 0.3)
-        XCTAssertEqual(BleedGate.apply(mic: gio, system: withHistory(unrelated)), gio,
-                       "uncorrelated remote audio is not bleed")
+        for system in [silence, unrelated] {
+            var mic = gio
+            XCTAssertEqual(BleedGate.apply(mic: &mic, system: withHistory(system)), 0)
+            XCTAssertEqual(mic, gio, "silence and uncorrelated remote audio are not bleed")
+        }
     }
 
     func testDoubleTalkWhereGioDominatesIsKept() {
@@ -55,28 +59,37 @@ final class BleedGateTests: XCTestCase {
         let gio = noise(2 * rate, seed: 5, amp: 0.6)
         let delay = 20 * rate / 1_000
         let bleed = [Float](repeating: 0, count: delay) + system.prefix(system.count - delay)
-        let mic = zip(gio, bleed).map { $0 + $1 }
-        XCTAssertEqual(BleedGate.apply(mic: mic, system: withHistory(system)), mic)
+        let original = zip(gio, bleed).map { $0 + $1 }
+        var mic = original
+        XCTAssertEqual(BleedGate.apply(mic: &mic, system: withHistory(system)), 0)
+        XCTAssertEqual(mic, original)
     }
 
     func testEchoBeyondTheLagRangeIsNotMuted() {
         let system = noise(2 * rate, seed: 6, amp: 0.3)
         let delay = 300 * rate / 1_000
-        let mic = [Float](repeating: 0, count: delay) + system.prefix(system.count - delay).map { $0 * 0.4 }
-        let out = BleedGate.apply(mic: mic, system: withHistory(system))
-        XCTAssertEqual(muted(out).dropFirst(), [false, false, false])
+        var mic = [Float](repeating: 0, count: delay) + system.prefix(system.count - delay).map { $0 * 0.4 }
+        _ = BleedGate.apply(mic: &mic, system: withHistory(system))
+        XCTAssertEqual(muted(mic).dropFirst(), [false, false, false])
     }
 
     func testLocalVoiceEchoedBackByTheRemoteSideIsKept() {
         let gio = noise(2 * rate, seed: 9, amp: 0.3)
         let delay = 300 * rate / 1_000
         let system = [Float](repeating: 0, count: delay) + gio.prefix(gio.count - delay).map { $0 * 0.4 }
-        let out = BleedGate.apply(mic: gio, system: withHistory(system))
-        XCTAssertEqual(muted(out).dropFirst(), [false, false, false])
+        var mic = gio
+        _ = BleedGate.apply(mic: &mic, system: withHistory(system))
+        XCTAssertEqual(muted(mic).dropFirst(), [false, false, false])
     }
 
     func testTrailingPartialWindowIsLeftAlone() {
-        let system = noise(rate / 4, seed: 7, amp: 0.3)
-        XCTAssertEqual(BleedGate.apply(mic: system, system: withHistory(system)), system)
+        for (count, expectedGated) in [(rate / 4, 0), (5 * rate / 4, rate)] {
+            let system = noise(count, seed: 7, amp: 0.3)
+            var mic = system
+            XCTAssertEqual(BleedGate.apply(mic: &mic, system: withHistory(system)), expectedGated)
+            XCTAssertTrue(mic.prefix(expectedGated).allSatisfy { $0 == 0 })
+            XCTAssertEqual(mic.suffix(rate / 4), system.suffix(rate / 4),
+                           "the partial window is neither changed nor counted")
+        }
     }
 }

@@ -1,12 +1,11 @@
-// PendingContractV2.swift
-// The handoff file the summary dispatcher (tools/summary) consumes:
-// <meetingsDir>/meet-<epoch>-<uuid>.pending. Byte-stable: sorted keys, pretty
-// printed, written to a temp file and renamed into place.
+// PendingContract.swift
+// Producer v3 retains the v2 base fields for downstream consumers and adds
+// frozen evidence. Published atomically as <meetingId>.pending.
 
 import CryptoKit
 import Foundation
 
-struct PendingContractV2: Equatable, Sendable {
+struct PendingContract: Equatable, Sendable {
     var session: MeetingSession
     var endedAt: Date
     var transcriptPath: String
@@ -17,6 +16,7 @@ struct PendingContractV2: Equatable, Sendable {
     var model: String
     var language: String
     var segments: [Segment]
+    var quality: TranscriptionQuality? = nil
 
     var speakerCount: Int { TranscriptFormatter.speakerCount(segments) }
 
@@ -43,31 +43,64 @@ struct PendingContractV2: Equatable, Sendable {
     func encode(audioExists: Bool) throws -> Data {
         let duration = endedAt.timeIntervalSince(session.startedAt)
         guard duration.isFinite, duration >= 0 else { throw ContractError.invalidDuration }
-        var segmentDicts: [[String: Any]] = []
-        segmentDicts.reserveCapacity(segments.count)
-        for s in segments {
-            var d: [String: Any] = ["start": s.start, "end": s.end, "text": s.text]
-            if let speaker = s.speaker, !speaker.isEmpty { d["speaker"] = speaker }
-            segmentDicts.append(d)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        return try encoder.encode(Payload(value: self, audioExists: audioExists, duration: duration))
+    }
+
+    private struct Payload: Encodable {
+        var value: PendingContract
+        var audioExists: Bool
+        var duration: TimeInterval
+
+        enum CodingKeys: String, CodingKey {
+            case version, meetingId, title, startedAt, endedAt, durationSec
+            case transcriptPath, audioPath, engine, model, language, segments
+            case speakerCount, speakers, checksum, calendarEvent, calendarMatch
+            case platform, platformEvidence, timeZone, speakerMap, quality, supersedesMeetingId
         }
-        let contract: [String: Any] = [
-            "version": 2,
-            "meetingId": session.id,
-            "title": session.displayTitle,
-            "startedAt": ISO8601.string(from: session.startedAt),
-            "endedAt": ISO8601.string(from: endedAt),
-            "durationSec": duration,
-            "transcriptPath": transcriptPath,
-            "audioPath": (audioExists ? audioPath : nil).map { $0 as Any } ?? NSNull(),
-            "engine": engine.rawValue,
-            "model": model,
-            "language": language,
-            "segments": segmentDicts,
-            "speakerCount": speakerCount,
-            "speakers": speakers,
-            "checksum": Self.sha256Hex(transcriptText),
-        ]
-        return try JSONSerialization.data(withJSONObject: contract, options: [.prettyPrinted, .sortedKeys])
+
+        enum SegmentKeys: String, CodingKey { case start, end, text, speaker }
+
+        func encode(to encoder: Encoder) throws {
+            var root = encoder.container(keyedBy: CodingKeys.self)
+            let context = value.session.context
+            let speakers = value.speakers
+            try root.encode(3, forKey: .version)
+            try root.encode(value.session.id, forKey: .meetingId)
+            try root.encode(value.session.displayTitle, forKey: .title)
+            try root.encode(ISO8601.string(from: value.session.startedAt), forKey: .startedAt)
+            try root.encode(ISO8601.string(from: value.endedAt), forKey: .endedAt)
+            try root.encode(duration, forKey: .durationSec)
+            try root.encode(value.transcriptPath, forKey: .transcriptPath)
+            try root.encode(audioExists ? value.audioPath : nil, forKey: .audioPath)
+            try root.encode(value.engine.rawValue, forKey: .engine)
+            try root.encode(value.model, forKey: .model)
+            try root.encode(value.language, forKey: .language)
+            var turns = root.nestedUnkeyedContainer(forKey: .segments)
+            for segment in value.segments {
+                var turn = turns.nestedContainer(keyedBy: SegmentKeys.self)
+                try turn.encode(segment.start, forKey: .start)
+                try turn.encode(segment.end, forKey: .end)
+                try turn.encode(segment.text, forKey: .text)
+                if let speaker = segment.speaker, !speaker.isEmpty {
+                    try turn.encode(speaker, forKey: .speaker)
+                }
+            }
+            try root.encode(value.speakerCount, forKey: .speakerCount)
+            try root.encode(speakers, forKey: .speakers)
+            try root.encode(PendingContract.sha256Hex(value.transcriptText), forKey: .checksum)
+            try root.encode(context.calendarEvent, forKey: .calendarEvent)
+            try root.encode(context.calendarMatch, forKey: .calendarMatch)
+            try root.encode(context.platform, forKey: .platform)
+            try root.encode(context.platformEvidence, forKey: .platformEvidence)
+            try root.encode(context.timeZone, forKey: .timeZone)
+            try root.encode(context.speakerMap(for: speakers, remoteSpeakerCount: value.quality?.remoteSpeakerCount),
+                            forKey: .speakerMap)
+            try root.encode(value.quality, forKey: .quality)
+            try root.encodeIfPresent(value.session.supersedesMeetingId, forKey: .supersedesMeetingId)
+        }
     }
 
     /// Atomic write; throws on failure (the caller must not delete audio then).

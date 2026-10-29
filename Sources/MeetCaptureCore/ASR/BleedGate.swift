@@ -25,13 +25,14 @@ enum BleedGate {
     /// `mic` is R for a span in [-1, 1]; `system` is L for the same span
     /// preceded by `maxLagSamples` of history and followed by `maxLeadSamples`
     /// (zeros outside the file).
-    /// Returns `mic` with the bleed windows zeroed; a trailing partial window is kept.
-    static func apply(mic: [Float], system: [Float]) -> [Float] {
+    /// Zeros the bleed windows in place and returns their sample count.
+    /// A trailing partial window is kept and never counted as gated.
+    static func apply(mic: inout [Float], system: [Float]) -> Int {
         precondition(system.count == mic.count + maxLagSamples + maxLeadSamples,
                      "system needs lag history and lead samples")
-        var out = mic
         let windows = mic.count / windowSamples
-        guard windows > 0 else { return out }
+        guard windows > 0 else { return 0 }
+        var gatedSamples = 0
         let r = bandpass(mic), l = bandpass(system)
         for window in 0..<windows {
             let start = window * windowSamples
@@ -40,10 +41,11 @@ enum BleedGate {
             let rDB = dbfs(mic[range])
             guard lDB > silenceDB, rDB - lDB < dominanceDB else { continue }
             if peakCorrelation(mic: r, system: l, start: start) > correlation {
-                out.replaceSubrange(range, with: repeatElement(0, count: windowSamples))
+                mic.replaceSubrange(range, with: repeatElement(0, count: windowSamples))
+                gatedSamples += windowSamples
             }
         }
-        return out
+        return gatedSamples
     }
 
     /// Peak |NCC| of the R window at `start` against L delayed −maxLead…maxLag.

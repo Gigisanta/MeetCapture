@@ -52,6 +52,7 @@ final class TranscriptionJobTests: XCTestCase {
                 : [Segment(start: 1.5, end: 1.9, text: "Buenas"), Segment(start: 3.1, end: 3.3, text: "listo")]
         }
         let diarizer = FakeDiarizer([SpeakerSpan(start: 0, end: 1, speaker: "B"),
+                                     SpeakerSpan(start: 1.0, end: 1.4, speaker: "C"),
                                      SpeakerSpan(start: 2.8, end: 4, speaker: "A")])
         let job = TranscriptionJob(audioPath: audio, captureSampleRate: 16_000, language: "es", diarize: true,
                                    aliases: ["AppSheet": ["app sheet"]], recognizer: recognizer, diarizer: diarizer)
@@ -64,6 +65,21 @@ final class TranscriptionJobTests: XCTestCase {
         XCTAssertEqual(outcome.modelUsed, FakeRecognizer.testIdentity.model)
         XCTAssertEqual(outcome.failedChunks, 0)
         XCTAssertEqual(outcome.audioDurationSec ?? 0, 4, accuracy: 0.01)
+        // Exercise the same Codable boundary as the worker, with a real run's
+        // measurements rather than a hand-authored quality payload.
+        let transferred = try JSONDecoder().decode(TranscriptionJob.Outcome.self, from: JSONEncoder().encode(outcome))
+        let quality = try XCTUnwrap(transferred.quality)
+        XCTAssertEqual(quality.audioDurationSec, 4)
+        XCTAssertEqual(quality.remoteSpeakerCount, 3,
+                       "diarized speakers without recognized words must not disappear into a guessed 1:1")
+        XCTAssertNil(quality.channels.single)
+        XCTAssertEqual(quality.channels.remote?.decodingCoverage, 1)
+        XCTAssertEqual(quality.channels.remote?.decodedDurationSec, 4)
+        XCTAssertEqual(quality.channels.remote?.failedChunks, [])
+        XCTAssertNil(quality.channels.remote?.bleedGate)
+        XCTAssertEqual(quality.channels.microphone?.decodedDurationSec, 4)
+        XCTAssertEqual(quality.channels.microphone?.bleedGate,
+                       .init(measuredSamples: 4 * rate, gatedSamples: 0, gatedDurationSec: 0, complete: true))
         let work = ChunkedTranscription.workDirectory(forAudio: audio)
         XCTAssertFalse(FileManager.default.fileExists(atPath: work + "/system.wav"), "channel WAVs are derived data")
         XCTAssertFalse(FileManager.default.fileExists(atPath: work + "/mic.wav"))
@@ -74,31 +90,83 @@ final class TranscriptionJobTests: XCTestCase {
                                                diarize: true, recognizer: FakeRecognizer { _, _ in [] },
                                                diarizer: diarizer).run { _ in }
         XCTAssertEqual(again.segments.map(\.speaker), ["Participante 1", "Yo", "Participante 2", "Yo"])
+        XCTAssertEqual(again.quality, quality, "resuming must preserve measured counters and the remote-speaker evidence")
         let diarizations = await diarizer.calls
         XCTAssertEqual(diarizations, 1)
     }
 
-    func testFailedDiarizationFallsBackToOneParticipant() async throws {
-        let dir = TestSupport.makeTempDir(self, "job-nodiar")
-        let audio = try capture(dir, left: WAVFixture.tone(seconds: 2), right: gio(2))
-        let recognizer = FakeRecognizer { call, _ in
-            [Segment(start: call == 0 ? 0 : 1, end: call == 0 ? 0.5 : 1.5, text: call == 0 ? "remoto" : "local")]
+    func testOnlyProvenSystemMicLayoutCanSupplyRemoteSpeakerCount() async throws {
+        var unsupportedSchema = AudioFormatSidecar.capture(tapStrategy: "global", tapInfo: "test")
+        unsupportedSchema.schema = "meetcapture.audio.v999"
+        let cases: [(AudioFormatSidecar, Bool)] = [
+            (.capture(tapStrategy: "global", tapInfo: "test"), true),
+            (.imported(), false),
+            (.capture(tapStrategy: "mic-only", tapInfo: "test"), false),
+            (unsupportedSchema, false),
+        ]
+        for (index, entry) in cases.enumerated() {
+            let (format, proven) = entry
+            let dir = TestSupport.makeTempDir(self, "job-layout-evidence-\(index)")
+            let audio = try capture(dir, left: WAVFixture.tone(seconds: 2), right: gio(2))
+            try format.write(forAudio: audio)
+            let outcome = try await TranscriptionJob(
+                audioPath: audio, captureSampleRate: 16_000, language: "es", diarize: true,
+                recognizer: FakeRecognizer { _, _ in [Segment(start: 0, end: 0.5, text: "voz")] },
+                diarizer: FakeDiarizer([SpeakerSpan(start: 0, end: 2, speaker: "A")])).run { _ in }
+            let quality = try XCTUnwrap(outcome.quality)
+            if proven {
+                XCTAssertEqual(quality.remoteSpeakerCount, 1)
+                XCTAssertNotNil(quality.channels.remote)
+                XCTAssertNotNil(quality.channels.microphone)
+                XCTAssertNil(quality.channels.left)
+                XCTAssertNil(quality.channels.right)
+            } else {
+                XCTAssertNil(quality.remoteSpeakerCount, "stereo positions or a mic-only sidecar cannot prove a remote identity")
+                XCTAssertNil(quality.channels.remote)
+                XCTAssertNil(quality.channels.microphone)
+                XCTAssertNotNil(quality.channels.left)
+                XCTAssertNotNil(quality.channels.right)
+            }
+            XCTAssertNil(quality.channels.single)
         }
-        let outcome = try await TranscriptionJob(audioPath: audio, captureSampleRate: 16_000, language: "es",
-                                                 diarize: true, recognizer: recognizer,
-                                                 diarizer: FakeDiarizer(nil)).run { _ in }
-        XCTAssertEqual(TranscriptFormatter.text(for: outcome.segments), "[Participante]: remoto\n[Yo]: local")
+    }
+
+    func testUnavailableOrEmptyDiarizationFallsBackWithoutRemoteSpeakerEvidence() async throws {
+        let cases: [[SpeakerSpan]?] = [nil, []]
+        for (index, spans) in cases.enumerated() {
+            let dir = TestSupport.makeTempDir(self, "job-nodiar-\(index)")
+            let audio = try capture(dir, left: WAVFixture.tone(seconds: 2), right: gio(2))
+            let recognizer = FakeRecognizer { call, _ in
+                [Segment(start: call == 0 ? 0 : 1, end: call == 0 ? 0.5 : 1.5, text: call == 0 ? "remoto" : "local")]
+            }
+            let outcome = try await TranscriptionJob(audioPath: audio, captureSampleRate: 16_000, language: "es",
+                                                     diarize: true, recognizer: recognizer,
+                                                     diarizer: FakeDiarizer(spans)).run { _ in }
+            XCTAssertEqual(TranscriptFormatter.text(for: outcome.segments), "[Participante]: remoto\n[Yo]: local")
+            XCTAssertNotNil(outcome.quality?.channels.remote)
+            XCTAssertNil(outcome.quality?.remoteSpeakerCount, "a generic fallback label is not a measured single remote")
+        }
     }
 
     func testSilentSystemChannelTranscribesTheMicAloneWithoutLabels() async throws {
         let dir = TestSupport.makeTempDir(self, "job-silent-tap")
         let audio = try capture(dir, left: [Int16](repeating: 3, count: 2 * rate), right: gio(2))
         let recognizer = FakeRecognizer { _, _ in [Segment(start: 0, end: 0.5, text: "solo")] }
-        let diarizer = FakeDiarizer([])
+        let diarizer = FakeDiarizer([SpeakerSpan(start: 0, end: 2, speaker: "A")])
         let outcome = try await TranscriptionJob(audioPath: audio, captureSampleRate: 16_000, language: "es",
                                                  diarize: false, recognizer: recognizer,
                                                  diarizer: diarizer).run { _ in }
         XCTAssertEqual(TranscriptFormatter.text(for: outcome.segments), "solo")
+        XCTAssertNotNil(outcome.quality?.channels.single)
+        XCTAssertNil(outcome.quality?.channels.remote)
+        XCTAssertNil(outcome.quality?.channels.microphone)
+        XCTAssertNil(outcome.quality?.remoteSpeakerCount)
+        let diarized = try await TranscriptionJob(audioPath: audio, captureSampleRate: 16_000, language: "es",
+                                                  diarize: true, recognizer: recognizer,
+                                                  diarizer: diarizer).run { _ in }
+        XCTAssertEqual(TranscriptFormatter.text(for: diarized.segments), "[Participante 1]: solo")
+        XCTAssertNil(diarized.quality?.remoteSpeakerCount, "a successful diarization of mic-only audio cannot name the calendar peer")
+        XCTAssertNotNil(diarized.quality?.channels.single)
         let calls = await recognizer.calls
         XCTAssertEqual(calls, 1, "one channel, one chunk")
     }
@@ -180,6 +248,8 @@ final class TranscriptionJobTests: XCTestCase {
             audioPath: wav.path, captureSampleRate: 16_000, language: "es", diarize: true,
             recognizer: resumed, diarizer: FakeDiarizer([SpeakerSpan(start: 0, end: 1, speaker: "A")])).run { _ in }
         XCTAssertEqual(TranscriptFormatter.text(for: outcome.segments), "[Participante 1]: No")
+        XCTAssertNotNil(outcome.quality?.channels.single)
+        XCTAssertNil(outcome.quality?.remoteSpeakerCount, "a mono import is not proven remote audio")
         let calls = await resumed.calls
         XCTAssertEqual(calls, 0, "resume uses the completed ASR, not a silently cancelled diarization cache")
         let resumedReleases = await resumed.releases

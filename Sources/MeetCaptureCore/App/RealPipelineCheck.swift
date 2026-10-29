@@ -177,7 +177,7 @@ public enum RealPipelineCheck {
         var result: [String: Any] = ["status": "passed", "mode": mode, "text": text,
             "inputDurationSec": duration, "elapsedSec": elapsed,
             "historyCount": history.count, "records": records, "diarize": Settings.diarize,
-            "speakers": PendingContractV2.speakers(of: app.lastSegments),
+            "speakers": PendingContract.speakers(of: app.lastSegments),
             "micOnly": Settings.micOnlyMode,
             "memory": ["samples": memory, "children_max_rss_bytes": Self.childrenMaxRSS()]]
         result.merge(capture) { _, new in new }

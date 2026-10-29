@@ -198,6 +198,15 @@ final class MeetingStore: @unchecked Sendable {
         querySummaries("SELECT \(Self.summaryColumns) FROM meetings ORDER BY started_at DESC LIMIT \(max(1, limit));")
     }
 
+    func summary(id: String) -> MeetingSummary? {
+        querySummaries("SELECT \(Self.summaryColumns) FROM meetings WHERE id = ? LIMIT 1;", binds: [id]).first
+    }
+
+    func summary(transcriptPath: String) -> MeetingSummary? {
+        querySummaries("SELECT \(Self.summaryColumns) FROM meetings WHERE transcript_path = ? ORDER BY ended_at DESC LIMIT 1;",
+                       binds: [transcriptPath]).first
+    }
+
     func record(id: String) -> MeetingRecord? {
         guard let db else { return nil }
         lock.lock(); defer { lock.unlock() }

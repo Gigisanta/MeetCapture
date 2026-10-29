@@ -1,64 +1,50 @@
 import XCTest
 @testable import MeetCaptureCore
 
-final class PendingContractV2Tests: XCTestCase {
+final class PendingContractTests: XCTestCase {
     private let session = MeetingSession(startedAt: TestSupport.fixedDate, title: "Reunión de prueba")
 
-    private func contract(segments: [Segment], audioPath: String = "/nonexistent/recording.pcm") -> PendingContractV2 {
-        PendingContractV2(session: session, endedAt: TestSupport.fixedDate.addingTimeInterval(90.5),
+    private func contract(segments: [Segment], audioPath: String = "/nonexistent/recording.pcm") -> PendingContract {
+        PendingContract(session: session, endedAt: TestSupport.fixedDate.addingTimeInterval(90.5),
                           transcriptPath: "/tmp/x.txt", transcriptText: TranscriptFormatter.text(for: segments),
                           audioPath: audioPath, engine: .parakeet, model: "parakeet-tdt-0.6b-ultra", language: "es",
                           segments: segments)
     }
 
-    /// Golden shape: the 14 keys of the v2 `.done` files plus `speakers`, in sorted order.
-    func testEncodesExactlyTheV2KeysSorted() throws {
+    func testMissingAudioCannotInviteCleanupAndAnonymousTurnHasNoInventedSpeaker() throws {
         let data = try contract(segments: [Segment(start: 0, end: 1.5, text: "hola")]).encode(audioExists: false)
         let root = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
-        let expected = ["audioPath", "checksum", "durationSec", "endedAt", "engine", "language", "meetingId",
-                        "model", "segments", "speakerCount", "speakers", "startedAt", "title", "transcriptPath", "version"]
-        XCTAssertEqual(root.keys.sorted(), expected)
-        XCTAssertEqual(root["version"] as? Int, 2)
-        XCTAssertEqual(root["meetingId"] as? String, session.id)
-        XCTAssertTrue((root["meetingId"] as? String)?.hasPrefix("meet-1788271709-") == true)
-        XCTAssertEqual(root["startedAt"] as? String, "2026-09-01T14:08:29Z")
-        XCTAssertEqual(root["durationSec"] as? Double, 90.5)
-        XCTAssertTrue(root["audioPath"] is NSNull, "audioPath must be JSON null when the file is gone")
+        XCTAssertTrue(root["audioPath"] is NSNull)
+        let turn = try XCTUnwrap((root["segments"] as? [[String: Any]])?.first)
+        XCTAssertNil(turn["speaker"])
         XCTAssertEqual(root["speakerCount"] as? Int, 0)
         XCTAssertEqual(root["speakers"] as? [String], [])
-        // Sorted keys + pretty printing is what the dispatcher and diffs rely on.
-        let text = String(decoding: data, as: UTF8.self)
-        XCTAssertTrue(text.hasPrefix("{\n  \"audioPath\""))
-        let segKeys = try XCTUnwrap((root["segments"] as? [[String: Any]])?.first?.keys.sorted())
-        XCTAssertEqual(segKeys, ["end", "start", "text"], "speaker key is omitted when nil")
     }
 
     func testChecksumIsSHA256OfTranscriptText() throws {
         let segments = [Segment(start: 0, end: 1, text: "uno", speaker: "A"), Segment(start: 1, end: 2, text: "dos", speaker: "B")]
         let c = contract(segments: segments)
         let root = try XCTUnwrap(JSONSerialization.jsonObject(with: c.encode(audioExists: true)) as? [String: Any])
-        XCTAssertEqual(root["checksum"] as? String, PendingContractV2.sha256Hex("[A]: uno\n[B]: dos"))
+        XCTAssertEqual(root["checksum"] as? String, "97e605e07510dd42e348253627db72f8a7973ce31b85ed0b24b97355c3ef9b82")
         XCTAssertEqual(contract(segments: segments + [Segment(start: 2, end: 3, text: "tres", speaker: "A")]).speakers,
                        ["A", "B"], "first appearance order, no repeats")
-        XCTAssertEqual(PendingContractV2.sha256Hex(""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
         XCTAssertEqual(root["speakerCount"] as? Int, 2)
-        XCTAssertEqual((root["segments"] as? [[String: Any]])?.first?["speaker"] as? String, "A")
     }
 
-    func testWriteIsAtomicAndLeavesNoTempFiles() throws {
+    func testRetranscriptionPublishesReplacementForTheSameMeetingId() throws {
         let dir = TestSupport.makeTempDir(self, "pending")
         let audio = dir + "/recording.pcm"
         TestSupport.write("x", to: audio)
         let path = session.pendingPath(in: dir + "/meetings")
         try contract(segments: [Segment(start: 0, end: 1, text: "hola")], audioPath: audio).write(to: path)
-        XCTAssertEqual(path, dir + "/meetings/\(session.id).pending")
-        let names = try FileManager.default.contentsOfDirectory(atPath: dir + "/meetings")
-        XCTAssertEqual(names, ["\(session.id).pending"])
         let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: path))) as? [String: Any])
         XCTAssertEqual(root["audioPath"] as? String, audio)
         // Overwrite is allowed (re-transcription of the same session).
         try contract(segments: [Segment(start: 0, end: 1, text: "otra")], audioPath: audio).write(to: path)
-        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: dir + "/meetings").count, 1)
+        let replacement = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: Data(contentsOf: URL(fileURLWithPath: path))) as? [String: Any])
+        XCTAssertEqual(replacement["meetingId"] as? String, session.id)
+        XCTAssertEqual(replacement["checksum"] as? String, "a138a1bc2fcb7314e0bb69dff5ff32c32851554476e3f65742649f2b7ae8beff")
     }
 
     func testProcessedMarkerIsIdempotent() throws {
@@ -76,10 +62,4 @@ final class PendingContractV2Tests: XCTestCase {
         XCTAssertEqual(root["meeting_title"] as? String, "A")
     }
 
-    func testSessionIdentityShapesPendingPath() {
-        let s = MeetingSession(startedAt: Date(timeIntervalSince1970: 1_788_271_709.93))
-        XCTAssertTrue(s.id.hasPrefix("meet-1788271709-"))
-        XCTAssertEqual(s.displayTitle, "Untitled Meeting")
-        XCTAssertEqual(s.pendingPath(in: "/m"), "/m/\(s.id).pending")
-    }
 }

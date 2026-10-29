@@ -49,6 +49,7 @@ struct TranscriptionJob: Sendable {
         var audioDurationSec: Double? = nil
         /// Chunks no attempt could transcribe; the caller keeps the audio.
         var failedChunks = 0
+        var quality: TranscriptionQuality? = nil
     }
 
     func run(progress: @escaping @Sendable (Double) -> Void) async throws -> Outcome {
@@ -66,10 +67,15 @@ struct TranscriptionJob: Sendable {
         defer { ChannelReader.cleanup(layout, original: audioPath) }
         let duration = PCMToWAV.wavDurationSeconds(layout.remote.path)
         guard duration > 0 else { throw TranscriptionError.emptyAudio }
+        let sourceFormat = AudioFormatSidecar.read(forAudio: audioPath)
+        let remoteChannelIsProven = sourceFormat?.schema == AudioFormatSidecar.currentSchema
+            && layout.mic != nil && sourceFormat?.channels == 2
+            && sourceFormat?.layout == "L=system,R=mic" && sourceFormat?.tapStrategy != "mic-only"
         let identity = try await recognizer.prepare()
         let outcome: Outcome
         do {
             outcome = try await transcribePrepared(layout: layout, work: work, duration: duration,
+                                                   remoteChannelIsProven: remoteChannelIsProven,
                                                    identity: identity, progress: progress)
         } catch {
             await recognizer.release()
@@ -81,7 +87,7 @@ struct TranscriptionJob: Sendable {
     }
 
     private func transcribePrepared(layout: ChannelLayout, work: String, duration: TimeInterval,
-                                    identity: RecognitionIdentity,
+                                    remoteChannelIsProven: Bool, identity: RecognitionIdentity,
                                     progress: @escaping @Sendable (Double) -> Void) async throws -> Outcome {
         progress(0.1)
         try Task.checkCancellation()
@@ -103,9 +109,17 @@ struct TranscriptionJob: Sendable {
         try Task.checkCancellation()
 
         var words = remote.words
+        var remoteSpeakerCount: Int? = nil
         if diarize || mic != nil {
             let spans = diarize ? try await speakerSpans(layout.remote, work: work, audioBytes: audioBytes,
                                                          sourceSHA256: remote.sourceSHA256) : nil
+            if remoteChannelIsProven, let spans, !spans.isEmpty,
+               spans.allSatisfy({
+                   $0.start.isFinite && $0.end.isFinite && $0.start >= 0 && $0.start < duration
+                       && $0.end > $0.start && !$0.speaker.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+               }) {
+                remoteSpeakerCount = Set(spans.map(\.speaker)).count
+            }
             words = TurnMerger.labelRemote(words, spans: spans)
             try Task.checkCancellation()
         }
@@ -117,8 +131,18 @@ struct TranscriptionJob: Sendable {
         guard !result.isEmpty else { throw TranscriptionError.noSpeech }
         try Task.checkCancellation()
         progress(1.0)
+        let channels: TranscriptionQuality.Channels
+        if let mic {
+            channels = remoteChannelIsProven
+                ? .init(remote: remote.quality, microphone: mic.quality)
+                : .init(left: remote.quality, right: mic.quality)
+        } else {
+            channels = .init(single: remote.quality)
+        }
+        let quality = TranscriptionQuality(audioDurationSec: duration, channels: channels,
+                                           remoteSpeakerCount: remoteSpeakerCount)
         return Outcome(segments: result, engineUsed: identity.engine, modelUsed: identity.model,
-                       audioDurationSec: duration, failedChunks: gaps.count)
+                       audioDurationSec: duration, failedChunks: gaps.count, quality: quality)
     }
 
     /// nil when diarization fails: the remote side becomes one "Participante".
