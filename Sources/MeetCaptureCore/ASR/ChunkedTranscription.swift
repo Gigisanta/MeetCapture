@@ -32,11 +32,12 @@ struct ChunkManifest: Codable, Equatable {
     }
 
     struct GateIdentity: Codable, Equatable {
-        var version = 1
+        var version = 2
         var referenceSHA256: String
         var sampleRate = BleedGate.sampleRate
         var windowSamples = BleedGate.windowSamples
         var maxLagSamples = BleedGate.maxLagSamples
+        var maxLeadSamples = BleedGate.maxLeadSamples
         var correlation = BleedGate.correlation
         var dominanceDB = BleedGate.dominanceDB
         var silenceDB = BleedGate.silenceDB
@@ -150,7 +151,7 @@ enum ChunkedTranscription {
             }
             var samples = normalized(try readSamples(file, from: start, to: end))
             if let reference {
-                samples = BleedGate.apply(mic: samples, system: try history(reference, from: start, count: samples.count))
+                samples = BleedGate.apply(mic: samples, system: try referenceSpan(reference, from: start, count: samples.count))
             }
 
             var found: [Segment]?
@@ -208,15 +209,16 @@ enum ChunkedTranscription {
         return String(format: "%02d:%02d:%02d", s / 3600, s / 60 % 60, s % 60)
     }
 
-    /// `count` reference samples from `start` plus `BleedGate.maxLagSamples`
-    /// before them, zero-padded where the file has none.
-    private static func history(_ file: AVAudioFile, from start: Int, count: Int) throws -> [Float] {
-        let lag = BleedGate.maxLagSamples
+    /// Reference samples aligned with the mic span [start, start + count), plus
+    /// `BleedGate.maxLagSamples` before and `BleedGate.maxLeadSamples` after,
+    /// zero-padded where the file has none.
+    private static func referenceSpan(_ file: AVAudioFile, from start: Int, count: Int) throws -> [Float] {
+        let lag = BleedGate.maxLagSamples, lead = BleedGate.maxLeadSamples
         let from = max(0, start - lag)
-        let to = min(start + count, Int(file.length))
+        let to = min(start + count + lead, Int(file.length))
         var span = [Float](repeating: 0, count: lag - (start - from))
         if to > from { span += normalized(try readSamples(file, from: from, to: to)) }
-        let wanted = count + lag
+        let wanted = count + lag + lead
         if span.count < wanted { span += [Float](repeating: 0, count: wanted - span.count) }
         return Array(span.prefix(wanted))
     }

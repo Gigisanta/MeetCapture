@@ -1,8 +1,8 @@
 // BleedGate.swift
-// With Mac speakers the mic (R) also hears the remote side (L), a few ms
-// late. A 0.5 s window of R is muted when it follows L delayed 0–100 ms
-// (normalized cross-correlation above 0.4) and is not clearly louder than L:
-// that is the remote voice coming back through the mic, not the local speaker. Calibrated
+// With Mac speakers the mic (R) also hears the remote side (L). A 0.5 s
+// window of R is muted when that copy lands from 100 ms behind to 50 ms
+// ahead of L (normalized cross-correlation above 0.4) and is not clearly
+// louder than L: that is the remote voice coming back through the mic, not the local speaker. Calibrated
 // on real calls with the eval harness: 0.4 mutes the bleed and keeps >95 % of
 // local words; without the gate local WER was 100–220 %.
 
@@ -11,17 +11,24 @@ import Accelerate
 enum BleedGate {
     static let sampleRate = 16_000
     static let windowSamples = sampleRate / 2
-    /// Bleed reaches the mic after the speaker plays it: 0–100 ms.
+    /// Maximum delay of the speaker copy reaching the mic: 100 ms.
     static let maxLagSamples = sampleRate / 10
+    /// The aggregate device does not align the tap and the mic sub-device: the mic
+    /// copy can also land slightly before the tap copy (−2…−7 ms on the
+    /// 2026-10-26/28/29 captures). Bound the lead to 50 ms so longer remote
+    /// echoes of the local voice stay outside the search range.
+    static let maxLeadSamples = sampleRate / 20
     static let correlation: Float = 0.4
     static let dominanceDB: Float = 10
     static let silenceDB: Float = -55
 
     /// `mic` is R for a span in [-1, 1]; `system` is L for the same span
-    /// preceded by `maxLagSamples` of history (zeros before the file starts).
+    /// preceded by `maxLagSamples` of history and followed by `maxLeadSamples`
+    /// (zeros outside the file).
     /// Returns `mic` with the bleed windows zeroed; a trailing partial window is kept.
     static func apply(mic: [Float], system: [Float]) -> [Float] {
-        precondition(system.count == mic.count + maxLagSamples, "system needs the lag history")
+        precondition(system.count == mic.count + maxLagSamples + maxLeadSamples,
+                     "system needs lag history and lead samples")
         var out = mic
         let windows = mic.count / windowSamples
         guard windows > 0 else { return out }
@@ -39,14 +46,15 @@ enum BleedGate {
         return out
     }
 
-    /// Peak |NCC| of the R window at `start` against L delayed 0…maxLag.
+    /// Peak |NCC| of the R window at `start` against L delayed −maxLead…maxLag.
     /// `system` index `start` is `maxLag` samples before the window.
     static func peakCorrelation(mic: [Float], system: [Float], start: Int) -> Float {
-        let lags = maxLagSamples + 1
+        let lags = maxLagSamples + maxLeadSamples + 1
         var corr = [Float](repeating: 0, count: lags)
         mic.withUnsafeBufferPointer { r in
             system.withUnsafeBufferPointer { l in
-                // corr[k] = Σn l[start+k+n]·r[start+n]; delay = maxLag − k.
+                // corr[k] = Σn l[start+k+n]·r[start+n]; delay = maxLag − k,
+                // from +maxLag (k = 0) to −maxLead.
                 vDSP_conv(l.baseAddress! + start, 1, r.baseAddress! + start, 1,
                           &corr, 1, vDSP_Length(lags), vDSP_Length(windowSamples))
             }

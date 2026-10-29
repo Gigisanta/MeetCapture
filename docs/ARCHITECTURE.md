@@ -74,8 +74,11 @@ and `Settings` only know `Support`. Nothing below `App` touches SwiftUI.
    - *Bleed gate.* With Mac speakers the mic also hears the remote side.
      `BleedGate` mutes each 0.5 s mic window where the system level is above
      −55 dBFS, the mic is less than 10 dB above it, and the 200 Hz–4 kHz
-     band-passed signals correlate above 0.4 at a lag of 0–100 ms. Double talk
-     stays because the local speaker is then clearly louder.
+     band-passed signals correlate above 0.4 at a delay from −50 ms (mic leads
+     the tap) to +100 ms (mic lags). The reference includes 100 ms of history
+     and 50 ms of future samples, zero-padded outside the file. Gate identity
+     version 2 invalidates checkpoints made with the previous range. Double
+     talk stays because the local speaker is then clearly louder.
    - *Chunks.* `ChunkedTranscription` cuts each channel into ~5 min chunks at
      the quietest 100 ms frame within ±10 s of each boundary and transcribes
      them with `ParakeetEngine` (FluidAudio, Parakeet TDT 0.6B "ultra"), which

@@ -8,6 +8,11 @@ semantic versioning. The single source of the current version is
 ## [Unreleased]
 
 ### Fixed
+- The acoustic bleed gate now detects speaker audio reaching the microphone
+  up to 50 ms ahead of the system tap, in addition to its existing 100 ms lag
+  range. This prevents remote speech from being repeated as `Yo` when the
+  aggregate device delivers the mic first. Old gated checkpoints are rebuilt;
+  correlation and level thresholds are unchanged.
 - A calendar-started recording no longer stops at the event end while the call is still active; it continues as a live-call recording (lost 40 min on 2026-10-23).
 - Disabling automatic recording during a call no longer prevents an existing live-call recording, including one handed off from calendar, from stopping when the call ends.
 
