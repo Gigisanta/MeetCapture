@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import XCTest
 @testable import MeetCaptureCore
@@ -238,11 +239,21 @@ final class AppStateRegressionTests: XCTestCase {
 
         appState.errorMessage = "old error"
         try await Task.sleep(nanoseconds: 30_000_000)
+        let dismissed = expectation(description: "replacement error dismissed")
+        var replacedAt: ContinuousClock.Instant?
+        var visibleFor: Duration?
+        let observation = appState.$errorMessage.dropFirst().sink { message in
+            if message == "new error" { replacedAt = .now }
+            guard message == nil, let replacedAt else { return }
+            visibleFor = replacedAt.duration(to: .now)
+            dismissed.fulfill()
+        }
+        defer { observation.cancel() }
         appState.errorMessage = "new error"
-        try await Task.sleep(nanoseconds: 40_000_000)
-        XCTAssertEqual(appState.errorMessage, "new error")
 
-        try await Task.sleep(nanoseconds: 40_000_000)
+        await fulfillment(of: [dismissed], timeout: 5)
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap(visibleFor), .milliseconds(60),
+                                    "the previous error must not shorten the replacement's lifetime")
         XCTAssertNil(appState.errorMessage)
     }
 
