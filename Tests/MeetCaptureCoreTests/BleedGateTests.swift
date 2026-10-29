@@ -14,8 +14,10 @@ final class BleedGateTests: XCTestCase {
         }
     }
 
-    /// `system` with the lag history the gate expects (zeros before the span).
-    private func withHistory(_ system: [Float]) -> [Float] { [Float](repeating: 0, count: lag) + system }
+    /// `system` with lag history before and lead samples after (zeros outside the span).
+    private func withHistory(_ system: [Float]) -> [Float] {
+        [Float](repeating: 0, count: lag) + system + [Float](repeating: 0, count: BleedGate.maxLeadSamples)
+    }
 
     private func muted(_ out: [Float]) -> [Bool] {
         stride(from: 0, to: out.count - BleedGate.windowSamples + 1, by: BleedGate.windowSamples).map { start in
@@ -27,6 +29,14 @@ final class BleedGateTests: XCTestCase {
         let system = noise(3 * rate, seed: 1, amp: 0.3)
         let delay = 30 * rate / 1_000
         let mic = [Float](repeating: 0, count: delay) + system.prefix(system.count - delay).map { $0 * 0.4 }
+        let out = BleedGate.apply(mic: mic, system: withHistory(system))
+        XCTAssertEqual(muted(out), [true, true, true, true, true, true])
+    }
+
+    func testMicCopyAheadOfTheTapIsMuted() {
+        let system = noise(3 * rate, seed: 8, amp: 0.3)
+        let lead = 5 * rate / 1_000
+        let mic = system.dropFirst(lead).map { $0 * 0.4 } + [Float](repeating: 0, count: lead)
         let out = BleedGate.apply(mic: mic, system: withHistory(system))
         XCTAssertEqual(muted(out), [true, true, true, true, true, true])
     }
@@ -54,6 +64,14 @@ final class BleedGateTests: XCTestCase {
         let delay = 300 * rate / 1_000
         let mic = [Float](repeating: 0, count: delay) + system.prefix(system.count - delay).map { $0 * 0.4 }
         let out = BleedGate.apply(mic: mic, system: withHistory(system))
+        XCTAssertEqual(muted(out).dropFirst(), [false, false, false])
+    }
+
+    func testLocalVoiceEchoedBackByTheRemoteSideIsKept() {
+        let gio = noise(2 * rate, seed: 9, amp: 0.3)
+        let delay = 300 * rate / 1_000
+        let system = [Float](repeating: 0, count: delay) + gio.prefix(gio.count - delay).map { $0 * 0.4 }
+        let out = BleedGate.apply(mic: gio, system: withHistory(system))
         XCTAssertEqual(muted(out).dropFirst(), [false, false, false])
     }
 
