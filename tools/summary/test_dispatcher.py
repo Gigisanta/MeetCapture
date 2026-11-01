@@ -134,6 +134,42 @@ class DispatcherTests(unittest.TestCase):
         self.assertEqual(mod._checksum_of(os.path.join(MEETINGS, "meet-stale.done")),
                          hashlib.sha256("hola completo\n".encode("utf-8")).hexdigest())
 
+    def test_publication_after_retirement_sweep_cannot_roll_back_on_retry(self):
+        for label, fail_new in (("success", False), ("backoff", True)):
+            with self.subTest(label=label):
+                base = "meet-publish-race-" + label
+                path = _contract(base, text="anterior\n", with_audio=False, immutable=True)
+                retry = os.path.join(MEETINGS, base + ".pending.retry")
+                os.replace(path, retry)
+                os.utime(retry, (0, 0))
+                original_retire = mod.retire_if_superseded
+                published = False
+
+                def retire_then_publish(candidate):
+                    nonlocal published
+                    result = original_retire(candidate)
+                    if candidate == retry and not published:
+                        published = True
+                        _contract(base, text="nueva completa\n", with_audio=False, immutable=True)
+                    return result
+
+                with mock.patch.object(mod, "retire_if_superseded", side_effect=retire_then_publish):
+                    if fail_new:
+                        with mock.patch.object(mod, "_publish_artifacts", side_effect=OSError("disk full")):
+                            mod.run_once(self.cfg)
+                    else:
+                        mod.run_once(self.cfg)
+                self.assertTrue(published)
+                if fail_new:
+                    self.assertTrue(os.path.exists(retry), "the new generation owns its retry slot")
+                    os.utime(retry, (0, 0))
+                mod.run_once(self.cfg)
+                self.assertEqual(mod._checksum_of(os.path.join(MEETINGS, base + ".done")),
+                                 hashlib.sha256("nueva completa\n".encode("utf-8")).hexdigest())
+                self.assertIn(base + ".pending.superseded", self.names())
+                self.assertNotIn(base + ".pending.retry", self.names())
+                self.assertIn("nueva completa", Path(MEETINGS, base + ".summary.md").read_text())
+
     def test_invalid_canonical_publication_does_not_retire_a_valid_snapshot_retry(self):
         outside = os.path.join(TMP, "outside-transcript.txt")
         Path(outside).write_text("nueva\n", encoding="utf-8")

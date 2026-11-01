@@ -145,7 +145,9 @@ and `Settings` only know `Support`. Nothing below `App` touches SwiftUI.
    handoff first and checks that copy, so a revision published meanwhile stays
    queued; a stale `.pending.retry` is retired before backoff whenever a valid
    canonical `.pending` replaces it, even while its older TXT snapshot remains
-   intact. This prevents an old retry from rolling back an acknowledged summary.
+   intact. The cutoff also runs while consuming the validated canonical
+   generation, before summary/ack or its own retry, to cover concurrent publication
+   between directory scans. An old retry cannot roll back an acknowledged summary.
 
 ## Meeting identity
 

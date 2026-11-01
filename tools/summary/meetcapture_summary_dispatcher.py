@@ -742,6 +742,21 @@ def process_file(path: str, cfg: dict) -> None:
     if not text.strip():
         return fail(path, base, "transcript vacío", permanent=True)
 
+    if retry_generation(name) == 0:
+        # A producer can publish after run_once's retirement sweep but before
+        # candidate selection. Couple the cutoff to this validated canonical
+        # generation, before it can either be acknowledged or enter backoff.
+        # This dispatcher is the sole retry writer: every existing retry for
+        # this meeting predates the canonical publication being consumed.
+        try:
+            for prior in sorted(os.listdir(MEETINGS_DIR)):
+                match = PENDING_RE.match(prior)
+                if match and match.group("base") == base and retry_generation(prior) > 0:
+                    os.replace(os.path.join(MEETINGS_DIR, prior),
+                               os.path.join(MEETINGS_DIR, base + SUPERSEDED_SUFFIX))
+        except OSError as e:
+            return fail(path, base, "no se pudo retirar un retry anterior: %s" % e)
+
     notes_path = os.path.join(MEETINGS_DIR, base + ".notes.md")
     user_notes = ""
     if os.path.lexists(notes_path):
@@ -900,14 +915,21 @@ def run_once(cfg: dict, now: float | None = None) -> int:
     waiting = len(candidates) - len(files)
     if waiting:
         log("%d handoff(s) en backoff, todavía no vencen" % waiting)
+    processed = 0
     for name in files:
+        # A prior canonical publication may have retired this name and then
+        # reused its retry slot on failure. Recheck that generation's backoff.
+        path = os.path.join(MEETINGS_DIR, name)
+        if not due(path, now):
+            continue
+        processed += 1
         try:
-            process_file(os.path.join(MEETINGS_DIR, name), cfg)
+            process_file(path, cfg)
         except Exception as e:  # noqa: BLE001 — nunca morir por un handoff
             log("EXCEPCIÓN inesperada procesando %s: %s" % (name, e), "ERROR")
-    if files:
-        log("pasada --once: %d handoff(s) procesado(s)" % len(files))
-    return len(files)
+    if processed:
+        log("pasada --once: %d handoff(s) procesado(s)" % processed)
+    return processed
 
 
 def run_watch(cfg: dict) -> None:
