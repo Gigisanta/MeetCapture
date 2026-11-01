@@ -38,8 +38,12 @@ public enum RealPipelineCheck {
                !(try FileManager.default.contentsOfDirectory(atPath: root.path)).isEmpty {
                 throw CheckError.failed("output directory must be empty")
             }
+            var captureDestinations: CapturePreparation.Destinations?
+            if ["capture", "prepare-capture", "ui"].contains(mode) {
+                captureDestinations = try .init(root: root, report: target)
+            }
             try AppPaths.ensurePrivateDirectory(root.path)
-            reportURL = target
+            reportURL = captureDestinations?.report ?? target
             let source = URL(fileURLWithPath: input).resolvingSymlinksInPath()
             guard PCMToWAV.is16kMonoWAV(source.path), PCMToWAV.wavDurationSeconds(source.path) > 0 else {
                 throw CheckError.failed("input must be nonempty 16 kHz mono Int16 WAV")
@@ -56,14 +60,14 @@ public enum RealPipelineCheck {
             settings[Settings.Key.retention.rawValue] = RetentionPolicy.keep.rawValue
             UserDefaults.standard.setVolatileDomain(settings, forName: UserDefaults.argumentDomain)
             var preparation: CapturePreparation?
-            if ["capture", "prepare-capture", "ui"].contains(mode) {
+            if let captureDestinations {
                 let configuration = TapConfiguration(micOnly: Settings.micOnlyMode,
                                                      inputDeviceUID: Settings.inputDeviceUID)
                 let reference = env["MEETCAPTURE_REFERENCE"].map { URL(fileURLWithPath: $0) }
                 let observation = CapturePreparation(source: source, reference: reference,
                     configuration: configuration, diarize: Settings.diarize,
                     language: Settings.asrLanguage, route: CaptureRouteReader.read(configuration: configuration))
-                let receipt = root.appendingPathComponent("capture-preparation.json")
+                let receipt = captureDestinations.preparation
                 try observation.write(to: receipt)
                 preparationURL = receipt
                 preparation = observation
@@ -118,6 +122,9 @@ public enum RealPipelineCheck {
             var result: [String: Any] = [
                 "status": denied == nil ? "failed" : "blocked", "mode": mode,
                 "error": error.localizedDescription]
+            if error is CapturePreparation.DestinationError {
+                result["errorCode"] = "preparation_report_collision"
+            }
             if let denied {
                 result["blockedReasons"] = denied.reasons.map(\.rawValue)
                 result["captureStarted"] = false
@@ -282,7 +289,7 @@ public enum RealPipelineCheck {
             // consumers receive metadata only, including on failed gates.
             var summary: [String: Any] = ["exitCode": code]
             for key in ["status", "mode", "historyCount", "blockedReasons",
-                        "captureStarted", "transcriptionStarted"] {
+                        "captureStarted", "transcriptionStarted", "errorCode"] {
                 if let value = report[key] { summary[key] = value }
             }
             let publicData = try JSONSerialization.data(withJSONObject: summary, options: [.sortedKeys])

@@ -92,6 +92,10 @@ REPORT_DIR=$(dirname "$REPORT")
 [ "$REPORT_DIR" = "$OUTPUT" ] || die 'el reporte debe estar dentro de --output'
 REPORT="$OUTPUT/$(basename "$REPORT")"
 [ ! -e "$REPORT" ] || die 'el reporte ya existe'
+if [ "$MODE" != import ]; then
+    report_name=$(printf '%s' "${REPORT##*/}" | tr '[:upper:]' '[:lower:]')
+    [ "$report_name" != capture-preparation.json ] || die 'nombre de reporte reservado para el recibo de preparación'
+fi
 
 command -v python3 >/dev/null 2>&1 || die 'python3 es necesario para validar el fixture'
 if ! INPUT_DURATION=$(python3 - "$INPUT" <<'PY'

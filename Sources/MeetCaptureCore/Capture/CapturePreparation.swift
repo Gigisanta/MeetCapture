@@ -8,6 +8,26 @@ import Darwin
 import Foundation
 
 struct CapturePreparation: Encodable {
+    enum DestinationError: LocalizedError, Equatable {
+        case reportCollision
+        var errorDescription: String? { "report destination is reserved for capture preparation" }
+    }
+
+    struct Destinations {
+        let report: URL
+        let preparation: URL
+
+        init(root: URL, report: URL) throws {
+            let receipt = root.appendingPathComponent("capture-preparation.json")
+            // Reserve case variants too: the staging volume may be case-insensitive.
+            guard report.standardizedFileURL.path.lowercased() != receipt.standardizedFileURL.path.lowercased() else {
+                throw DestinationError.reportCollision
+            }
+            self.report = report
+            preparation = receipt
+        }
+    }
+
     struct FileIdentity: Encodable {
         let sha256: String
         let bytes: Int64

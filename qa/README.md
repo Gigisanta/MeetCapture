@@ -125,6 +125,8 @@ variables and acceptance behavior are fixed:
   `MEETCAPTURE_TEST_OUTPUT_DIR`.
 - Private reports/receipts are mode 0600 inside the mode-0700 output root.
   stdout and wrapper failures expose only metadata, never recognized text.
+  In capture/preparation/UI modes, `capture-preparation.json` is reserved for
+  provenance; a report alias (including case variants) is rejected before publication.
 - For `import` and `capture`, app exit `0` means the selected pipeline
   completed, `77` means a prerequisite blocked execution, and `1` means the
   pipeline failed. The wrapper returns success only after its report and

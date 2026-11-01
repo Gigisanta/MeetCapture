@@ -151,6 +151,8 @@ evidence is accepted; no merge, tag, release or installation is implied.
      origins cannot prompt, start the recorder or schedule recognition.
    - Given an existing preparation receipt, a second publication cannot replace
      it. Console output contains status/counts/reason codes, never report text.
+     `capture-preparation.json` is reserved (including case variants and normalized
+     aliases): a colliding report destination is rejected before either publication.
 
    For `ui`, build the opt-in staging-only QA identity and launch its exact
    executable with a fresh output directory:

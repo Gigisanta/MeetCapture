@@ -15,7 +15,19 @@ final class AppStateRegressionTests: XCTestCase {
         let preparation = CapturePreparation(source: source, reference: reference,
             configuration: TapConfiguration(micOnly: false, inputDeviceUID: "virtual-fixture"),
             diarize: false, language: "es", route: Self.qaCaptureRoute())
-        let receipt = URL(fileURLWithPath: output + "/capture-preparation.json")
+        let root = URL(fileURLWithPath: output)
+        for name in ["capture-preparation.json", "CAPTURE-PREPARATION.JSON",
+                     "unused/../capture-preparation.json"] {
+            XCTAssertThrowsError(try CapturePreparation.Destinations(root: root,
+                report: root.appendingPathComponent(name))) { error in
+                XCTAssertEqual(error as? CapturePreparation.DestinationError, .reportCollision)
+            }
+        }
+        let destinations = try CapturePreparation.Destinations(root: root,
+            report: root.appendingPathComponent("check-report.json"))
+        let receipt = destinations.preparation
+        XCTAssertFalse(FileManager.default.fileExists(atPath: receipt.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: destinations.report.path))
         try preparation.write(to: receipt)
 
         let data = try Data(contentsOf: receipt)
