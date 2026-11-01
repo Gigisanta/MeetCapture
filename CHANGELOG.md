@@ -8,6 +8,11 @@ semantic versioning. The single source of the current version is
 ## [Unreleased]
 
 ### Fixed
+- New handoffs reference a private TXT generation named by its SHA-256 rather
+  than the editable display transcript. A display edit or failed same-meeting
+  replacement no longer invalidates a published handoff. Prior generations
+  remain readable; a changed generation is preserved and rejected, not repaired
+  or reimported automatically. Display transcripts are now written with mode 0600.
 - The acoustic bleed gate now detects speaker audio reaching the microphone
   up to 50 ms ahead of the system tap, in addition to its existing 100 ms lag
   range. This prevents remote speech from being repeated as `Yo` when the

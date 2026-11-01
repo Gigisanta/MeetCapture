@@ -10,7 +10,7 @@ struct PendingContractV2: Equatable, Sendable {
     var session: MeetingSession
     var endedAt: Date
     var transcriptPath: String
-    var transcriptText: String
+    var checksum: String
     /// nil when the app keeps the audio for itself (a transcript with gaps).
     var audioPath: String?
     var engine: ASREngine
@@ -65,7 +65,7 @@ struct PendingContractV2: Equatable, Sendable {
             "segments": segmentDicts,
             "speakerCount": speakerCount,
             "speakers": speakers,
-            "checksum": Self.sha256Hex(transcriptText),
+            "checksum": checksum,
         ]
         return try JSONSerialization.data(withJSONObject: contract, options: [.prettyPrinted, .sortedKeys])
     }
@@ -89,8 +89,8 @@ struct PendingContractV2: Equatable, Sendable {
         try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: pendingPath)
     }
 
-    static func sha256Hex(_ text: String) -> String {
-        SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
+    static func sha256Hex(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 }
 

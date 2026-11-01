@@ -1,3 +1,4 @@
+import CryptoKit
 import XCTest
 @testable import MeetCaptureCore
 
@@ -127,6 +128,92 @@ final class PipelineRegressionTests: XCTestCase {
         XCTAssertEqual(first.pendingPath, second.pendingPath)
         XCTAssertEqual(store.count(), 1)
         XCTAssertTrue(FileManager.default.fileExists(atPath: first.pendingPath))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: capture))
+    }
+
+    func testPublishedTranscriptSurvivesDisplayEditsAndFailedReplacement() async throws {
+        let dir = TestSupport.makeTempDir(self, "handoff-generation")
+        let capture = dir + "/recording.pcm"
+        TestSupport.write("synthetic audio", to: capture)
+        let store = MeetingStore(path: dir + "/history.db")
+        let post = PostProcessor(store: store)
+        let session = MeetingSession(startedAt: TestSupport.fixedDate)
+        let original = input(session: session, directory: dir, capture: capture, meetingsDir: dir,
+                             segments: [Segment(start: 0, end: 1, text: "primera generación", speaker: "Yo")])
+        let first = try await post.run(original, now: TestSupport.fixedDate.addingTimeInterval(30))
+        let firstPending = try Data(contentsOf: URL(fileURLWithPath: first.pendingPath))
+        let firstContract = try XCTUnwrap(JSONSerialization.jsonObject(with: firstPending) as? [String: Any])
+        let firstURL = URL(fileURLWithPath: try XCTUnwrap(firstContract["transcriptPath"] as? String))
+        let firstTranscript = try Data(contentsOf: firstURL)
+        let firstChecksum = SHA256.hash(data: firstTranscript).map { String(format: "%02x", $0) }.joined()
+        XCTAssertEqual(firstContract["checksum"] as? String, firstChecksum)
+
+        // A personal edit must not rewrite the producer generation delivered
+        // to a consumer that already claimed or acknowledged this handoff.
+        TestSupport.write("nota sintética añadida\n" + first.transcriptText, to: original.transcriptPath)
+        XCTAssertEqual(try Data(contentsOf: firstURL), firstTranscript)
+
+        var revised = original
+        revised.segments = [Segment(start: 0, end: 2, text: "segunda generación", speaker: "Yo")]
+        revised.retention = .deleteAfterHandoff
+        let unavailableStore = dir + "/database-directory"
+        try FileManager.default.createDirectory(atPath: unavailableStore, withIntermediateDirectories: false)
+        do {
+            _ = try await PostProcessor(store: MeetingStore(path: unavailableStore))
+                .run(revised, now: TestSupport.fixedDate.addingTimeInterval(30))
+            XCTFail("the unavailable history must reject the replacement")
+        } catch let error as PostProcessError {
+            XCTAssertTrue(error.localizedDescription.contains("historial"))
+        }
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: first.pendingPath)), firstPending)
+        XCTAssertEqual(try Data(contentsOf: firstURL), firstTranscript,
+                       "a failed replacement must not invalidate the previous handoff")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: capture))
+        XCTAssertEqual(store.record(id: session.id)?.transcriptText, first.transcriptText)
+
+        let second = try await post.run(revised, now: TestSupport.fixedDate.addingTimeInterval(30))
+        let secondContract = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: Data(contentsOf: URL(fileURLWithPath: second.pendingPath))) as? [String: Any])
+        let secondURL = URL(fileURLWithPath: try XCTUnwrap(secondContract["transcriptPath"] as? String))
+        let secondTranscript = try Data(contentsOf: secondURL)
+        XCTAssertNotEqual(secondURL, firstURL)
+        XCTAssertEqual(secondContract["checksum"] as? String,
+                       SHA256.hash(data: secondTranscript).map { String(format: "%02x", $0) }.joined())
+        XCTAssertEqual(secondTranscript, Data("[Yo]: segunda generación".utf8))
+        XCTAssertEqual(try Data(contentsOf: firstURL), firstTranscript,
+                       "a reader holding the previous generation can still validate it")
+        XCTAssertEqual(store.count(), 1)
+        XCTAssertEqual(store.record(id: session.id)?.transcriptText, "[Yo]: segunda generación")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: capture))
+        for path in [original.transcriptPath, secondURL.path, firstURL.path] {
+            XCTAssertEqual(try FileManager.default.attributesOfItem(atPath: path)[.posixPermissions] as? Int, 0o600)
+        }
+    }
+
+    func testCorruptHandoffTranscriptIsPreservedAndNotRepublished() async throws {
+        let dir = TestSupport.makeTempDir(self, "handoff-corrupt")
+        let capture = dir + "/recording.pcm"
+        TestSupport.write("synthetic audio", to: capture)
+        let store = MeetingStore(path: dir + "/history.db")
+        let post = PostProcessor(store: store)
+        let value = input(session: MeetingSession(startedAt: TestSupport.fixedDate), directory: dir,
+                          capture: capture, meetingsDir: dir)
+        let first = try await post.run(value, now: TestSupport.fixedDate.addingTimeInterval(30))
+        let pending = try Data(contentsOf: URL(fileURLWithPath: first.pendingPath))
+        let contract = try XCTUnwrap(JSONSerialization.jsonObject(with: pending) as? [String: Any])
+        let snapshot = try XCTUnwrap(contract["transcriptPath"] as? String)
+        TestSupport.write("evidencia sintética modificada", to: snapshot)
+        var retry = value
+        retry.retention = .deleteAfterHandoff
+        do {
+            _ = try await post.run(retry, now: TestSupport.fixedDate.addingTimeInterval(30))
+            XCTFail("a changed producer generation needs reconciliation, not silent replacement")
+        } catch let error as PostProcessError {
+            XCTAssertTrue(error.localizedDescription.contains("copia de entrega"))
+        }
+        XCTAssertEqual(try String(contentsOfFile: snapshot, encoding: .utf8), "evidencia sintética modificada")
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: first.pendingPath)), pending)
+        XCTAssertEqual(store.record(id: value.session.id)?.transcriptText, "hola")
         XCTAssertTrue(FileManager.default.fileExists(atPath: capture))
     }
 

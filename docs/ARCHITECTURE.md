@@ -121,9 +121,13 @@ and `Settings` only know `Support`. Nothing below `App` touches SwiftUI.
    never warms models, the disk cache is retained, and no idle unload timer
    is needed. Hardware placement and GPU contention are not instrumented.
 4. **Hand off.** `PostProcessor` is an actor: it rejects empty transcripts,
-   writes the `.txt` transcript, commits `MeetingStore`, writes the
-   `.processed.json` marker, and only then publishes the `.pending`
-   contract. It applies `RetentionPolicy` after those writes succeed.
+   publishes a private, content-addressed TXT generation without overwriting
+   prior generations, writes the display `.txt`, commits `MeetingStore`, writes
+   the `.processed.json` marker, and only then publishes `.pending` pointing at
+   that generation. Display edits or an interrupted replacement cannot invalidate
+   a previously published or claimed handoff. `RetentionPolicy` runs only after
+   those writes succeed; a corrupt existing generation fails closed, preserving
+   it and the audio for explicit reconciliation.
    `AppState` receives the `PostProcessResult` and updates published state
    on the main actor.
 5. **Summarize.** The canonical
@@ -158,8 +162,9 @@ to that id; existing recordings and history keep their original paths.
 | `~/meetings/transcripts/recording-meet-<epoch>-<uuid>.pcm` + `.pcm.format.json` | Capture | ASR, retention | Int16 stereo 16 kHz; sidecar schema `meetcapture.audio.v1` (`sample_rate`, `sample_format`, `channels`, `layout`, `tap_strategy`, `tap_info`). |
 | `<audio>.work/` (`remote/`, `mic/`, `diarization.json`, `gaps.json`) | ASR | ASR | Per-channel manifest version 4 binds audio/reference SHA-256, actual model artifacts, SDK and effective recognition configuration. Stale/corrupt derived checkpoints are rebuilt without deleting source audio; diarization is content-bound too. `gaps.json` remains while the handed-off transcript has gaps and is removed after a complete transcript is handed off. Older manifests are invalidated, not compatibility-shimmed. |
 | `<audio>.recovery.json` | AppState | AppState | `attempts`, `last_error`, `updated_at` and `next_attempt_at` (ISO 8601 with milliseconds; absent once the automatic attempts are used up). Automatic recovery runs a capture only after `next_attempt_at`, at most three attempts within 48 h of the capture. Removed when a transcript without gaps is handed off. |
-| `~/meetings/transcripts/[recording-]meet-<epoch>-<uuid>.txt` | PostProcessor | dispatcher, popover | Live recordings use the `recording-` prefix; retranscriptions use the job id directly. Imports keep a unique dated basename in `~/meetings/imports/`. One `[speaker]: text` line per turn, for example `[Yo]: …` or `[Participante 2]: …`. |
-| `~/meetings/meet-<epoch>-<uuid>.pending` | PostProcessor | dispatcher | Version 2, 14 sorted keys: `audioPath` (null if deleted or if the transcript has gaps), `checksum` (SHA-256 of the transcript text), `durationSec`, `endedAt`, `engine`, `language`, `meetingId`, `model`, `segments` (`start`, `end`, `text`, optional `speaker`), `speakerCount`, `startedAt`, `title`, `transcriptPath`, `version`. Written to a temp file and renamed. |
+| `~/meetings/transcripts/[recording-]meet-<epoch>-<uuid>.txt` | PostProcessor | popover | Editable display copy, mode 0600; not a new handoff's source. Live recordings use the `recording-` prefix; retranscriptions use the job id directly. Imports keep a unique dated basename in `~/meetings/imports/`. One `[speaker]: text` line per turn. |
+| `~/meetings/handoff-transcripts/<meetingId>/<sha256>.txt` | PostProcessor | handoff consumer | Exact UTF-8 bytes of one producer generation, mode 0600 inside private directories. Published complete with an exclusive hard link from a private temporary file, never linked to the editable display copy. Matching retries reuse it; changed bytes fail closed. Prior generations are retained because a consumer may still hold an older handoff; this change does not prune or migrate history. |
+| `~/meetings/meet-<epoch>-<uuid>.pending` | PostProcessor | dispatcher | Version 2: `audioPath` (null if deleted or if the transcript has gaps), `checksum` (SHA-256 of the exact TXT bytes at `transcriptPath`), `durationSec`, `endedAt`, `engine`, `language`, `meetingId`, `model`, `segments` (`start`, `end`, `text`, optional `speaker`), `speakerCount`, `speakers`, `startedAt`, `title`, `transcriptPath`, `version`. Written to a temp file and renamed. Existing handoffs are not rewritten or reimported. |
 | `<transcript basename>.processed.json` | PostProcessor | app | Schema `meetcapture.processed.v1`: `processed_at`, `transcript_path`, `meeting_title`, `retention`. Makes post-processing idempotent. |
 | `~/meetings/meet-<epoch>-<uuid>.done`, `.summary.json`, `.summary.html` | dispatcher | popover | Acknowledged handoff and the summary. |
 | `~/meetings/meetcapture.db` | MeetingStore | popover | `meetings` table plus `meetings_fts` (FTS5, external content, triggers). `PRAGMA user_version = 2`. Searches use `MATCH` with a prefix on the last token, `LIMIT 50`; `LIKE` is the fallback without FTS5. |

@@ -154,16 +154,19 @@ public enum RealPipelineCheck {
         }
         let records: [[String: Any]] = try history.map { item in
             let data = try Data(contentsOf: URL(fileURLWithPath: item.transcriptPath))
+            let transcriptText = String(decoding: data, as: UTF8.self)
             let pending = app.paths.meetingsDir + "/" + item.id + ".pending"
             let contract = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: pending))) as? [String: Any]
             let checksum = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-            guard contract?["checksum"] as? String == checksum,
-                  contract?["transcriptPath"] as? String == item.transcriptPath,
+            guard let handoffTranscript = contract?["transcriptPath"] as? String,
+                  try Data(contentsOf: URL(fileURLWithPath: handoffTranscript)) == data,
+                  contract?["checksum"] as? String == checksum,
+                  reopened.record(id: item.id)?.transcriptText == transcriptText,
                   FileManager.default.fileExists(atPath: ProcessedMarker.path(forTranscript: item.transcriptPath)) else {
                 throw CheckError.failed("handoff, transcript, or marker disagree")
             }
             return ["id": item.id, "transcriptPath": item.transcriptPath, "pendingPath": pending,
-                    "text": String(decoding: data, as: UTF8.self), "engine": item.engine,
+                    "text": transcriptText, "engine": item.engine,
                     "model": item.model, "durationSec": item.durationSec]
         }
         let text = app.lastSegments.map(\.text).joined(separator: " ")

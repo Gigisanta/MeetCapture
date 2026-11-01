@@ -472,7 +472,7 @@ final class AppStateRegressionTests: XCTestCase {
         let pendings = try pendingFiles(in: outputDir)
         XCTAssertEqual(pendings.count, 1)
         XCTAssertEqual(pendings.first?["meetingId"] as? String, id)
-        XCTAssertEqual(pendings.first?["checksum"] as? String, PendingContractV2.sha256Hex(transcript))
+        XCTAssertEqual(pendings.first?["checksum"] as? String, PendingContractV2.sha256Hex(Data(transcript.utf8)))
         XCTAssertEqual(pendings.first?["audioPath"] as? String, audio)
         XCTAssertFalse(FileManager.default.fileExists(atPath: ChunkedTranscription.workDirectory(forAudio: audio)))
         XCTAssertFalse(FileManager.default.fileExists(atPath: RecordingRecovery.attemptsPath(forAudio: audio)))

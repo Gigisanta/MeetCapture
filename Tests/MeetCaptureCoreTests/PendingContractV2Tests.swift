@@ -6,7 +6,7 @@ final class PendingContractV2Tests: XCTestCase {
 
     private func contract(segments: [Segment], audioPath: String = "/nonexistent/recording.pcm") -> PendingContractV2 {
         PendingContractV2(session: session, endedAt: TestSupport.fixedDate.addingTimeInterval(90.5),
-                          transcriptPath: "/tmp/x.txt", transcriptText: TranscriptFormatter.text(for: segments),
+                          transcriptPath: "/tmp/x.txt", checksum: PendingContractV2.sha256Hex(Data(TranscriptFormatter.text(for: segments).utf8)),
                           audioPath: audioPath, engine: .parakeet, model: "parakeet-tdt-0.6b-ultra", language: "es",
                           segments: segments)
     }
@@ -37,10 +37,10 @@ final class PendingContractV2Tests: XCTestCase {
         let segments = [Segment(start: 0, end: 1, text: "uno", speaker: "A"), Segment(start: 1, end: 2, text: "dos", speaker: "B")]
         let c = contract(segments: segments)
         let root = try XCTUnwrap(JSONSerialization.jsonObject(with: c.encode(audioExists: true)) as? [String: Any])
-        XCTAssertEqual(root["checksum"] as? String, PendingContractV2.sha256Hex("[A]: uno\n[B]: dos"))
+        XCTAssertEqual(root["checksum"] as? String, PendingContractV2.sha256Hex(Data("[A]: uno\n[B]: dos".utf8)))
         XCTAssertEqual(contract(segments: segments + [Segment(start: 2, end: 3, text: "tres", speaker: "A")]).speakers,
                        ["A", "B"], "first appearance order, no repeats")
-        XCTAssertEqual(PendingContractV2.sha256Hex(""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+        XCTAssertEqual(PendingContractV2.sha256Hex(Data()), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
         XCTAssertEqual(root["speakerCount"] as? Int, 2)
         XCTAssertEqual((root["segments"] as? [[String: Any]])?.first?["speaker"] as? String, "A")
     }

@@ -30,6 +30,12 @@ miss most errors, and a retained real-meeting benchmark is still unavailable.
 Do not turn historical text-only corrections or unit-test counts into
 accuracy claims.
 
+The pending-v3 / 7.2.0 candidate remains blocked by the unchanged `pongo` →
+`puego` reference failure and the unaccepted native-control/strict hosted-icon
+gate. A checksum-only repair does not waive those gates, authorize installing
+over 7.1.0, or prove ASR accuracy. Keep its PR in draft until all required
+evidence is accepted; no merge, tag, release or installation is implied.
+
 ## Release checklist
 
 1. Update `CFBundleShortVersionString` and `CFBundleVersion` in
@@ -172,6 +178,15 @@ accuracy claims.
    must save `ui-evidence.json` at the required report path; the app does not
    auto-report or emit PASS. The harness must avoid calendar/automatic
    operations and persistent UserDefaults.
+
+   Handoff integrity checks must hash the exact TXT bytes at the handoff's own
+   `transcriptPath`. New handoffs pin a private content-addressed generation;
+   SQLite and the display transcript remain checked independently. Include a
+   display edit, a failed same-id replacement, a successful retry and a corrupted
+   generation in synthetic postprocessor regressions. Never edit a historical
+   checksum, TXT or SQLite row to force acceptance. Preserve a metadata-only
+   receipt and leave consumption blocked when the authoritative generation or
+   writer cannot be established; no automatic replay or resend is authorized.
 
    Treat exit `77` as blocked by a prerequisite and exit `1` as a failure.
    Exit `0` means the selected pipeline completed; the import/capture wrapper
