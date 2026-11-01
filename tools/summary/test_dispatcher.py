@@ -33,8 +33,10 @@ assert spec and spec.loader
 spec.loader.exec_module(mod)
 
 
-def _contract(base: str, text: str = "hola mundo\n", with_audio: bool = True, **extra) -> str:
-    tpath = os.path.join(MEETINGS, base + ".txt")
+def _contract(base: str, text: str = "hola mundo\n", with_audio: bool = True,
+              immutable: bool = False, **extra) -> str:
+    checksum = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    tpath = os.path.join(MEETINGS, base + ("-" + checksum if immutable else "") + ".txt")
     with open(tpath, "w", encoding="utf-8") as f:
         f.write(text)
     apath = None
@@ -47,7 +49,7 @@ def _contract(base: str, text: str = "hola mundo\n", with_audio: bool = True, **
         "endedAt": "2026-09-01T14:10:29Z", "durationSec": 120.0, "transcriptPath": tpath,
         "audioPath": apath, "engine": "parakeet", "model": "parakeet-tdt-0.6b-ultra", "language": "es",
         "segments": [{"start": 0, "end": 1, "text": "hola mundo"}], "speakerCount": 0,
-        "checksum": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        "checksum": checksum,
     }
     contract.update(extra)
     path = os.path.join(MEETINGS, base + ".pending")
@@ -118,11 +120,11 @@ class DispatcherTests(unittest.TestCase):
         self.assertNotIn("meet-rev.pcm", self.names(), "the complete handoff releases the audio")
 
     def test_stale_retry_next_to_a_revision_is_retired(self):
-        _contract("meet-stale", text="hola [fragmento]\n", with_audio=False)
+        _contract("meet-stale", text="hola [fragmento]\n", with_audio=False, immutable=True)
         os.replace(os.path.join(MEETINGS, "meet-stale.pending"), os.path.join(MEETINGS, "meet-stale.pending.retry"))
         stale = os.path.join(MEETINGS, "meet-stale.pending.retry")
         os.utime(stale, (0, 0))
-        _contract("meet-stale", text="hola completo\n")
+        _contract("meet-stale", text="hola completo\n", immutable=True)
         mod.run_once(self.cfg)
         self.assertIn("meet-stale.done", self.names())
         mod.run_once(self.cfg)
@@ -131,6 +133,26 @@ class DispatcherTests(unittest.TestCase):
         self.assertIn("meet-stale.pending.superseded", self.names())
         self.assertEqual(mod._checksum_of(os.path.join(MEETINGS, "meet-stale.done")),
                          hashlib.sha256("hola completo\n".encode("utf-8")).hexdigest())
+
+    def test_invalid_canonical_publication_does_not_retire_a_valid_snapshot_retry(self):
+        outside = os.path.join(TMP, "outside-transcript.txt")
+        Path(outside).write_text("nueva\n", encoding="utf-8")
+        for label, invalid in (
+            ("identity", {"meetingId": "meet-someone-else"}),
+            ("path", {"transcriptPath": outside}),
+            ("checksum", {"checksum": "0" * 64}),
+        ):
+            with self.subTest(label=label):
+                base = "meet-invalid-" + label
+                path = _contract(base, text="anterior válida\n", with_audio=False, immutable=True)
+                retry = os.path.join(MEETINGS, base + ".pending.retry")
+                os.replace(path, retry)
+                os.utime(retry, (0, 0))
+                _contract(base, text="nueva\n", with_audio=False, immutable=True, **invalid)
+                mod.run_once(self.cfg)
+                self.assertNotIn(base + ".pending.superseded", self.names())
+                self.assertEqual(mod._checksum_of(os.path.join(MEETINGS, base + ".done")),
+                                 hashlib.sha256("anterior válida\n".encode("utf-8")).hexdigest())
 
     def test_revision_published_during_ack_is_kept_for_the_next_pass(self):
         # The old handoff was complete (audio to delete); the revision has gaps and needs the audio.
@@ -156,14 +178,14 @@ class DispatcherTests(unittest.TestCase):
             self.assertIn("nuevo", f.read())
 
     def test_stale_retry_in_backoff_does_not_block_a_later_revision(self):
-        _contract("meet-block", text="uno [fragmento]\n", with_audio=False)
+        _contract("meet-block", text="uno [fragmento]\n", with_audio=False, immutable=True)
         os.replace(os.path.join(MEETINGS, "meet-block.pending"), os.path.join(MEETINGS, "meet-block.pending.retry"))
-        _contract("meet-block", text="dos [fragmento]\n", with_audio=False)
+        _contract("meet-block", text="dos [fragmento]\n", with_audio=False, immutable=True)
         mod.run_once(self.cfg)
         self.assertIn("meet-block.done", self.names())
         self.assertNotIn("meet-block.pending.retry", self.names(), "retired while still in backoff")
 
-        _contract("meet-block", text="tres\n", with_audio=False)
+        _contract("meet-block", text="tres\n", with_audio=False, immutable=True)
         with mock.patch.object(mod, "_publish_artifacts", side_effect=OSError("disk full")):
             mod.run_once(self.cfg)
         self.assertIn("meet-block.pending.retry", self.names(), "the new revision enters the backoff")

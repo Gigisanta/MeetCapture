@@ -143,8 +143,9 @@ and `Settings` only know `Support`. Nothing below `App` touches SwiftUI.
    `.pending` whose checksum differs from its `.done` is a revision (the app
    filled the gaps) and replaces the summary. The acknowledgement hard-links the
    handoff first and checks that copy, so a revision published meanwhile stays
-   queued; a stale `.pending.retry` that a revision superseded moves to
-   `.pending.superseded`.
+   queued; a stale `.pending.retry` is retired before backoff whenever a valid
+   canonical `.pending` replaces it, even while its older TXT snapshot remains
+   intact. This prevents an old retry from rolling back an acknowledged summary.
 
 ## Meeting identity
 

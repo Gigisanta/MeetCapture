@@ -586,14 +586,27 @@ def is_revision(path: str, done_path: str) -> bool:
 
 
 def is_superseded(path: str, done_path: str) -> bool:
-    """A handoff that adds nothing: already acknowledged, or its transcript was
-    rewritten after it was published. Unknown states are not superseded."""
+    """Already acknowledged, replaced by a valid canonical .pending, or its
+    transcript rewritten. Unknown/invalid new generations never retire a retry."""
     contract = _read_contract(path) or {}
     new = contract.get("checksum")
     if not isinstance(new, str):
         return False
     if new == _checksum_of(done_path):
         return True
+    match = PENDING_RE.match(os.path.basename(path))
+    if match and retry_generation(os.path.basename(path)) > 0:
+        # Only the producer writes the canonical .pending; retry names belong
+        # to this single dispatcher. Retire the older retry before processing
+        # that new publication, even if its immutable TXT still validates.
+        base = match.group("base")
+        latest = _read_contract(os.path.join(MEETINGS_DIR, base + ".pending"))
+        try:
+            validate_contract(latest, base)
+            if sha256_file(resolve(latest["transcriptPath"])) == latest["checksum"].lower():
+                return True
+        except (OSError, TypeError, ValueError, KeyError):
+            pass
     try:
         return sha256_file(resolve(contract.get("transcriptPath"))) != new.lower()
     except (OSError, TypeError, ValueError):
@@ -645,10 +658,9 @@ def restore_claims() -> None:
 
 
 def retire_if_superseded(path: str) -> bool:
-    """Moves a stale retry (already acknowledged, or its transcript rewritten
-    since) aside so it never holds the .retry name a later revision needs.
-    Runs before backoff filtering: a stale retry still waiting would block
-    that revision just the same."""
+    """Retire stale retries before backoff and before a canonical publication
+    is consumed. This also handles immutable TXT generations: after the new
+    publication is acknowledged, no older valid retry can roll its summary back."""
     name = os.path.basename(path)
     m = PENDING_RE.match(name)
     if not m or retry_generation(name) == 0:
