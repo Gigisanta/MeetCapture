@@ -143,11 +143,12 @@ and `Settings` only know `Support`. Nothing below `App` touches SwiftUI.
    `.pending` whose checksum differs from its `.done` is a revision (the app
    filled the gaps) and replaces the summary. The acknowledgement hard-links the
    handoff first and checks that copy, so a revision published meanwhile stays
-   queued; a stale `.pending.retry` is retired before backoff whenever a valid
-   canonical `.pending` replaces it, even while its older TXT snapshot remains
-   intact. The cutoff also runs while consuming the validated canonical
-   generation, before summary/ack or its own retry, to cover concurrent publication
-   between directory scans. An old retry cannot roll back an acknowledged summary.
+   queued. After a canonical `.pending` passes every consumption check, the
+   dispatcher retires its older `.pending.retry` generations before summary,
+   acknowledgement or its own retry—even if the older snapshots remain valid
+   or are still in backoff. A rejected publication never retires a valid retry.
+   This cutoff at consumption also covers publication between directory scans:
+   an old retry cannot roll back an acknowledged summary.
 
 ## Meeting identity
 

@@ -177,6 +177,8 @@ class DispatcherTests(unittest.TestCase):
             ("identity", {"meetingId": "meet-someone-else"}),
             ("path", {"transcriptPath": outside}),
             ("checksum", {"checksum": "0" * 64}),
+            ("audio-path", {"audioPath": outside}),
+            ("empty", {}),
         ):
             with self.subTest(label=label):
                 base = "meet-invalid-" + label
@@ -184,7 +186,8 @@ class DispatcherTests(unittest.TestCase):
                 retry = os.path.join(MEETINGS, base + ".pending.retry")
                 os.replace(path, retry)
                 os.utime(retry, (0, 0))
-                _contract(base, text="nueva\n", with_audio=False, immutable=True, **invalid)
+                _contract(base, text="" if label == "empty" else "nueva\n",
+                          with_audio=False, immutable=True, **invalid)
                 mod.run_once(self.cfg)
                 self.assertNotIn(base + ".pending.superseded", self.names())
                 self.assertEqual(mod._checksum_of(os.path.join(MEETINGS, base + ".done")),

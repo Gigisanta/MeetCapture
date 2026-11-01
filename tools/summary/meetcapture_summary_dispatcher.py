@@ -586,27 +586,14 @@ def is_revision(path: str, done_path: str) -> bool:
 
 
 def is_superseded(path: str, done_path: str) -> bool:
-    """Already acknowledged, replaced by a valid canonical .pending, or its
-    transcript rewritten. Unknown/invalid new generations never retire a retry."""
+    """Already acknowledged, or its own transcript has been rewritten.
+    A new publication only retires prior retries after full consumption validation."""
     contract = _read_contract(path) or {}
     new = contract.get("checksum")
     if not isinstance(new, str):
         return False
     if new == _checksum_of(done_path):
         return True
-    match = PENDING_RE.match(os.path.basename(path))
-    if match and retry_generation(os.path.basename(path)) > 0:
-        # Only the producer writes the canonical .pending; retry names belong
-        # to this single dispatcher. Retire the older retry before processing
-        # that new publication, even if its immutable TXT still validates.
-        base = match.group("base")
-        latest = _read_contract(os.path.join(MEETINGS_DIR, base + ".pending"))
-        try:
-            validate_contract(latest, base)
-            if sha256_file(resolve(latest["transcriptPath"])) == latest["checksum"].lower():
-                return True
-        except (OSError, TypeError, ValueError, KeyError):
-            pass
     try:
         return sha256_file(resolve(contract.get("transcriptPath"))) != new.lower()
     except (OSError, TypeError, ValueError):
