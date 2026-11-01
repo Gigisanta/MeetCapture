@@ -18,7 +18,7 @@ Package.swift                      SwiftPM manifest (macOS 14.4, Swift 6 toolcha
 Sources/MeetCapture/               executable shim: @main + AppDelegate
 Sources/MeetCaptureCore/           everything else, one directory per layer
   App/        AppState, RecordingCoordinator, MeetingDetectionPolicy, Notifier
-  Capture/    CoreAudioTap, AudioRingBuffer, AudioResampler, PCMFileWriter, AudioFormatSidecar, ChannelLevels, InputDevices, AudioCaptureService
+  Capture/    CoreAudioTap, CapturePreparation, AudioRingBuffer, AudioResampler, PCMFileWriter, AudioFormatSidecar, ChannelLevels, InputDevices, AudioCaptureService
   Detection/  CallDetector, CallActivityDebouncer, CalendarService, MeetingFilter
   ASR/        TranscriptionWorker, TranscriptionJob, RecognitionIdentity, ChannelReader, PCMToWAV, BleedGate, ChunkedTranscription, ParakeetEngine, TurnMerger, Aliases, Segment
   Pipeline/   MeetingSession, PendingContractV2, PostProcessor, Retention, AudioImporter, RecordingRecovery, MeetingNotesStore
@@ -50,8 +50,8 @@ and `Settings` only know `Support`. Nothing below `App` touches SwiftUI.
    (`idle`, `approaching`, `recording`, `transcribing`, `done`) and a
    `RecordingOrigin` (`manual`, `liveCall`, `calendar`) that decides when a
    recording auto-stops.
-2. **Capture.** `CoreAudioTap` creates a process tap on the call app (or a
-   global tap as fallback) plus an aggregate device with the chosen input.
+2. **Capture.** `CoreAudioTap` creates a whole-system process tap (none in
+   mic-only mode) plus an aggregate device with the chosen input.
    The IOProc copies both tracks into a preallocated `AudioRingBuffer`
    (64 slots of 8192 frames, no allocation on the real-time thread). One
    consumer thread resamples to 16 kHz (`AudioResampler` wraps
@@ -64,6 +64,15 @@ and `Settings` only know `Support`. Nothing below `App` touches SwiftUI.
    microphone-only mode leaves the left silent and records the microphone on the right.
    `AudioFormatSidecar` writes `<file>.pcm.format.json` with schema
    `meetcapture.audio.v1` so no consumer guesses the byte layout.
+   The opt-in real QA harness first uses `CapturePreparation` for read-only,
+   private provenance. Device identities/gains/native formats, default routing,
+   observed process clients and exact corpus/reference hashes are observations,
+   not fixture-source bindings. The current global mix and microphone cannot
+   satisfy reproducibility admission and are blocked before a graph or ASR;
+   virtual names and an idle mix do not change this. Planned tap/aggregate/PCM
+   fields are distinguished from actual capture evidence. The isolated QA UI's
+   recording admission runs before permissions/session creation for every
+   recording origin. Normal startup/recording has no QA admission closure.
 3. **Transcribe.** There is no live transcription. After capture stops,
    `TranscriptionWorkerClient` launches this app's executable in worker mode
    and runs `TranscriptionJob` there, never in the menu-bar process.

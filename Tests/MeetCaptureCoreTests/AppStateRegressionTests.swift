@@ -5,6 +5,131 @@ import XCTest
 
 @MainActor
 final class AppStateRegressionTests: XCTestCase {
+    func testQACapturePreparationPublishesPrivateMetadataWithoutReplacingEvidence() throws {
+        let output = TestSupport.makeTempDir(self, "qa-capture-preparation")
+        let source = URL(fileURLWithPath: output + "/public-fixture.bin")
+        let reference = URL(fileURLWithPath: output + "/public-reference.txt")
+        // The preparation hashes bytes; WAV validation is the harness's owner.
+        try Data("abc".utf8).write(to: source)
+        try Data("abc".utf8).write(to: reference)
+        let preparation = CapturePreparation(source: source, reference: reference,
+            configuration: TapConfiguration(micOnly: false, inputDeviceUID: "virtual-fixture"),
+            diarize: false, language: "es", route: Self.qaCaptureRoute())
+        let receipt = URL(fileURLWithPath: output + "/capture-preparation.json")
+        try preparation.write(to: receipt)
+
+        let data = try Data(contentsOf: receipt)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let corpus = try XCTUnwrap(json["corpus"] as? [String: Any])
+        XCTAssertEqual(corpus["sha256"] as? String,
+                       "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+        XCTAssertEqual(corpus["bytes"] as? Int, 3)
+        XCTAssertEqual((json["reference"] as? [String: Any])?["sha256"] as? String,
+                       "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+        let route = try XCTUnwrap(json["route"] as? [String: Any])
+        let input = try XCTUnwrap(route["selectedInput"] as? [String: Any])
+        XCTAssertEqual(input["uid"] as? String, "virtual-fixture")
+        XCTAssertEqual(((input["inputGain"] as? [[String: Any]])?.first)?["scalar"] as? Double, 0.375)
+        XCTAssertEqual(((input["inputStreams"] as? [[String: Any]])?.first)?["sampleRate"] as? Double, 48_000)
+        XCTAssertEqual(((route["observedProcesses"] as? [[String: Any]])?.first)?["pid"] as? Int, 444)
+        XCTAssertEqual(json["tapMembershipScope"] as? String, "all_process_outputs_including_future_clients")
+        XCTAssertEqual(json["tapCreated"] as? Bool, false)
+        XCTAssertEqual(json["captureStarted"] as? Bool, false)
+        XCTAssertEqual(json["transcriptionStarted"] as? Bool, false)
+        XCTAssertEqual(json["status"] as? String, "blocked")
+        XCTAssertNil(json["text"])
+        XCTAssertNil(json["transcript"])
+        let mode = try FileManager.default.attributesOfItem(atPath: receipt.path)[.posixPermissions] as? NSNumber
+        XCTAssertEqual(mode?.intValue, 0o600)
+        XCTAssertThrowsError(try preparation.write(to: receipt))
+        XCTAssertEqual(try Data(contentsOf: receipt), data, "a second observation must not replace the first receipt")
+        XCTAssertEqual(try Data(contentsOf: source), Data("abc".utf8))
+        XCTAssertEqual(try Data(contentsOf: reference), Data("abc".utf8))
+    }
+
+    func testQACapturePreparationRejectsNonregularIdentityAndMissingMetadata() throws {
+        let output = TestSupport.makeTempDir(self, "qa-capture-unreadable")
+        let target = output + "/public-fixture.bin"
+        try Data("abc".utf8).write(to: URL(fileURLWithPath: target))
+        let linked = output + "/linked-fixture.bin"
+        try FileManager.default.createSymbolicLink(atPath: linked, withDestinationPath: target)
+        let preparation = CapturePreparation(source: URL(fileURLWithPath: linked), reference: nil,
+            configuration: TapConfiguration(micOnly: false, inputDeviceUID: "missing-input"),
+            diarize: false, language: "es",
+            route: Self.qaCaptureRoute(inputAvailable: false, metadataErrors: ["input_read_failed"]))
+        XCTAssertNil(preparation.corpus, "a symlink is not admitted as a stable fixture identity")
+        XCTAssertNil(preparation.reference)
+        XCTAssertThrowsError(try preparation.requireReproducibleInput()) { error in
+            let denied = error as? CapturePreparation.Blocked
+            XCTAssertTrue(denied?.reasons.contains(.corpusUnavailable) == true)
+            XCTAssertTrue(denied?.reasons.contains(.referenceUnavailable) == true)
+            XCTAssertTrue(denied?.reasons.contains(.inputUnavailable) == true)
+            XCTAssertTrue(denied?.reasons.contains(.requestedInputFallback) == true)
+            XCTAssertTrue(denied?.reasons.contains(.metadataIncomplete) == true)
+        }
+    }
+
+    func testUncontrolledQAPreparationCannotStartAnyRecordingOrigin() async throws {
+        for micOnly in [false, true] {
+            let output = TestSupport.makeTempDir(self, "qa-capture-admission-\(micOnly)")
+            let source = URL(fileURLWithPath: output + "/public-fixture.bin")
+            try Data("abc".utf8).write(to: source)
+            // A virtual UID and no currently active outputs do not bind either
+            // input to the corpus or exclude a future global-tap participant.
+            let route = Self.qaCaptureRoute(processes: [])
+            let preparation = CapturePreparation(source: source, reference: source,
+                configuration: TapConfiguration(micOnly: micOnly, inputDeviceUID: "virtual-fixture"),
+                diarize: false, language: "es", route: route)
+            let backend = FakeRecordingBackend()
+            let base = backend.driver
+            var permissionChecks = 0
+            let driver = AppStateRecordingDriver(
+                checkPermission: { permissionChecks += 1; return true },
+                openPrivacySettings: { XCTFail("preparation must not prompt for permissions") },
+                isRecording: base.isRecording, currentSampleRate: base.currentSampleRate,
+                start: base.start, stop: base.stop)
+            let calls = TranscriptionCallCounter()
+            let paths = AppPaths(environment: ["MEETCAPTURE_TEST_OUTPUT_DIR": output], home: output)
+            let store = MeetingStore(path: paths.databasePath)
+            let state = AppState(paths: paths, store: store, recordingDriver: driver,
+                transcriptionRunner: { _, _ in
+                    calls.increment()
+                    throw NSError(domain: "UnexpectedQARecognition", code: 1)
+                }, recordingAdmission: { try preparation.requireReproducibleInput() })
+            for origin in [RecordingOrigin.manual, .calendar, .liveCall] {
+                state.startRecording(origin: origin)
+                await Task.yield()
+                XCTAssertEqual(state.phase, .idle)
+                XCTAssertFalse(state.isStartingRecording)
+                XCTAssertFalse(state.needsGracefulShutdown)
+                XCTAssertTrue(state.errorMessage?.contains(micOnly
+                    ? "microphone_only_not_dual_capture" : "unbounded_global_tap") == true)
+            }
+            XCTAssertEqual(permissionChecks, 0)
+            XCTAssertEqual(backend.startCallCount, 0)
+            XCTAssertNil(backend.outputPath)
+            XCTAssertEqual(calls.value, 0)
+            XCTAssertEqual(store.count(), 0)
+        }
+    }
+
+    private static func qaCaptureRoute(inputAvailable: Bool = true, metadataErrors: [String] = [],
+        processes: [CapturePreparation.ProcessMember] = [
+            .init(audioObjectID: 42, pid: 444, isRunningOutput: true, outputDeviceIDs: [7])
+        ]) -> CapturePreparation.Route {
+        let format = CapturePreparation.StreamFormat(id: 8, sampleRate: 48_000, formatID: 0x6c70636d,
+            formatFlags: 1, bytesPerFrame: 8, framesPerPacket: 1, bytesPerPacket: 8,
+            channels: 2, bitsPerChannel: 32)
+        let device = CapturePreparation.Device(id: 7, uid: "virtual-fixture", name: "QA virtual fixture",
+            modelUID: "qa-loopback", transportType: 0x76697274, nominalSampleRate: 48_000,
+            inputStreams: [format], outputStreams: [format],
+            inputGain: [.init(element: 0, state: "observed", scalar: 0.375)],
+            outputGain: [.init(element: 0, state: "not_exposed", scalar: nil)])
+        return .init(requestedInputUID: "virtual-fixture", defaultInputUID: "virtual-fixture",
+            selectedInput: inputAvailable ? device : nil, defaultOutput: device,
+            observedProcesses: processes, readErrors: metadataErrors)
+    }
+
     func testRecordingNotesAreSavedForMatchingHandoff() async throws {
         let outputDir = TestSupport.makeTempDir(self, "app-notes")
         let paths = AppPaths(environment: ["MEETCAPTURE_TEST_OUTPUT_DIR": outputDir], home: outputDir)

@@ -7,7 +7,7 @@
 #
 # Usage:
 #   qa/capture-selftest.sh --app /tmp/mc-stage/MeetCapture.app \
-#     --mode import|capture --input /tmp/known.wav \
+#     --mode import|capture|prepare-capture --input /tmp/known.wav \
 #     --reference /tmp/known.txt --output /tmp/meetcapture-real.run
 #
 # Environment equivalents: MEETCAPTURE_APP, MEETCAPTURE_REAL_CHECK,
@@ -25,7 +25,7 @@ die() {
 
 usage() {
     printf '%s\n' \
-        'Usage: capture-selftest.sh --app PATH --mode import|capture --input WAV' \
+        'Usage: capture-selftest.sh --app PATH --mode import|capture|prepare-capture --input WAV' \
         '  --reference TXT --output DIR [--max-wer FRACTION] [--required-words WORDS]'
 }
 
@@ -54,7 +54,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 [ -n "$APP_PATH" ] || die 'falta --app: no se usa una instalación normal'
-[ "$MODE" = import ] || [ "$MODE" = capture ] || die 'falta --mode import|capture'
+[ "$MODE" = import ] || [ "$MODE" = capture ] || [ "$MODE" = prepare-capture ] || die 'falta --mode import|capture|prepare-capture'
 [ -n "$INPUT" ] || die 'falta --input WAV'
 [ -n "$REFERENCE" ] || die 'falta --reference TXT'
 [ -n "$OUTPUT" ] || die 'falta --output DIR'
@@ -134,6 +134,7 @@ env \
     MEETCAPTURE_TEST_OUTPUT_DIR="$OUTPUT" \
     MEETCAPTURE_CHECK_INPUT="$INPUT" \
     MEETCAPTURE_CHECK_REPORT="$REPORT" \
+    MEETCAPTURE_REFERENCE="$REFERENCE" \
     "$APP_BIN" >"$LOG" 2>&1
 APP_RC=$?
 set -e
@@ -143,11 +144,11 @@ STATUS=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("st
 if [ "$APP_RC" -ne 0 ]; then
     if [ "$APP_RC" -eq 77 ] || [ "$STATUS" = blocked ]; then
         printf 'BLOCKED: real harness exit=%s\n' "$APP_RC"
-        tail -n 6 "$LOG" >&2
+        printf 'See private report/preparation receipt; no capture text is printed.\n' >&2
         exit 77
     fi
     printf 'FAILED: real harness exit=%s\n' "$APP_RC" >&2
-    tail -n 6 "$LOG" >&2
+    printf 'See private report; application output is not copied to logs.\n' >&2
     exit 1
 fi
 [ "$STATUS" != blocked ] || { printf 'BLOCKED: report status=blocked\n' >&2; exit 77; }

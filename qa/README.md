@@ -9,7 +9,7 @@ whole system healthy.
 | --- | --- | --- | --- |
 | `installer-test.sh` | Disposable installer fixtures for clean install, replacement, rollback and refusal to replace a running bundle. | macOS shell tools and a temporary directory | Real capture, ASR or the user's production installation. |
 | `app-smoke-test.sh` | The selected bundle's files, signature, version, bundled resources, isolated render, and process liveness. Its guarded `/tmp` LaunchServices probe checks status-button, popover click and Finder reopen. With `MEETCAPTURE_REQUIRE_HOSTED_ICON=1`, it additionally requires a new on-screen Control Center window aligned with the status button on macOS 26. | a built `.app` and a graphical macOS session; for strict mode, close any other MeetCapture instance first | Visibility on every display or Space, operational startup, permissions, capture, transcription, SQLite, `.pending`, or summary delivery. The probe constructs `AppState` but skips services. |
-| `capture-selftest.sh` | The QA wrapper for the real `import` and `capture` contract below. | a built `.app`, disposable output directory, WAV and platform prerequisites | A WER result unless the wrapper's reference check also passes; UI and diarization are separate checks. |
+| `capture-selftest.sh` | The QA wrapper for real `import`/`capture` and read-only `prepare-capture` provenance below. | a built `.app`, disposable output directory, WAV/reference and platform prerequisites; capture also requires proven fixture-only routing | Preparation is not capture/ASR evidence. A WER result requires the wrapper's unchanged reference checks; UI and diarization remain separate gates. |
 | `gen_test_corpus.sh` | A disposable two-speaker WAV and reference text generated with macOS voices. | macOS voices and `afconvert` | A real app recording or a production microphone path. |
 | `visual-test.sh` | A screenshot of the normal popover, or a headless synthetic render with `--headless`. | a built `.app`; Accessibility for interactive mode | Functional state transitions. The headless path uses `PopoverSnapshot` and synthetic state. |
 
@@ -61,15 +61,17 @@ The real app harness is selected before normal startup and exits after the
 requested check. Its environment contract is:
 
 ```text
-MEETCAPTURE_REAL_CHECK=import|capture|ui
+MEETCAPTURE_REAL_CHECK=import|capture|prepare-capture|ui
 MEETCAPTURE_TEST_OUTPUT_DIR=<new temporary directory; required>
 MEETCAPTURE_CHECK_INPUT=<known WAV; required>
 MEETCAPTURE_CHECK_REPORT=<JSON path inside TEST_OUTPUT_DIR; required>
+MEETCAPTURE_REFERENCE=<original reference TXT; private preparation identity>
+MEETCAPTURE_CHECK_INPUT_DEVICE_UID=<optional requested UID; does not change host routing>
 MEETCAPTURE_CHECK_MIC_ONLY=1  # optional capture mode; default false
 MEETCAPTURE_CHECK_DIARIZE=1   # optional diarization (macOS 15+); default false
 ```
 
-The wrapper CLI for `import` and `capture` is:
+The wrapper CLI accepts `import`, `capture` and `prepare-capture`:
 
 ```bash
 MEETCAPTURE_CHECK_REPORT=/tmp/meetcapture-real.run/check-report.json \
@@ -88,7 +90,13 @@ variables and acceptance behavior are fixed:
 
 - `import` performs two imports and one re-transcription through real
   AppState, SQLite, and `.pending` publication. The input is the known WAV.
-- `capture` runs AppState with AV/Core Audio, plays the known WAV through
+- `prepare-capture` makes a private, exclusive `capture-preparation.json`
+  before any graph, permission prompt, SQLite or ASR. It hashes the exact
+  corpus/reference bytes and observes device UIDs/names/transport, native
+  formats, gain availability/values, default routing and Core Audio process
+  membership/output-device IDs. This is a non-atomic observation: tap/aggregate
+  fields are **planned**, not a claim that capture has started.
+- `capture`, only after reproducibility admission, runs AppState with AV/Core Audio, plays the known WAV through
   `afplay`, records raw PCM plus its format sidecar, converts that capture to
   isolated channel WAVs, and transcribes them with Parakeet; the models must
   be downloaded already or the first run needs network. Setting
@@ -97,6 +105,11 @@ variables and acceptance behavior are fixed:
   contract remains microphone plus system audio. Diarization is off unless
   `MEETCAPTURE_CHECK_DIARIZE=1`; the report lists the `speakers` found. Missing
   microphone permission is exit `77`, not evidence from a real call.
+  The current whole-system tap admits future clients and no microphone source
+  is fixture-bound. It therefore fails closed with exit `77` before recording,
+  as does preparation. Neither an idle client list nor a virtual UID, readable
+  gain or mic-only mode is a routing proof. No override/allowlist is supported;
+  fixture-only routing remains a missing prerequisite, not a waived gate.
 - `ui` opens `PopoverContent` with real `AppState`, real engines, isolated
   history, and volatile settings. Automatic operations are disabled. CUA
   exercises the controls and a real manual import of the known WAV; the run
@@ -104,10 +117,14 @@ variables and acceptance behavior are fixed:
   manual verifier saves the UI evidence JSON at the required report path; no
   CUA driver is assumed, and the app never generates that evidence or emits
   PASS.
+  Its recording entry point shares the same admission guard, so Grabar cannot
+  bypass preparation. Import/re-transcription remain real inference operations:
+  do not click them during a non-inference staging feasibility inspection.
 - No case enters calendar detection or ordinary startup, and no persistent
   UserDefaults are used. Every generated file and database stays below
   `MEETCAPTURE_TEST_OUTPUT_DIR`.
-- The report is JSON and must be written inside the output directory.
+- Private reports/receipts are mode 0600 inside the mode-0700 output root.
+  stdout and wrapper failures expose only metadata, never recognized text.
 - For `import` and `capture`, app exit `0` means the selected pipeline
   completed, `77` means a prerequisite blocked execution, and `1` means the
   pipeline failed. The wrapper returns success only after its report and
@@ -160,6 +177,7 @@ QA_OUTPUT="$(mktemp -d /tmp/meetcapture-ui.XXXXXX)"
 env MEETCAPTURE_REAL_CHECK=ui \
   MEETCAPTURE_TEST_OUTPUT_DIR="$QA_OUTPUT" \
   MEETCAPTURE_CHECK_INPUT=/tmp/known.wav \
+  MEETCAPTURE_REFERENCE=/tmp/known.txt \
   MEETCAPTURE_CHECK_REPORT="$QA_OUTPUT/ui-evidence.json" \
   "/tmp/mc-qa/MeetCapture QA.app/Contents/MacOS/MeetCapture" &
 QA_PID=$!

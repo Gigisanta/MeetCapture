@@ -15,6 +15,13 @@ semantic versioning. The single source of the current version is
   valid newer publication is consumed, even if both snapshots still validate.
   A changed generation is preserved and rejected, not repaired or reimported
   automatically. Display transcripts are now written with mode 0600.
+- Real QA capture now records private preflight provenance (corpus/reference
+  hashes, device/gain/format/routing and observed tap clients) and fails closed
+  before recording when fixture-only inputs cannot be established. The current
+  global-tap/microphone graph is explicitly blocked; neither metadata nor an
+  idle/virtual device waives dual-capture, ASR, UI or hosted-icon requirements.
+  The isolated QA UI shares the recording guard. Report text stays in private
+  artifacts instead of stdout or wrapper error tails.
 - The acoustic bleed gate now detects speaker audio reaching the microphone
   up to 50 ms ahead of the system tap, in addition to its existing 100 ms lag
   range. This prevents remote speech from being repeated as `Yo` when the

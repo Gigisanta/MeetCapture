@@ -11,8 +11,9 @@ public enum RealPipelineCheck {
         let env = ProcessInfo.processInfo.environment
         guard let mode = env["MEETCAPTURE_REAL_CHECK"] else { return false }
         var reportURL: URL?
+        var preparationURL: URL?
         do {
-            guard ["import", "capture", "ui"].contains(mode),
+            guard ["import", "capture", "prepare-capture", "ui"].contains(mode),
                   let output = env["MEETCAPTURE_TEST_OUTPUT_DIR"],
                   let input = env["MEETCAPTURE_CHECK_INPUT"],
                   let report = env["MEETCAPTURE_CHECK_REPORT"] else {
@@ -51,10 +52,31 @@ public enum RealPipelineCheck {
             settings[Settings.Key.autoRecord.rawValue] = false
             settings[Settings.Key.diarize.rawValue] = env["MEETCAPTURE_CHECK_DIARIZE"] == "1"
             settings[Settings.Key.micOnlyMode.rawValue] = env["MEETCAPTURE_CHECK_MIC_ONLY"] == "1"
+            settings[Settings.Key.inputDeviceUID.rawValue] = env["MEETCAPTURE_CHECK_INPUT_DEVICE_UID"] ?? ""
             settings[Settings.Key.retention.rawValue] = RetentionPolicy.keep.rawValue
             UserDefaults.standard.setVolatileDomain(settings, forName: UserDefaults.argumentDomain)
+            var preparation: CapturePreparation?
+            if ["capture", "prepare-capture", "ui"].contains(mode) {
+                let configuration = TapConfiguration(micOnly: Settings.micOnlyMode,
+                                                     inputDeviceUID: Settings.inputDeviceUID)
+                let reference = env["MEETCAPTURE_REFERENCE"].map { URL(fileURLWithPath: $0) }
+                let observation = CapturePreparation(source: source, reference: reference,
+                    configuration: configuration, diarize: Settings.diarize,
+                    language: Settings.asrLanguage, route: CaptureRouteReader.read(configuration: configuration))
+                let receipt = root.appendingPathComponent("capture-preparation.json")
+                try observation.write(to: receipt)
+                preparationURL = receipt
+                preparation = observation
+                // Preparation is not capture acceptance. The current global
+                // tap/default mic cannot prove fixture-only input; no permission
+                // prompt, AppState/SQLite, audio graph or ASR starts on denial.
+                if mode != "ui" { try observation.requireReproducibleInput() }
+            }
             let paths = AppPaths(environment: ["MEETCAPTURE_TEST_OUTPUT_DIR": root.path], home: root.path)
-            let app = AppState(paths: paths, store: MeetingStore(path: paths.databasePath), errorDismissalDelay: 300)
+            let app = AppState(paths: paths, store: MeetingStore(path: paths.databasePath),
+                recordingAdmission: preparation.map { observation in
+                    { try observation.requireReproducibleInput() }
+                }, errorDismissalDelay: 300)
             app.hasAudioPermission = app.audioCapture.checkPermission()
             let application = NSApplication.shared
             application.setActivationPolicy(.accessory)
@@ -92,8 +114,17 @@ public enum RealPipelineCheck {
             }
             application.run()
         } catch {
-            finish(["status": "failed", "mode": mode, "error": error.localizedDescription],
-                   to: reportURL, code: 1)
+            let denied = error as? CapturePreparation.Blocked
+            var result: [String: Any] = [
+                "status": denied == nil ? "failed" : "blocked", "mode": mode,
+                "error": error.localizedDescription]
+            if let denied {
+                result["blockedReasons"] = denied.reasons.map(\.rawValue)
+                result["captureStarted"] = false
+                result["transcriptionStarted"] = false
+            }
+            if let preparationURL { result["capturePreparationPath"] = preparationURL.path }
+            finish(result, to: reportURL, code: denied == nil ? 1 : 77)
         }
         return true
     }
@@ -243,10 +274,21 @@ public enum RealPipelineCheck {
     private static func finish(_ report: [String: Any], to url: URL?, code: Int32) -> Never {
         do {
             let data = try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
-            if let url { try data.write(to: url, options: .atomic) }
-            FileHandle.standardOutput.write(data + Data("\n".utf8))
+            if let url {
+                try data.write(to: url, options: .atomic)
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            }
+            // The private report may contain recognized text. Console/log
+            // consumers receive metadata only, including on failed gates.
+            var summary: [String: Any] = ["exitCode": code]
+            for key in ["status", "mode", "historyCount", "blockedReasons",
+                        "captureStarted", "transcriptionStarted"] {
+                if let value = report[key] { summary[key] = value }
+            }
+            let publicData = try JSONSerialization.data(withJSONObject: summary, options: [.sortedKeys])
+            FileHandle.standardOutput.write(publicData + Data("\n".utf8))
         } catch {
-            FileHandle.standardError.write(Data("report write failed: \(error)\n".utf8))
+            FileHandle.standardError.write(Data("private report write failed\n".utf8))
             exit(1)
         }
         exit(code)

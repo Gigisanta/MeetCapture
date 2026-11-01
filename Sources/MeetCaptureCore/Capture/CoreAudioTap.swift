@@ -1,6 +1,6 @@
 // CoreAudioTap.swift
-// One capture graph: process tap (targeted by PID, global fallback, or
-// none in mic-only mode) + private aggregate device with the mic as
+// One capture graph: the whole-system process tap (or none in mic-only mode)
+// + private aggregate device with the mic as
 // sub-device + IOProc. Built and torn down on the caller's queue.
 
 import AudioToolbox
@@ -33,6 +33,8 @@ enum CaptureError: LocalizedError {
 struct TapConfiguration: Equatable, Sendable {
     var micOnly: Bool
     var inputDeviceUID: String?
+
+    var strategyName: String { micOnly ? "mic-only" : "global" }
 }
 
 final class CoreAudioTap {
@@ -50,7 +52,7 @@ final class CoreAudioTap {
 
     init(configuration: TapConfiguration) throws {
         var desc: CATapDescription?
-        var strategy = "mic-only"
+        let strategy = configuration.strategyName
         if !configuration.micOnly {
             // Always the whole system mix. A tap targeted at the processes
             // using the mic misses calls whose audio plays elsewhere (Safari
@@ -63,7 +65,6 @@ final class CoreAudioTap {
             guard err == noErr else { throw CaptureError.tapCreationFailed(err) }
             tapID = tap
             desc = global
-            strategy = "global"
         }
         self.strategy = strategy
         tapInfo = desc.map { "\(strategy) tap, uuid=\($0.uuid)" } ?? strategy

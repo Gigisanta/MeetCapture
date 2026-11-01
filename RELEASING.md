@@ -83,10 +83,12 @@ evidence is accepted; no merge, tag, release or installation is implied.
    known WAV. The fixed app contract is:
 
    ```text
-   MEETCAPTURE_REAL_CHECK=import|capture|ui
+   MEETCAPTURE_REAL_CHECK=import|capture|prepare-capture|ui
    MEETCAPTURE_TEST_OUTPUT_DIR=<new empty temporary directory>
    MEETCAPTURE_CHECK_INPUT=<WAV>
    MEETCAPTURE_CHECK_REPORT=<JSON inside TEST_OUTPUT_DIR>
+   MEETCAPTURE_REFERENCE=<original reference TXT; capture preparation identity>
+   MEETCAPTURE_CHECK_INPUT_DEVICE_UID=<optional requested input UID; no host device changes>
    MEETCAPTURE_CHECK_MIC_ONLY=1  # optional capture branch; default false
    MEETCAPTURE_CHECK_DIARIZE=1   # optional macOS 15+ branch; default false
    ```
@@ -118,7 +120,37 @@ evidence is accepted; no merge, tag, release or installation is implied.
      --output /tmp/meetcapture-real.run
    ```
 
-   Repeat with `--mode capture` when the microphone prerequisite is available.
+   Before capture, use the same wrapper with `--mode prepare-capture` and a
+   fresh output directory. This is a non-inference observation, not a passing
+   capture gate. It privately publishes `capture-preparation.json` with exact
+   corpus/reference byte hashes, requested/default/selected input UID, device
+   identity/transport/rate, native stream formats, exposed per-channel gains,
+   default output routing and observed Core Audio process/output-device IDs.
+   Missing/unreadable controls are not recorded as unity gain or silent clients.
+   This preflight never creates a tap, requests permission, opens SQLite or
+   starts capture/ASR. The format and aggregate membership are explicitly
+   **planned**, not evidence of an already-created native graph.
+
+   The current graph uses an unbounded global tap and a microphone whose source
+   is not bound to the fixture. An idle process list, virtual device name/UID
+   or microphone-only mode does not prove reproducibility. Consequently both
+   `prepare-capture` and `capture` currently exit `77` before recording, with
+   explicit blockers and a private report. There is no environment bypass.
+   Fixture-bound input routing is a missing prerequisite; this observation does
+   not satisfy or replace the real dual-capture, WER/required-word, native UI
+   or strict hosted-icon gates. Do not capture another ambient sample to explain
+   incomparable historical tracks.
+
+   Acceptance for the preparation/control itself (collect fresh evidence for
+   the candidate SHA; these statements are not a claimed verification pass):
+   - Given a fresh temporary root and public WAV/reference, preparation writes
+     a mode-0600 receipt and exits blocked without PCM, handoffs or a database.
+   - Given an empty observed mix or a virtual UID, QA capture remains blocked;
+     missing reference/device/format/gain metadata is explicit, never a default.
+   - Given a denied recording start in the real QA UI, manual/calendar/call
+     origins cannot prompt, start the recorder or schedule recognition.
+   - Given an existing preparation receipt, a second publication cannot replace
+     it. Console output contains status/counts/reason codes, never report text.
 
    For `ui`, build the opt-in staging-only QA identity and launch its exact
    executable with a fresh output directory:
@@ -131,6 +163,7 @@ evidence is accepted; no merge, tag, release or installation is implied.
    env MEETCAPTURE_REAL_CHECK=ui \
      MEETCAPTURE_TEST_OUTPUT_DIR="$QA_OUTPUT" \
      MEETCAPTURE_CHECK_INPUT=/tmp/known.wav \
+     MEETCAPTURE_REFERENCE=/tmp/known.txt \
      MEETCAPTURE_CHECK_REPORT="$QA_OUTPUT/ui-evidence.json" \
      "/tmp/mc-qa/MeetCapture QA.app/Contents/MacOS/MeetCapture" &
    QA_PID=$!
