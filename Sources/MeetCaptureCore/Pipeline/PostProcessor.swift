@@ -1,6 +1,6 @@
 // PostProcessor.swift
 // Everything that happens after the engine returns segments, off the main
-// actor: .txt → SQLite → processed marker → .pending v2 → retention.
+// actor: generation snapshot → display .txt → SQLite → marker → .pending → retention.
 
 import Foundation
 
@@ -38,6 +38,7 @@ enum PostProcessError: LocalizedError {
     case invalidDuration
     case markerWriteFailed(String)
     case storeWriteFailed
+    case handoffTranscriptChanged
     case retentionFailed(String)
 
     var errorDescription: String? {
@@ -50,6 +51,8 @@ enum PostProcessError: LocalizedError {
             return "No se pudo guardar el marker de procesamiento: \(reason)"
         case .storeWriteFailed:
             return "No se pudo guardar la reunión en el historial; se conserva el audio para reintentar"
+        case .handoffTranscriptChanged:
+            return "La copia de entrega de esta transcripción fue modificada; se conserva el audio y no se republica"
         case .retentionFailed(let reason):
             return "La transcripción quedó guardada, pero no se pudo aplicar la retención: \(reason)"
         }
@@ -77,9 +80,21 @@ actor PostProcessor {
         session.startedAt = endedAt.addingTimeInterval(-duration)
         let speakerCount = TranscriptFormatter.speakerCount(segments)
 
+        let transcriptData = Data(text.utf8)
+        let checksum = PendingContractV2.sha256Hex(transcriptData)
+        // A handoff must never reference the editable display file. A retry can
+        // fail after replacing that file, and a reader may still hold the prior
+        // handoff even after a new one is published.
+        let handoffURL = URL(fileURLWithPath: input.meetingsDir)
+            .appendingPathComponent("handoff-transcripts", isDirectory: true)
+            .appendingPathComponent(session.id, isDirectory: true)
+            .appendingPathComponent(checksum + ".txt")
+        try publishTranscript(transcriptData, to: handoffURL)
+
         let transcriptURL = URL(fileURLWithPath: input.transcriptPath)
         try AppPaths.ensurePrivateDirectory(transcriptURL.deletingLastPathComponent().path)
-        try text.write(to: URL(fileURLWithPath: input.transcriptPath), atomically: true, encoding: .utf8)
+        try transcriptData.write(to: transcriptURL, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: input.transcriptPath)
 
         let record = MeetingRecord(
             id: input.session.id, title: input.session.displayTitle,
@@ -104,8 +119,8 @@ actor PostProcessor {
         // It must be last among local durable writes so a failed store/marker
         // can never expose a handoff that invites external cleanup.
         let contract = PendingContractV2(
-            session: session, endedAt: endedAt, transcriptPath: input.transcriptPath,
-            transcriptText: text, audioPath: input.partial ? nil : input.durableAudioPath, engine: input.engine,
+            session: session, endedAt: endedAt, transcriptPath: handoffURL.path,
+            checksum: checksum, audioPath: input.partial ? nil : input.durableAudioPath, engine: input.engine,
             model: input.model, language: input.language, segments: segments)
         let pendingPath = input.session.pendingPath(in: input.meetingsDir)
         try contract.write(to: pendingPath)
@@ -116,5 +131,36 @@ actor PostProcessor {
 
         return PostProcessResult(transcriptText: text, speakerCount: contract.speakerCount,
                                  record: record, pendingPath: pendingPath)
+    }
+
+    /// Publish complete private bytes without replacing an existing generation.
+    /// A corrupt generation is evidence, not permission to silently repair it.
+    private func publishTranscript(_ data: Data, to destination: URL) throws {
+        let fm = FileManager.default
+        try AppPaths.ensurePrivateDirectory(destination.deletingLastPathComponent().path)
+        if fm.fileExists(atPath: destination.path) {
+            try validateTranscript(data, at: destination)
+            return
+        }
+        let temporary = destination.appendingPathExtension("tmp-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: temporary) }
+        try data.write(to: temporary, options: .atomic)
+        try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: temporary.path)
+        do {
+            // link is exclusive and atomic: an existing snapshot is never
+            // overwritten, even if another producer publishes the same bytes.
+            try fm.linkItem(at: temporary, to: destination)
+        } catch {
+            guard fm.fileExists(atPath: destination.path) else { throw error }
+            try validateTranscript(data, at: destination)
+        }
+    }
+
+    private func validateTranscript(_ data: Data, at destination: URL) throws {
+        let attributes = try FileManager.default.attributesOfItem(atPath: destination.path)
+        guard attributes[.type] as? FileAttributeType == .typeRegular,
+              try Data(contentsOf: destination) == data else {
+            throw PostProcessError.handoffTranscriptChanged
+        }
     }
 }

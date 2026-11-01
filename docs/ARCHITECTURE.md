@@ -18,7 +18,7 @@ Package.swift                      SwiftPM manifest (macOS 14.4, Swift 6 toolcha
 Sources/MeetCapture/               executable shim: @main + AppDelegate
 Sources/MeetCaptureCore/           everything else, one directory per layer
   App/        AppState, RecordingCoordinator, MeetingDetectionPolicy, Notifier
-  Capture/    CoreAudioTap, AudioRingBuffer, AudioResampler, PCMFileWriter, AudioFormatSidecar, ChannelLevels, InputDevices, AudioCaptureService
+  Capture/    CoreAudioTap, CapturePreparation, AudioRingBuffer, AudioResampler, PCMFileWriter, AudioFormatSidecar, ChannelLevels, InputDevices, AudioCaptureService
   Detection/  CallDetector, CallActivityDebouncer, CalendarService, MeetingFilter
   ASR/        TranscriptionWorker, TranscriptionJob, RecognitionIdentity, ChannelReader, PCMToWAV, BleedGate, ChunkedTranscription, ParakeetEngine, TurnMerger, Aliases, Segment
   Pipeline/   MeetingSession, PendingContractV2, PostProcessor, Retention, AudioImporter, RecordingRecovery, MeetingNotesStore
@@ -50,8 +50,8 @@ and `Settings` only know `Support`. Nothing below `App` touches SwiftUI.
    (`idle`, `approaching`, `recording`, `transcribing`, `done`) and a
    `RecordingOrigin` (`manual`, `liveCall`, `calendar`) that decides when a
    recording auto-stops.
-2. **Capture.** `CoreAudioTap` creates a process tap on the call app (or a
-   global tap as fallback) plus an aggregate device with the chosen input.
+2. **Capture.** `CoreAudioTap` creates a whole-system process tap (none in
+   mic-only mode) plus an aggregate device with the chosen input.
    The IOProc copies both tracks into a preallocated `AudioRingBuffer`
    (64 slots of 8192 frames, no allocation on the real-time thread). One
    consumer thread resamples to 16 kHz (`AudioResampler` wraps
@@ -64,6 +64,15 @@ and `Settings` only know `Support`. Nothing below `App` touches SwiftUI.
    microphone-only mode leaves the left silent and records the microphone on the right.
    `AudioFormatSidecar` writes `<file>.pcm.format.json` with schema
    `meetcapture.audio.v1` so no consumer guesses the byte layout.
+   The opt-in real QA harness first uses `CapturePreparation` for read-only,
+   private provenance. Device identities/gains/native formats, default routing,
+   observed process clients and exact corpus/reference hashes are observations,
+   not fixture-source bindings. The current global mix and microphone cannot
+   satisfy reproducibility admission and are blocked before a graph or ASR;
+   virtual names and an idle mix do not change this. Planned tap/aggregate/PCM
+   fields are distinguished from actual capture evidence. The isolated QA UI's
+   recording admission runs before permissions/session creation for every
+   recording origin. Normal startup/recording has no QA admission closure.
 3. **Transcribe.** There is no live transcription. After capture stops,
    `TranscriptionWorkerClient` launches this app's executable in worker mode
    and runs `TranscriptionJob` there, never in the menu-bar process.
@@ -121,9 +130,13 @@ and `Settings` only know `Support`. Nothing below `App` touches SwiftUI.
    never warms models, the disk cache is retained, and no idle unload timer
    is needed. Hardware placement and GPU contention are not instrumented.
 4. **Hand off.** `PostProcessor` is an actor: it rejects empty transcripts,
-   writes the `.txt` transcript, commits `MeetingStore`, writes the
-   `.processed.json` marker, and only then publishes the `.pending`
-   contract. It applies `RetentionPolicy` after those writes succeed.
+   publishes a private, content-addressed TXT generation without overwriting
+   prior generations, writes the display `.txt`, commits `MeetingStore`, writes
+   the `.processed.json` marker, and only then publishes `.pending` pointing at
+   that generation. Display edits or an interrupted replacement cannot invalidate
+   a previously published or claimed handoff. `RetentionPolicy` runs only after
+   those writes succeed; a corrupt existing generation fails closed, preserving
+   it and the audio for explicit reconciliation.
    `AppState` receives the `PostProcessResult` and updates published state
    on the main actor.
 5. **Summarize.** The canonical
@@ -139,8 +152,12 @@ and `Settings` only know `Support`. Nothing below `App` touches SwiftUI.
    `.pending` whose checksum differs from its `.done` is a revision (the app
    filled the gaps) and replaces the summary. The acknowledgement hard-links the
    handoff first and checks that copy, so a revision published meanwhile stays
-   queued; a stale `.pending.retry` that a revision superseded moves to
-   `.pending.superseded`.
+   queued. After a canonical `.pending` passes every consumption check, the
+   dispatcher retires its older `.pending.retry` generations before summary,
+   acknowledgement or its own retry—even if the older snapshots remain valid
+   or are still in backoff. A rejected publication never retires a valid retry.
+   This cutoff at consumption also covers publication between directory scans:
+   an old retry cannot roll back an acknowledged summary.
 
 ## Meeting identity
 
@@ -158,8 +175,9 @@ to that id; existing recordings and history keep their original paths.
 | `~/meetings/transcripts/recording-meet-<epoch>-<uuid>.pcm` + `.pcm.format.json` | Capture | ASR, retention | Int16 stereo 16 kHz; sidecar schema `meetcapture.audio.v1` (`sample_rate`, `sample_format`, `channels`, `layout`, `tap_strategy`, `tap_info`). |
 | `<audio>.work/` (`remote/`, `mic/`, `diarization.json`, `gaps.json`) | ASR | ASR | Per-channel manifest version 4 binds audio/reference SHA-256, actual model artifacts, SDK and effective recognition configuration. Stale/corrupt derived checkpoints are rebuilt without deleting source audio; diarization is content-bound too. `gaps.json` remains while the handed-off transcript has gaps and is removed after a complete transcript is handed off. Older manifests are invalidated, not compatibility-shimmed. |
 | `<audio>.recovery.json` | AppState | AppState | `attempts`, `last_error`, `updated_at` and `next_attempt_at` (ISO 8601 with milliseconds; absent once the automatic attempts are used up). Automatic recovery runs a capture only after `next_attempt_at`, at most three attempts within 48 h of the capture. Removed when a transcript without gaps is handed off. |
-| `~/meetings/transcripts/[recording-]meet-<epoch>-<uuid>.txt` | PostProcessor | dispatcher, popover | Live recordings use the `recording-` prefix; retranscriptions use the job id directly. Imports keep a unique dated basename in `~/meetings/imports/`. One `[speaker]: text` line per turn, for example `[Yo]: …` or `[Participante 2]: …`. |
-| `~/meetings/meet-<epoch>-<uuid>.pending` | PostProcessor | dispatcher | Version 2, 14 sorted keys: `audioPath` (null if deleted or if the transcript has gaps), `checksum` (SHA-256 of the transcript text), `durationSec`, `endedAt`, `engine`, `language`, `meetingId`, `model`, `segments` (`start`, `end`, `text`, optional `speaker`), `speakerCount`, `startedAt`, `title`, `transcriptPath`, `version`. Written to a temp file and renamed. |
+| `~/meetings/transcripts/[recording-]meet-<epoch>-<uuid>.txt` | PostProcessor | popover | Editable display copy, mode 0600; not a new handoff's source. Live recordings use the `recording-` prefix; retranscriptions use the job id directly. Imports keep a unique dated basename in `~/meetings/imports/`. One `[speaker]: text` line per turn. |
+| `~/meetings/handoff-transcripts/<meetingId>/<sha256>.txt` | PostProcessor | handoff consumer | Exact UTF-8 bytes of one producer generation, mode 0600 inside private directories. Published complete with an exclusive hard link from a private temporary file, never linked to the editable display copy. Matching retries reuse it; changed bytes fail closed. Prior generations are retained because a consumer may still hold an older handoff; this change does not prune or migrate history. |
+| `~/meetings/meet-<epoch>-<uuid>.pending` | PostProcessor | dispatcher | Version 2: `audioPath` (null if deleted or if the transcript has gaps), `checksum` (SHA-256 of the exact TXT bytes at `transcriptPath`), `durationSec`, `endedAt`, `engine`, `language`, `meetingId`, `model`, `segments` (`start`, `end`, `text`, optional `speaker`), `speakerCount`, `speakers`, `startedAt`, `title`, `transcriptPath`, `version`. Written to a temp file and renamed. Existing handoffs are not rewritten or reimported. |
 | `<transcript basename>.processed.json` | PostProcessor | app | Schema `meetcapture.processed.v1`: `processed_at`, `transcript_path`, `meeting_title`, `retention`. Makes post-processing idempotent. |
 | `~/meetings/meet-<epoch>-<uuid>.done`, `.summary.json`, `.summary.html` | dispatcher | popover | Acknowledged handoff and the summary. |
 | `~/meetings/meetcapture.db` | MeetingStore | popover | `meetings` table plus `meetings_fts` (FTS5, external content, triggers). `PRAGMA user_version = 2`. Searches use `MATCH` with a prefix on the last token, `LIMIT 50`; `LIKE` is the fallback without FTS5. |

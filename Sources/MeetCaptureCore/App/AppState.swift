@@ -100,6 +100,7 @@ final class AppState: ObservableObject {
     private let postProcessor: PostProcessor
     private let recordingDriver: AppStateRecordingDriver
     private let transcriptionRunner: AppStateTranscriptionRunner
+    private let recordingAdmission: (() throws -> Void)?
     private var session: MeetingSession?
     private var recordingStartTask: Task<Void, Never>?
     private var recordingStopTask: Task<Void, Never>?
@@ -122,6 +123,7 @@ final class AppState: ObservableObject {
     init(paths: AppPaths = .current, store: MeetingStore = .shared,
          recordingDriver: AppStateRecordingDriver? = nil,
          transcriptionRunner: AppStateTranscriptionRunner? = nil,
+         recordingAdmission: (() throws -> Void)? = nil,
          errorDismissalDelay: TimeInterval = 10,
          recoveryRetryDelays: [TimeInterval] = RecordingRecovery.retryDelays) {
         self.paths = paths
@@ -136,6 +138,7 @@ final class AppState: ObservableObject {
             try await TranscriptionWorkerClient.shared.run(job, progress: progress)
         }
         self.errorDismissalDelay = max(0, errorDismissalDelay)
+        self.recordingAdmission = recordingAdmission
         self.recoveryRetryDelays = recoveryRetryDelays
         bind()
     }
@@ -214,6 +217,15 @@ final class AppState: ObservableObject {
         guard phase != .recording, phase != .transcribing,
               recordingStartTask == nil, recordingStopTask == nil else { return }
         errorMessage = nil
+        // The isolated QA UI shares this entry point with manual/calendar/call
+        // starts. Reject an unproven route before permissions, a session, PCM
+        // creation, or a transcription task can be scheduled.
+        do {
+            try recordingAdmission?()
+        } catch {
+            errorMessage = error.localizedDescription
+            return
+        }
         hasAudioPermission = recordingDriver.checkPermission()
         guard hasAudioPermission else {
             errorMessage = Strings.errorNoMicPermission
